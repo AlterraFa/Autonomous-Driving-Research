@@ -9,9 +9,9 @@ def colorized_by_z(xyz: np.ndarray) -> np.ndarray:
     return plt.get_cmap('viridis')(zNorm)[:, :3]
 
 def update(vis: o3d.visualization.Visualizer, 
-           pcd: o3d.geometry.PointCloud,
+           pcd_vis: o3d.geometry.PointCloud,
            delay: int):
-    vis.update_geometry(pcd)
+    vis.update_geometry(pcd_vis)
     vis.poll_events()
     vis.update_renderer()
     time.sleep(delay)
@@ -48,8 +48,8 @@ class LIDARVisualizer:
         init_cross = np.r_[vertical_line, horizontal_line]
 
 
-        self.pcd = o3d.geometry.PointCloud()
-        self.pcd.points = o3d.utility.Vector3dVector(init_cross)
+        self.pcd_vis = o3d.geometry.PointCloud()
+        self.pcd_vis.points = o3d.utility.Vector3dVector(init_cross)
 
         self.vis = o3d.visualization.Visualizer()
         self.vis.create_window(
@@ -58,7 +58,7 @@ class LIDARVisualizer:
             left = 50, top = 50
         )
         
-        self.vis.add_geometry(self.pcd)
+        self.vis.add_geometry(self.pcd_vis)
         self.vis.get_render_option().background_color = np.asarray([0.05, 0.05, 0.05])
         self.vis.get_render_option().point_size = 1
         self.vis.get_render_option().show_coordinate_frame = True
@@ -71,14 +71,14 @@ class LIDARVisualizer:
         ])
         
         
-    def display(self, pcd: np.ndarray, intensity: np.ndarray = None, delay: float = 0):
+    def display(self, pcd_vis: np.ndarray, intensity: np.ndarray = None, delay: float = 0):
         
-        self.pcd.points = o3d.utility.Vector3dVector(pcd)
+        self.pcd_vis.points = o3d.utility.Vector3dVector(pcd_vis)
         if intensity is not None and len(intensity) != 0:
-            self.pcd.colors = o3d.utility.Vector3dVector(self.intensity_to_heatmap(intensity))
-        self.pcd.transform(self.flip_y)
+            self.pcd_vis.colors = o3d.utility.Vector3dVector(self.intensity_to_heatmap(intensity))
+        self.pcd_vis.transform(self.flip_y)
         
-        self.vis.update_geometry(self.pcd)
+        self.vis.update_geometry(self.pcd_vis)
         self.vis.poll_events()
         self.vis.update_renderer()
         time.sleep(delay)

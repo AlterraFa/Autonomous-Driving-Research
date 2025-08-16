@@ -11,6 +11,7 @@ from utils.spawner import Spawn
 from utils.sensor_spawner import (
     SemanticSegmentation, 
     RGB,
+    LidarRaycast,
     CarlaLabel as Clabel
 )
 
@@ -24,13 +25,6 @@ tm     = client.get_trafficmanager(tm_port)
 settings = world.get_settings()
 blueprints = world.get_blueprint_library()
 spawn_pts  = world.get_map().get_spawn_points()
-
-
-def get_frame(imageQueue: queue.Queue, targetFrame: int):
-    while True:
-        img = imageQueue.get()
-        if img.frame == targetFrame:
-            return img
 
 
 if __name__ == "__main__":
@@ -52,24 +46,37 @@ if __name__ == "__main__":
     
     image_queues = []; sensors = []
 
-    semantic_sensor = SemanticSegmentation(blueprints, world)    
+    semantic_sensor = SemanticSegmentation(world)    
     semantic_sensor.set_attribute(name = "image_size_x", value = 800)
     semantic_sensor.set_attribute(name = "image_size_y", value = 600)
     semantic_sensor.spawn(attach_to = vehicle, z = 2, yaw = 0)
     
-    rgb_sensor = RGB(blueprints, world)
+    rgb_sensor = RGB(world)
     rgb_sensor.set_attribute(name = "image_size_x", value = 800)
     rgb_sensor.set_attribute(name = "image_size_y", value = 600)
     rgb_sensor.spawn(attach_to = vehicle, z = 2, yaw = 0)
+    
+    lidar_sensor = LidarRaycast(world)
+    lidar_sensor.set_attribute("dropoff_general_rate", 0.1)
+    lidar_sensor.set_attribute("range", 100)
+    lidar_sensor.set_attribute("rotation_frequency", 1 / delta)
+    lidar_sensor.set_attribute('lower_fov', -25.9)
+    lidar_sensor.set_attribute('upper_fov', 15.0)
+    lidar_sensor.set_attribute('channels', 64)
+    lidar_sensor.set_attribute('points_per_second', 500000)
+    lidar_sensor.spawn(attach_to = vehicle, z = 2)
+    
     
 
     try:
 
         while True:
             frame_id = world.tick()
-            semantic_image = semantic_sensor.extract_data(alpha = 1.0, layers = [Clabel.Road, Clabel.RoadLine, Clabel.Bicycle, Clabel.Bridge, Clabel.Ground, Clabel.SideWalk, Clabel.Vegetation])
-            rgb_image = rgb_sensor.extract_data()
-            
+            semantic_image = semantic_sensor.extract_data(alpha = 1.0, layers = None)
+            rgb_image      = rgb_sensor.extract_data()
+            pcd, intensity = lidar_sensor.extract_data()
+
+            lidar_sensor.visualize()
             
             cv2.imshow("Sensor stack", np.hstack([semantic_image, rgb_image]))
             key = cv2.waitKey(1)
@@ -85,6 +92,7 @@ if __name__ == "__main__":
     finally:
         semantic_sensor.destroy()
         rgb_sensor.destroy()
+        lidar_sensor.destroy()
         spawner.destroy_vehicle()
         for walker in world.get_actors().filter("*walker*"):
             walker.destroy()
@@ -92,4 +100,4 @@ if __name__ == "__main__":
         settings.synchronous_mode = False
         settings.fixed_delta_seconds = None
         tm.set_synchronous_mode(False)
-        world.apply_settings(settings)
+        world.apply_settings(settings)  

@@ -6,6 +6,7 @@ import json
 from .stubs.sensor__camera__semantic_segmentation_stub import SensorCameraSemanticSegmentationStub
 from .stubs.sensor__camera__rgb_stub import SensorCameraRgbStub
 from .stubs.sensor__lidar__ray_cast_stub import SensorLidarRayCastStub
+from .lidar_visualization import LIDARVisualizer
 from typing import Optional
 from enum import IntEnum
 from pathlib import Path
@@ -84,13 +85,31 @@ class SensorSpawn(object):
         sensor_name = ' '.join(temp + [string[1].capitalize()])
         return sensor_name
         
-class LidarRaycast(SensorLidarRayCastStub, SensorSpawn):
-    def __init__(self, world):
+class LidarRaycast(SensorLidarRayCastStub, SensorSpawn, LIDARVisualizer):
+    def __init__(self, world, vis_range = 50, vis_window = (800, 600)):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
+        LIDARVisualizer.__init__(self, vis_range, vis_window)
         
         self.sensor_bp = world.get_blueprint_library().find(self.name)
         self.queue = queue.Queue()
+        self.pc = np.zeros((1, 3))
+    
+    def extract_data(self):
+        if not hasattr(self, "actor"):
+            raise ReferenceError(f"Actor {self.__class__.__name__} has not been spawned")
+
+        data         = self.queue.get()
+        decoded_data = self.__decode_data__(data)
+        self.pcd     = decoded_data[:, :-1]
+        self.intense = decoded_data[:, -1]
+        return self.pc, self.intense
+    
+    def __decode_data__(self, carla_pointcloud: carla.Image) -> np.ndarray:
+        return np.frombuffer(carla_pointcloud.raw_data, dtype = np.float32).reshape((-1, 4))
+    
+    def visualize(self) -> None:
+        self.display(self.pcd, self.intense)
 
 class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
     
@@ -167,5 +186,4 @@ class RGB(SensorCameraRgbStub, SensorSpawn):
     
     @staticmethod
     def __decode_frame__(carla_image: carla.Image) -> np.ndarray:
-        array = np.frombuffer(carla_image.raw_data, dtype = np.uint8).reshape(carla_image.height, carla_image.width, 4)
-        return array
+        return np.frombuffer(carla_image.raw_data, dtype = np.uint8).reshape(carla_image.height, carla_image.width, 4)
