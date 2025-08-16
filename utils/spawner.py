@@ -3,6 +3,7 @@ import random
 
 from rich import print
 from typing import Literal
+from config.enum import VehicleClass
 
 Vehicle_BP = Literal[
  'vehicle.audi.a2', 'vehicle.citroen.c3', 'vehicle.chevrolet.impala',
@@ -36,7 +37,7 @@ class Spawn:
 
         self.vehicles = []; self.walkers = []; self.sensors = []
 
-    def spawn_mass_vehicle(self, size: int, transform: carla.Transform = None, autopilot = True):
+    def spawn_mass_vehicle(self, size: int, transform: carla.Transform = None, autopilot = True, exclude: VehicleClass = None):
         if size < 0:
             print(f"[red][ERROR][/]: Number of spawning vehicles must be a positive integer")
             exit(12)
@@ -46,38 +47,60 @@ class Spawn:
                 exit(12)
         
         vehicle_bp = self.blueprints.filter("*vehicle*")
+        flattened_exclude = list(self.flatten(exclude)) if exclude is not None else []
         for _ in range(size):
-            vehicle = self.world.try_spawn_actor(random.choice(vehicle_bp), random.choice(self.vehicle_spawn_pts))
+            choosen_bp = random.choice(vehicle_bp)
+            while True and exclude is not None:
+                if str(choosen_bp.id) not in flattened_exclude: break
+                choosen_bp = random.choice(vehicle_bp)
+
+
+            vehicle = self.world.try_spawn_actor(choosen_bp, random.choice(self.vehicle_spawn_pts))
             if vehicle:
                 vehicle.set_autopilot(autopilot)
                 self.vehicles += [vehicle]
+            else:
+                print(f"[red][ERROR][/]: A random vehicle has not spawned successfully. Skipping.")
         
         self.world.tick()
         print(f"[green][INFO][/]: Spawned mass successfully. {self.get_size} vehicles in environment")
         
         
-    def spawn_single_vehicle(self, bp_id: Vehicle_BP = None, transform: carla.Transform = None, autopilot = True):
+    def spawn_single_vehicle(self, bp_id: Vehicle_BP = None, transform: carla.Transform = None, random_offset: float = 0, autopilot = True, exclude: Vehicle_BP = None):
         if bp_id is None:
+            flattened_exclude = list(self.flatten(exclude)) if exclude is not None else []
             while True:
                 vehicle_name = random.choice(list(Vehicle_BP.__args__))
+                if vehicle_name in flattened_exclude:
+                    continue
                 try:
-                    vehicle_bp = self.blueprints.find(random.choice(list(Vehicle_BP.__args__)))
+                    vehicle_bp = self.blueprints.find(vehicle_name)
                     break
                 except: 
-                    print(f"[yellow][WARNING][/]: Did not find {vehicle_name}. Retrying ...")
+                    print(f"[red][ERROR][/]: Did not find {vehicle_name}. Retrying ...")
                     continue
         else:
+            print("[green][INFO][/]: A specific blueprint was choosen, skipping exclude")
             vehicle_bp = self.blueprints.find(bp_id)
-
-        self.single_vehicle = self.world.try_spawn_actor(vehicle_bp, transform if transform is not None else random.choice(self.vehicle_spawn_pts))        
-        while self.single_vehicle is None:
-            self.single_vehicle = self.world.try_spawn_actor(vehicle_bp, transform if transform is not None else random.choice(self.vehicle_spawn_pts))        
         
+
+        while True:
+            spawn_pts = random.choice(self.vehicle_spawn_pts)
+            random_yaw = random.uniform(-random_offset, random_offset)
+            spawn_pts.rotation.yaw += random_yaw
+            if random_offset != 0: 
+                print(f"[yellow][WARNING][/]: Random yaw selected: {random_yaw:.2f} degree.")
+            
+            self.single_vehicle = self.world.try_spawn_actor(vehicle_bp, transform if transform is not None else spawn_pts)
+
+            if self.single_vehicle is not None: break
+            else: print(f"[red][ERROR][/]: Did not find a suitable spawn point for controlling vehicle. Retrying ...")
+
         self.single_vehicle.set_autopilot(autopilot)
         self.vehicles += [self.single_vehicle]
 
         self.world.tick()
-        print(f"[green][INFO][/]: Spawned single successfully. {self.get_size} vehicles in environment")
+        print(f"[green][INFO][/]: Spawned single successfully. Name: {str(vehicle_bp.id)}. {self.get_size} vehicles in environment")
         
     def destroy_vehicle(self):
         for vehicle in self.get_vehicles:
@@ -91,3 +114,14 @@ class Spawn:
     @property
     def get_vehicles(self):
         return self.world.get_actors().filter("*vehicle*")
+    
+    def flatten(self, seq):
+        if not isinstance(seq, VehicleClass):
+            for x in seq:
+                if isinstance(x, (list, tuple)):
+                    yield from self.flatten(x)
+                elif isinstance(x, VehicleClass): 
+                    yield from self.flatten(x.value)
+                else:
+                    yield x
+        else: return seq.value

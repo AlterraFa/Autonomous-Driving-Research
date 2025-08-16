@@ -3,11 +3,10 @@ root = os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
 sys.path.insert(0, root)
 
 import carla
-import queue
 import numpy as np
 import cv2
 import traceback
-from utils.spawner import Spawn
+from utils.spawner import Spawn, VehicleClass as VClass
 from utils.sensor_spawner import (
     SemanticSegmentation, 
     RGB,
@@ -40,8 +39,8 @@ if __name__ == "__main__":
     spawner = Spawn(world, tm)
 
     # spawn vehicle 
-    spawner.spawn_mass_vehicle(10, autopilot = True)
-    spawner.spawn_single_vehicle(autopilot = True)
+    spawner.spawn_mass_vehicle(20, autopilot = True, exclude = [VClass.Bikes, VClass.Trucks, VClass.Large])
+    spawner.spawn_single_vehicle(autopilot = True, random_offset = 30, exclude = VClass.Large)
     vehicle = spawner.single_vehicle
     
     image_queues = []; sensors = []
@@ -72,9 +71,9 @@ if __name__ == "__main__":
 
         while True:
             frame_id = world.tick()
-            semantic_image = semantic_sensor.extract_data(alpha = 1.0, layers = None)
-            rgb_image      = rgb_sensor.extract_data()
-            pcd, intensity = lidar_sensor.extract_data()
+            semantic_image, labels = semantic_sensor.extract_data(alpha = 1.0, layers = None)
+            rgb_image              = rgb_sensor.extract_data()
+            pcd, intensity         = lidar_sensor.extract_data()
 
             lidar_sensor.visualize()
             
