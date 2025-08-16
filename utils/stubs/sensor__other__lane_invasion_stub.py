@@ -14,6 +14,7 @@ except Exception:
 class SensorOtherLaneInvasionStub:
     def __init__(self, sensor_bp: 'carla.ActorBlueprint | None' = None) -> None:
         self.sensor_bp = sensor_bp
+        self.name = 'sensor.other.lane_invasion'
 
     @overload
     def set_attribute(self, name: Literal['role_name'], value: Literal['front', 'back', 'left', 'right', 'front_left', 'front_right', 'back_left', 'back_right']) -> None: ...
@@ -22,9 +23,6 @@ class SensorOtherLaneInvasionStub:
             return
         # CARLA expects string values for blueprint attributes
         self.sensor_bp.set_attribute(name, str(value))
-
-    def setAttribute(self, name: str, value: Any) -> None:
-        self.set_attribute(name, value)
 
 __all__ = [
     'SensorOtherLaneInvasionStub',

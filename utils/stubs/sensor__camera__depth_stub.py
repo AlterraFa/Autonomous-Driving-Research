@@ -14,6 +14,7 @@ except Exception:
 class SensorCameraDepthStub:
     def __init__(self, sensor_bp: 'carla.ActorBlueprint | None' = None) -> None:
         self.sensor_bp = sensor_bp
+        self.name = 'sensor.camera.depth'
 
     @overload
     def set_attribute(self, name: Literal['lens_y_size'], value: float) -> None: ...
@@ -42,9 +43,6 @@ class SensorCameraDepthStub:
             return
         # CARLA expects string values for blueprint attributes
         self.sensor_bp.set_attribute(name, str(value))
-
-    def setAttribute(self, name: str, value: Any) -> None:
-        self.set_attribute(name, value)
 
 __all__ = [
     'SensorCameraDepthStub',

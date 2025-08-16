@@ -14,6 +14,7 @@ except Exception:
 class SensorLidarRayCastStub:
     def __init__(self, sensor_bp: 'carla.ActorBlueprint | None' = None) -> None:
         self.sensor_bp = sensor_bp
+        self.name = 'sensor.lidar.ray_cast'
 
     @overload
     def set_attribute(self, name: Literal['noise_stddev'], value: float) -> None: ...
@@ -50,9 +51,6 @@ class SensorLidarRayCastStub:
             return
         # CARLA expects string values for blueprint attributes
         self.sensor_bp.set_attribute(name, str(value))
-
-    def setAttribute(self, name: str, value: Any) -> None:
-        self.set_attribute(name, value)
 
 __all__ = [
     'SensorLidarRayCastStub',

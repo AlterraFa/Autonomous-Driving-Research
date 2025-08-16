@@ -5,6 +5,7 @@ import json
 
 from .stubs.sensor__camera__semantic_segmentation_stub import SensorCameraSemanticSegmentationStub
 from .stubs.sensor__camera__rgb_stub import SensorCameraRgbStub
+from .stubs.sensor__lidar__ray_cast_stub import SensorLidarRayCastStub
 from typing import Optional
 from enum import IntEnum
 from pathlib import Path
@@ -41,8 +42,8 @@ class CarlaLabel(IntEnum):
     GuardRail     = 28
     
 class SensorSpawn(object):
-    def __init__(self, sensor_bp: carla.ActorBlueprint, world: carla.World):
-        self.bp = sensor_bp
+    def __init__(self, name, sensor_bp: carla.ActorBlueprint, world: carla.World):
+        self.sensor_bp = sensor_bp.find(name)
         self.world = world
         
     def spawn(self, attach_to: None, **kwargs):
@@ -68,17 +69,25 @@ class SensorSpawn(object):
             self.actor.stop()
             self.actor.destroy()
         
-class SemanticSegmentation(SensorSpawn, SensorCameraSemanticSegmentationStub):
+class LidarRaycast(SensorLidarRayCastStub, SensorSpawn):
+    def __init__(self, sensor_bp, world):
+        super().__init__()
+        SensorSpawn.__init__(self, self.name, sensor_bp, world)
+        
+        self.sensor_bp = sensor_bp.find(self.name)
+
+class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
     
     def __init__(self, sensor_bp: carla.ActorBlueprint, world: carla.World):
-        super().__init__(sensor_bp, world)
+        super().__init__()
+        SensorSpawn.__init__(self, self.name, sensor_bp, world)
 
         palette_autopath = Path(__file__).resolve().parent / "palette.json"
         with palette_autopath.open("r")  as f:
             palette = json.load(f)
         self.palette = {int(k): tuple(v) for k, v in palette.items()}
         
-        self.sensor_bp = sensor_bp.find("sensor.camera.semantic_segmentation")
+        self.sensor_bp = sensor_bp.find(self.name)
         self.world = world
         self.queue = queue.Queue()
         self.num_label = len(list(CarlaLabel))
@@ -125,10 +134,12 @@ class SemanticSegmentation(SensorSpawn, SensorCameraSemanticSegmentationStub):
         return labels
 
 
-class RGB(SensorSpawn, SensorCameraRgbStub):
+class RGB(SensorCameraRgbStub, SensorSpawn):
     def __init__(self, sensor_bp: carla.ActorBlueprint, world: carla.World):
-        super().__init__(sensor_bp, world)
-        self.sensor_bp = sensor_bp.find("sensor.camera.rgb")
+        super().__init__()
+        SensorSpawn.__init__(self, self.name, sensor_bp, world)
+
+        self.sensor_bp = sensor_bp.find(self.name)
         self.world = world
         self.queue = queue.Queue()
     

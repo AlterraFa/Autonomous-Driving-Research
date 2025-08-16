@@ -14,6 +14,7 @@ except Exception:
 class SensorOtherObstacleStub:
     def __init__(self, sensor_bp: 'carla.ActorBlueprint | None' = None) -> None:
         self.sensor_bp = sensor_bp
+        self.name = 'sensor.other.obstacle'
 
     @overload
     def set_attribute(self, name: Literal['debug_linetrace'], value: bool) -> None: ...
@@ -32,9 +33,6 @@ class SensorOtherObstacleStub:
             return
         # CARLA expects string values for blueprint attributes
         self.sensor_bp.set_attribute(name, str(value))
-
-    def setAttribute(self, name: str, value: Any) -> None:
-        self.set_attribute(name, value)
 
 __all__ = [
     'SensorOtherObstacleStub',

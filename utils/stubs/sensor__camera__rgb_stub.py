@@ -14,6 +14,7 @@ except Exception:
 class SensorCameraRgbStub:
     def __init__(self, sensor_bp: 'carla.ActorBlueprint | None' = None) -> None:
         self.sensor_bp = sensor_bp
+        self.name = 'sensor.camera.rgb'
 
     @overload
     def set_attribute(self, name: Literal['chromatic_aberration_intensity'], value: float) -> None: ...
@@ -104,9 +105,6 @@ class SensorCameraRgbStub:
             return
         # CARLA expects string values for blueprint attributes
         self.sensor_bp.set_attribute(name, str(value))
-
-    def setAttribute(self, name: str, value: Any) -> None:
-        self.set_attribute(name, value)
 
 __all__ = [
     'SensorCameraRgbStub',

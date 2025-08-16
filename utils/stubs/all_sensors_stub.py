@@ -186,7 +186,4 @@ class AllSensorsAttributeStub:
             return
         self.sensor_bp.set_attribute(name, str(value))
 
-    def setAttribute(self, name: str, value: Any) -> None:
-        self.set_attribute(name, value)
-
 __all__ = ['AllSensorsAttributeStub']

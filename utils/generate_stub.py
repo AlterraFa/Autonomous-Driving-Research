@@ -52,6 +52,7 @@ def writePerBlueprintModule(world: carla.World, bpId: str, outDir: str) -> str:
         f"class {className}:",
         "    def __init__(self, sensor_bp: 'carla.ActorBlueprint | None' = None) -> None:",
         "        self.sensor_bp = sensor_bp",
+        f"        self.name = '{bpId}'", 
         "",
     ]
 
@@ -69,9 +70,6 @@ def writePerBlueprintModule(world: carla.World, bpId: str, outDir: str) -> str:
         "        # CARLA expects string values for blueprint attributes",
         "        self.sensor_bp.set_attribute(name, str(value))",
         "",
-        "    def setAttribute(self, name: str, value: Any) -> None:",
-        "        self.set_attribute(name, value)",
-        "",
         "__all__ = [",
         f"    '{className}',",
         "]",
@@ -86,6 +84,7 @@ def writePerBlueprintModule(world: carla.World, bpId: str, outDir: str) -> str:
 
 # ------------------ combined: .py with overloads -----------------
 def writeCombinedModule(world: carla.World, bpIds: list[str], outPathPy: str) -> None:
+    print(bpIds)
     lines: list[str] = [
         '"""',
         'DO NOT EDIT.',
@@ -124,9 +123,6 @@ def writeCombinedModule(world: carla.World, bpIds: list[str], outPathPy: str) ->
         "        if self.sensor_bp is None:",
         "            return",
         "        self.sensor_bp.set_attribute(name, str(value))",
-        "",
-        "    def setAttribute(self, name: str, value: Any) -> None:",
-        "        self.set_attribute(name, value)",
         "",
         "__all__ = ['AllSensorsAttributeStub']",
         "",
