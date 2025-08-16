@@ -43,8 +43,8 @@ class CarlaLabel(IntEnum):
     GuardRail     = 28
     
 class SensorSpawn(object):
-    def __init__(self, name, sensor_bp: carla.ActorBlueprint, world: carla.World):
-        self.sensor_bp = sensor_bp.find(name)
+    def __init__(self, name, world: carla.World):
+        self.sensor_bp = world.get_blueprint_library().find(self.name)
         self.world = world
         self.name = name
         self.literal_name = self.__literal_name__(self.name)
@@ -85,25 +85,25 @@ class SensorSpawn(object):
         return sensor_name
         
 class LidarRaycast(SensorLidarRayCastStub, SensorSpawn):
-    def __init__(self, sensor_bp, world):
+    def __init__(self, world):
         super().__init__()
-        SensorSpawn.__init__(self, self.name, sensor_bp, world)
+        SensorSpawn.__init__(self, self.name, world)
         
-        self.sensor_bp = sensor_bp.find(self.name)
+        self.sensor_bp = world.get_blueprint_library().find(self.name)
+        self.queue = queue.Queue()
 
 class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
     
-    def __init__(self, sensor_bp: carla.ActorBlueprint, world: carla.World):
+    def __init__(self, world: carla.World):
         super().__init__()
-        SensorSpawn.__init__(self, self.name, sensor_bp, world)
+        SensorSpawn.__init__(self, self.name, world)
 
         palette_autopath = Path(__file__).resolve().parent / "palette.json"
         with palette_autopath.open("r")  as f:
             palette = json.load(f)
         self.palette = {int(k): tuple(v) for k, v in palette.items()}
         
-        self.sensor_bp = sensor_bp.find(self.name)
-        self.world = world
+        self.sensor_bp = world.get_blueprint_library().find(self.name)
         self.queue = queue.Queue()
         self.num_label = len(list(CarlaLabel))
         self._lut_data = self._build_lut_rgba()
@@ -150,12 +150,11 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
 
 
 class RGB(SensorCameraRgbStub, SensorSpawn):
-    def __init__(self, sensor_bp: carla.ActorBlueprint, world: carla.World):
+    def __init__(self, world: carla.World):
         super().__init__()
-        SensorSpawn.__init__(self, self.name, sensor_bp, world)
+        SensorSpawn.__init__(self, self.name, world)
 
-        self.sensor_bp = sensor_bp.find(self.name)
-        self.world = world
+        self.sensor_bp = world.get_blueprint_library().find(self.name)
         self.queue = queue.Queue()
     
     def extract_data(self):
