@@ -1,6 +1,7 @@
 import carla
 import random
 
+from rich import print
 from typing import Literal
 
 Vehicle_BP = Literal[
@@ -36,9 +37,13 @@ class Spawn:
         self.vehicles = []; self.walkers = []; self.sensors = []
 
     def spawn_mass_vehicle(self, size: int, transform: carla.Transform = None, autopilot = True):
-        assert size > 0, f"Number of spawning vehicles must be a positive integer"
+        if size < 0:
+            print(f"[red][ERROR][/]: Number of spawning vehicles must be a positive integer")
+            exit(12)
         if transform is not None:
-            assert size == len(transform), f"Number of spawning location must equal to spawning vehicles"
+            if size != len(transform):
+                print(f"[red][ERROR][/]: Number of spawning location must equal to spawning vehicles")
+                exit(12)
         
         vehicle_bp = self.blueprints.filter("*vehicle*")
         for _ in range(size):
@@ -48,12 +53,19 @@ class Spawn:
                 self.vehicles += [vehicle]
         
         self.world.tick()
-        print(f"Spawned mass successfully. {self.get_size} vehicles in environment")
+        print(f"[green][INFO][/]: Spawned mass successfully. {self.get_size} vehicles in environment")
         
         
     def spawn_single_vehicle(self, bp_id: Vehicle_BP = None, transform: carla.Transform = None, autopilot = True):
         if bp_id is None:
-            vehicle_bp = self.blueprints.find(random.choice(list(Vehicle_BP.__args__)))
+            while True:
+                vehicle_name = random.choice(list(Vehicle_BP.__args__))
+                try:
+                    vehicle_bp = self.blueprints.find(random.choice(list(Vehicle_BP.__args__)))
+                    break
+                except: 
+                    print(f"[yellow][WARNING][/]: Did not find {vehicle_name}. Retrying ...")
+                    continue
         else:
             vehicle_bp = self.blueprints.find(bp_id)
 
@@ -65,12 +77,12 @@ class Spawn:
         self.vehicles += [self.single_vehicle]
 
         self.world.tick()
-        print(f"Spawned single successfully. {self.get_size} vehicles in environment")
+        print(f"[green][INFO][/]: Spawned single successfully. {self.get_size} vehicles in environment")
         
     def destroy_vehicle(self):
         for vehicle in self.get_vehicles:
             vehicle.destroy()
-        print("Destroyed all vehicles")
+        print("[green][INFO][/]: Destroyed all vehicles")
 
     @property
     def get_size(self):

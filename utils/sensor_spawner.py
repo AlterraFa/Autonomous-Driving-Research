@@ -9,6 +9,7 @@ from .stubs.sensor__lidar__ray_cast_stub import SensorLidarRayCastStub
 from typing import Optional
 from enum import IntEnum
 from pathlib import Path
+from rich import print
 
 class CarlaLabel(IntEnum):
     Unlabeled     = 0
@@ -45,6 +46,8 @@ class SensorSpawn(object):
     def __init__(self, name, sensor_bp: carla.ActorBlueprint, world: carla.World):
         self.sensor_bp = sensor_bp.find(name)
         self.world = world
+        self.name = name
+        self.literal_name = self.__literal_name__(self.name)
         
     def spawn(self, attach_to: None, **kwargs):
         loc = carla.Location(
@@ -61,13 +64,25 @@ class SensorSpawn(object):
         )
         transform = carla.Transform(loc, rot)
         
+        
         self.actor = self.world.spawn_actor(self.sensor_bp, transform, attach_to = attach_to)
         self.actor.listen(self.queue.put)
+        print(f"[green][INFO][/]: Sensor [bold]{self.literal_name}[/bold] spawned successfully. Listening to it")
 
     def destroy(self):
         if hasattr(self, "actor"):
             self.actor.stop()
             self.actor.destroy()
+    
+    @staticmethod
+    def __literal_name__(name: str):
+        string = name.split(".")[1:][::-1]
+        sensor_type = string[0]
+        temp = []
+        for word in sensor_type.split('_'):
+            temp += [word.capitalize()]
+        sensor_name = ' '.join(temp + [string[1].capitalize()])
+        return sensor_name
         
 class LidarRaycast(SensorLidarRayCastStub, SensorSpawn):
     def __init__(self, sensor_bp, world):
