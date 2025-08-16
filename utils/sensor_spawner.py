@@ -1,11 +1,13 @@
 import carla
 import numpy as np
 import queue
+import json
 
 from .stubs.sensor__camera__semantic_segmentation_stub import SensorCameraSemanticSegmentationStub
 from .stubs.sensor__camera__rgb_stub import SensorCameraRgbStub
 from typing import Optional
 from enum import IntEnum
+from pathlib import Path
 
 class CarlaLabel(IntEnum):
     Unlabeled     = 0
@@ -68,40 +70,14 @@ class SensorSpawn(object):
         
 class SemanticSegmentation(SensorSpawn, SensorCameraSemanticSegmentationStub):
     
-    palette = {
-        0:  (0,   0,   0),      # Unlabeled
-        1:  (128, 64,  128),    # Road
-        2:  (244, 35,  232),    # Sidewalk
-        3:  (70,  70,  70),     # Building
-        4:  (102, 102, 156),    # Wall
-        5:  (190, 153, 153),    # Fence
-        6:  (153, 153, 153),    # Pole
-        7:  (250, 170, 30),     # TrafficLight
-        8:  (220, 220, 0),      # TrafficSign
-        9:  (107, 142, 35),     # Vegetation
-        10: (152, 251, 152),    # Terrain
-        11: (70,  130, 180),    # Sky
-        12: (220, 20,  60),     # Pedestrian
-        13: (255, 0,   0),      # Rider
-        14: (0,   0,   142),    # Car
-        15: (0,   0,   70),     # Truck
-        16: (0,   60,  100),    # Bus
-        17: (0,   80,  100),    # Train
-        18: (0,   0,   230),    # Motorcycle
-        19: (119, 11,  32),     # Bicycle
-        20: (110, 190, 160),    # Static
-        21: (170, 120, 50),     # Dynamic
-        22: (55,  90,  80),     # Other
-        23: (45,  60,  150),    # Water
-        24: (157, 234, 50),     # RoadLine
-        25: (81,  0,   81),     # Ground
-        26: (150, 100, 100),    # Bridge
-        27: (230, 150, 140),    # RailTrack
-        28: (180, 165, 180),    # GuardRail
-    }
-    
     def __init__(self, sensor_bp: carla.ActorBlueprint, world: carla.World):
         super().__init__(sensor_bp, world)
+
+        palette_autopath = Path(__file__).resolve().parent / "palette.json"
+        with palette_autopath.open("r")  as f:
+            palette = json.load(f)
+        self.palette = {int(k): tuple(v) for k, v in palette.items()}
+        
         self.sensor_bp = sensor_bp.find("sensor.camera.semantic_segmentation")
         self.world = world
         self.queue = queue.Queue()
