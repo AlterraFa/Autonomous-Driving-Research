@@ -3,6 +3,7 @@ import numpy as np
 import queue
 
 from .stubs.sensor__camera__semantic_segmentation_stub import SensorCameraSemanticSegmentationStub
+from .stubs.sensor__camera__rgb_stub import SensorCameraRgbStub
 from typing import Optional
 from enum import IntEnum
 
@@ -36,8 +37,36 @@ class CarlaLabel(IntEnum):
     Bridge        = 26
     RailTrack     = 27
     GuardRail     = 28
+    
+class SensorSpawn(object):
+    def __init__(self, sensor_bp: carla.ActorBlueprint, world: carla.World):
+        self.bp = sensor_bp
+        self.world = world
         
-class SemanticSegmentation(SensorCameraSemanticSegmentationStub):
+    def spawn(self, attach_to: None, **kwargs):
+        loc = carla.Location(
+            x=kwargs.get("x", 0.0),
+            y=kwargs.get("y", 0.0),
+            z=kwargs.get("z", 0.0)
+        )
+
+        # Extract rotation
+        rot = carla.Rotation(
+            roll=kwargs.get("roll", 0.0),
+            pitch=kwargs.get("pitch", 0.0),
+            yaw=kwargs.get("yaw", 0.0)
+        )
+        transform = carla.Transform(loc, rot)
+        
+        self.actor = self.world.spawn_actor(self.sensor_bp, transform, attach_to = attach_to)
+        self.actor.listen(self.queue.put)
+
+    def destroy(self):
+        if hasattr(self, "actor"):
+            self.actor.stop()
+            self.actor.destroy()
+        
+class SemanticSegmentation(SensorSpawn, SensorCameraSemanticSegmentationStub):
     
     palette = {
         0:  (0,   0,   0),      # Unlabeled
@@ -71,35 +100,20 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub):
         28: (180, 165, 180),    # GuardRail
     }
     
-    def __init__(self, sensor_bp, world):
+    def __init__(self, sensor_bp: carla.ActorBlueprint, world: carla.World):
+        super().__init__(sensor_bp, world)
         self.sensor_bp = sensor_bp.find("sensor.camera.semantic_segmentation")
         self.world = world
         self.queue = queue.Queue()
         self.num_label = len(list(CarlaLabel))
         self._lut_data = self._build_lut_rgba()
         
-    def spawn(self, attach_to: None, **kwargs):
-        loc = carla.Location(
-            x=kwargs.get("x", 0.0),
-            y=kwargs.get("y", 0.0),
-            z=kwargs.get("z", 0.0)
-        )
-
-        # Extract rotation
-        rot = carla.Rotation(
-            roll=kwargs.get("roll", 0.0),
-            pitch=kwargs.get("pitch", 0.0),
-            yaw=kwargs.get("yaw", 0.0)
-        )
-        transform = carla.Transform(loc, rot)
-        
-        self.actor = self.world.spawn_actor(self.sensor_bp, transform, attach_to = attach_to)
-        self.actor.listen(self.queue.put)
-        
     def extract_data(self, layers: Optional[list[CarlaLabel]] = None, alpha = 1):
-
+        if not hasattr(self, "actor"):
+            raise ReferenceError(f"Actor {self.__class__.__name__} has not been spawned")
         if layers is not None and not isinstance(layers, list):
             raise TypeError("layers arg must be a list of name of layers")
+
         data = self.queue.get()
         labels = self.__decode_semantic_labels__(data)
 
@@ -122,10 +136,6 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub):
 
         return overlay  # RGBA uint8
     
-    def destroy(self):
-        self.actor.stop()
-        self.actor.destroy()
-
     def _build_lut_rgba(self) -> np.ndarray:
         lut = np.zeros((self.num_label, 4), dtype=np.uint8)
         for k, (r, g, b) in self.palette.items():
@@ -133,15 +143,28 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub):
         return lut
             
 
-    def __decode_semantic_labels__(self, carlaImage: carla.Image) -> np.ndarray:
-        array = np.frombuffer(carlaImage.raw_data, dtype=np.uint8).reshape(carlaImage.height, carlaImage.width, 4)
+    def __decode_semantic_labels__(self, carla_image: carla.Image) -> np.ndarray:
+        array = np.frombuffer(carla_image.raw_data, dtype=np.uint8).reshape(carla_image.height, carla_image.width, 4)
         labels = array[:, :, 2].copy()  # BGRA -> take R channel
         return labels
 
 
-class RGB:
-    def __init__(self):
-        pass
+class RGB(SensorSpawn, SensorCameraRgbStub):
+    def __init__(self, sensor_bp: carla.ActorBlueprint, world: carla.World):
+        super().__init__(sensor_bp, world)
+        self.sensor_bp = sensor_bp.find("sensor.camera.rgb")
+        self.world = world
+        self.queue = queue.Queue()
     
     def extract_data(self):
-        ...
+        if not hasattr(self, "actor"):
+            raise ReferenceError(f"Actor {self.__class__.__name__} has not been spawned")
+        
+        data = self.queue.get()
+        frame = self.__decode_frame__(data)
+        return frame
+    
+    @staticmethod
+    def __decode_frame__(carla_image: carla.Image) -> np.ndarray:
+        array = np.frombuffer(carla_image.raw_data, dtype = np.uint8).reshape(carla_image.height, carla_image.width, 4)
+        return array

@@ -8,7 +8,11 @@ import numpy as np
 import cv2
 import traceback
 from utils.spawner import Spawn
-from utils.sensor_spawner import SemanticSegmentation, CarlaLabel as label
+from utils.sensor_spawner import (
+    SemanticSegmentation, 
+    RGB,
+    CarlaLabel as Clabel
+)
 
 
 tm_port = 8000
@@ -53,34 +57,21 @@ if __name__ == "__main__":
     semantic_sensor.set_attribute(name = "image_size_y", value = 600)
     semantic_sensor.spawn(attach_to = vehicle, z = 2, yaw = 0)
     
-    for angle in [0]:
-        camera_bp = blueprints.find("sensor.camera.rgb")
-        camera_bp.set_attribute('image_size_x', '800')
-        camera_bp.set_attribute('image_size_y', '600')
-        transform = carla.Transform(carla.Location(z = 2.0), carla.Rotation(yaw = angle))
-        
-        camera      = world.spawn_actor(camera_bp, transform, attach_to = vehicle)
-        image_queue = queue.Queue()
-        camera.listen(image_queue.put)
-        image_queues += [image_queue]
-        sensors += [camera]
+    rgb_sensor = RGB(blueprints, world)
+    rgb_sensor.set_attribute(name = "image_size_x", value = 800)
+    rgb_sensor.set_attribute(name = "image_size_y", value = 600)
+    rgb_sensor.spawn(attach_to = vehicle, z = 2, yaw = 0)
     
 
     try:
 
         while True:
             frame_id = world.tick()
-            images = []
-            for buffer in image_queues:
-                data    = get_frame(buffer, frame_id)
-                image   = np.frombuffer(data.raw_data, dtype = np.uint8).reshape((data.height, data.width, 4))
-                images += [image]
-            image_arr = np.hstack(images)
-            
-            semantic_image = semantic_sensor.extract_data(alpha = 1.0, layers = [label.Road, label.RoadLine])
+            semantic_image = semantic_sensor.extract_data(alpha = 1.0, layers = [Clabel.Road, Clabel.RoadLine, Clabel.Bicycle, Clabel.Bridge, Clabel.Ground, Clabel.SideWalk, Clabel.Vegetation])
+            rgb_image = rgb_sensor.extract_data()
             
             
-            cv2.imshow("Sensor stack", np.hstack([semantic_image]))
+            cv2.imshow("Sensor stack", np.hstack([semantic_image, rgb_image]))
             key = cv2.waitKey(1)
             if key == ord('q'):
                 cv2.destroyAllWindows()
@@ -92,10 +83,8 @@ if __name__ == "__main__":
     except Exception as e:
         traceback.print_exc()
     finally:
-        for sensor in sensors:
-            sensor.stop()
-            sensor.destroy()
         semantic_sensor.destroy()
+        rgb_sensor.destroy()
         spawner.destroy_vehicle()
         for walker in world.get_actors().filter("*walker*"):
             walker.destroy()
