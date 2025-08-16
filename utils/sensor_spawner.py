@@ -7,41 +7,11 @@ from .stubs.sensor__camera__semantic_segmentation_stub import SensorCameraSemant
 from .stubs.sensor__camera__rgb_stub import SensorCameraRgbStub
 from .stubs.sensor__lidar__ray_cast_stub import SensorLidarRayCastStub
 from .lidar_visualization import LIDARVisualizer
+from config.enum import CarlaLabel
 from typing import Optional
-from enum import IntEnum
 from pathlib import Path
 from rich import print
 
-class CarlaLabel(IntEnum):
-    Unlabeled     = 0
-    Road          = 1
-    SideWalk      = 2
-    Building      = 3
-    Wall          = 4
-    Fence         = 5
-    Pole          = 6
-    TrafficLight  = 7
-    TrafficSign   = 8
-    Vegetation    = 9
-    Terrain       = 10
-    Sky           = 11
-    Pedestrian    = 12
-    Rider         = 13
-    Car           = 14
-    Truck         = 15
-    Bus           = 16
-    Train         = 17
-    Motorcycle    = 18
-    Bicycle       = 19
-    Static        = 20
-    Dynamic       = 21
-    Other         = 22
-    Water         = 23
-    RoadLine      = 24
-    Ground        = 25
-    Bridge        = 26
-    RailTrack     = 27
-    GuardRail     = 28
     
 class SensorSpawn(object):
     def __init__(self, name, world: carla.World):
@@ -74,6 +44,7 @@ class SensorSpawn(object):
         if hasattr(self, "actor"):
             self.actor.stop()
             self.actor.destroy()
+            print(f"[green][INFO][/]: Sensor [bold]{self.literal_name}[/bold] stopped and destroyed")
     
     @staticmethod
     def __literal_name__(name: str):
@@ -117,7 +88,7 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
 
-        palette_autopath = Path(__file__).resolve().parent / "palette.json"
+        palette_autopath = Path(__file__).resolve().parent / "../config/palette.json"
         with palette_autopath.open("r")  as f:
             palette = json.load(f)
         self.palette = {int(k): tuple(v) for k, v in palette.items()}
@@ -153,7 +124,7 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
             overlay[..., :3] = (rgb * a // 255).astype(np.uint8)
             overlay[..., 3] = 255
 
-        return overlay  # RGBA uint8
+        return overlay, labels  # RGBA uint8
     
     def _build_lut_rgba(self) -> np.ndarray:
         lut = np.zeros((self.num_label, 4), dtype=np.uint8)
