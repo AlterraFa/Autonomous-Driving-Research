@@ -166,7 +166,6 @@ class RGB(SensorCameraRgbStub, SensorSpawn):
         
 class GNSS(SensorOtherGnssStub, SensorSpawn):
     
-
     @dataclass
     class Geodetic:
         lat: float
@@ -184,6 +183,7 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
         east: float
         north: float
         up: float
+        
     class CustomCallback:
         def __init__(self):
             self._latest = None
@@ -209,7 +209,7 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
                 "alt": float(data.altitude),
             }
             
-    class GNSSResult(Mapping):
+    class GNSSData(Mapping):
         def __init__(self,
                      geodetic: Optional['GNSS.Geodetic']=None,
                      ecef: Optional['GNSS.ECEF']=None,
@@ -226,7 +226,7 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
         # --- Pretty print ---
         def __repr__(self):
             if self.Geodetic is None:
-                return "<GNSSResult: no data>"
+                return "<GNSSData: no data>"
             parts = [
                 f"Geodetic(lat={self.Geodetic.lat:.6f}, "
                 f"lon={self.Geodetic.lon:.6f}, "
@@ -261,18 +261,18 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
         self._enu: Optional[GNSS.ENU] = None
 
     
-    def extract_data(self, return_ecf = False, return_enu = False):
+    def extract_data(self, return_ecf = False, return_enu = False) -> GNSSData:
         gdict = self.callback.get()
         if gdict is None:
             self._geodetic = self._ecef = self._enu = None
-            return GNSS.GNSSResult()
+            return GNSS.GNSSData()
 
         # NOTE: refer to the inner classes via the class, not self.*
         self._geodetic = GNSS.Geodetic(**gdict)
         self._ecef = GNSS.ECEF(**self.geodetic_to_ecef(**gdict)) if return_ecf else None
         self._enu  = GNSS.ENU(**self.geodetic_to_enu(**gdict))   if return_enu  else None
 
-        return GNSS.GNSSResult(self._geodetic, self._ecef, self._enu)
+        return GNSS.GNSSData(self._geodetic, self._ecef, self._enu)
     
     
     @property
