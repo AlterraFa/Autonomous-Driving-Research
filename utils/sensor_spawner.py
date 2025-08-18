@@ -14,7 +14,7 @@ from typing import Optional
 from pathlib import Path
 from rich import print
 from collections.abc import Mapping
-
+from dataclasses import dataclass
     
 class SensorSpawn(object):
     def __init__(self, name, world: carla.World):
@@ -166,6 +166,24 @@ class RGB(SensorCameraRgbStub, SensorSpawn):
         
 class GNSS(SensorOtherGnssStub, SensorSpawn):
     
+
+    @dataclass
+    class Geodetic:
+        lat: float
+        lon: float
+        alt: float
+
+    @dataclass
+    class ECEF:
+        x: float
+        y: float
+        z: float
+
+    @dataclass
+    class ENU:
+        east: float
+        north: float
+        up: float
     class CustomCallback:
         def __init__(self):
             self._latest = None
@@ -192,30 +210,36 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
             }
             
     class GNSSResult(Mapping):
-        def __init__(self, data: dict | None):
-            self._data = data or {}
-
-        # --- Mapping interface so you can do geo_location['geodetic'] ---
-        def __getitem__(self, key): return self._data[key]
+        def __init__(self,
+                     geodetic: Optional['GNSS.Geodetic']=None,
+                     ecef: Optional['GNSS.ECEF']=None,
+                     enu: Optional['GNSS.ENU']=None):
+            self.Geodetic = geodetic
+            self.ECEF = ecef
+            self.ENU = enu
+            self._data = {"Geodetic": geodetic, "ECEF": ecef, "ENU": enu}
+            
+        def __getitem__(self, k): return self._data[k]
         def __iter__(self): return iter(self._data)
         def __len__(self): return len(self._data)
 
         # --- Pretty print ---
         def __repr__(self):
-            if not self._data:
+            if self.Geodetic is None:
                 return "<GNSSResult: no data>"
-            g = self._data.get("geodetic", {})
             parts = [
-                f"Geodetic(lat={g.get('lat', float('nan')):.6f}, "
-                f"lon={g.get('lon', float('nan')):.6f}, "
-                f"alt={g.get('alt', float('nan')):.2f})"
+                f"Geodetic(lat={self.Geodetic.lat:.6f}, "
+                f"lon={self.Geodetic.lon:.6f}, "
+                f"alt={self.Geodetic.alt:.2f})"
             ]
-            if "ecef" in self._data:
-                e = self._data["ecef"]
-                parts.append(f"ECEF(x={e['x']:.2f}, y={e['y']:.2f}, z={e['z']:.2f})")
-            if "enu" in self._data:
-                u = self._data["enu"]
-                parts.append(f"ENU(north={u['east']:.2f}, east={u['north']:.2f}, up={u['up']:.2f})")
+            if self.ECEF is not None:
+                parts.append(
+                    f"ECEF(x={self.ECEF.x:.2f}, y={self.ECEF.y:.2f}, z={self.ECEF.z:.2f})"
+                )
+            if self.ENU is not None:
+                parts.append(
+                    f"ENU(east={self.ENU.east:.2f}, north={self.ENU.north:.2f}, up={self.ENU.up:.2f})"
+                )
             return " | ".join(parts)
     
     def __init__(self, world: carla.World, origin: tuple = (42.0, 2.0, 2.036)):
@@ -231,20 +255,34 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
         self.f = (self.a - self.b) / self.a
         self.e_sq = self.f * (2 - self.f)
         self.origin = origin
+
+        self._geodetic: Optional[GNSS.Geodetic] = None
+        self._ecef: Optional[GNSS.ECEF] = None
+        self._enu: Optional[GNSS.ENU] = None
+
     
     def extract_data(self, return_ecf = False, return_enu = False):
-        geodetic = self.callback.get()
-        if geodetic is None:
-            result = None
-            return self.GNSSResult(None)
+        gdict = self.callback.get()
+        if gdict is None:
+            self._geodetic = self._ecef = self._enu = None
+            return GNSS.GNSSResult()
 
-        result = {"geodetic": geodetic}
-        if return_ecf:
-            result["ecef"] = self.geodetic_to_ecef(**geodetic)
-        if return_enu:
-            result["enu"] = self.geodetic_to_enu(**geodetic)
+        # NOTE: refer to the inner classes via the class, not self.*
+        self._geodetic = GNSS.Geodetic(**gdict)
+        self._ecef = GNSS.ECEF(**self.geodetic_to_ecef(**gdict)) if return_ecf else None
+        self._enu  = GNSS.ENU(**self.geodetic_to_enu(**gdict))   if return_enu  else None
 
-        return self.GNSSResult(result)
+        return GNSS.GNSSResult(self._geodetic, self._ecef, self._enu)
+    
+    
+    @property
+    def geodetic(self): return self._geodetic
+
+    @property
+    def ecef(self): return self._ecef
+
+    @property
+    def enu(self): return self._enu
 
 
     def geodetic_to_ecef(self, lat, lon, alt):
