@@ -2,23 +2,27 @@ import carla
 import numpy as np
 import queue
 import json
+import threading
 
 from .stubs.sensor__camera__semantic_segmentation_stub import SensorCameraSemanticSegmentationStub
 from .stubs.sensor__camera__rgb_stub import SensorCameraRgbStub
 from .stubs.sensor__lidar__ray_cast_stub import SensorLidarRayCastStub
+from .stubs.sensor__other__gnss_stub import SensorOtherGnssStub
 from .lidar_visualization import LIDARVisualizer
 from config.enum import CarlaLabel
 from typing import Optional
 from pathlib import Path
 from rich import print
+from collections.abc import Mapping
 
     
 class SensorSpawn(object):
     def __init__(self, name, world: carla.World):
-        self.sensor_bp = world.get_blueprint_library().find(self.name)
-        self.world = world
-        self.name = name
+        self.name         = name
+        self.sensor_bp    = world.get_blueprint_library().find(self.name)
+        self.world        = world
         self.literal_name = self.__literal_name__(self.name)
+        self.actor        = None
         
     def spawn(self, attach_to: None, **kwargs):
         loc = carla.Location(
@@ -37,7 +41,7 @@ class SensorSpawn(object):
         
         
         self.actor = self.world.spawn_actor(self.sensor_bp, transform, attach_to = attach_to)
-        self.actor.listen(self.queue.put)
+        self.actor.listen(self.callback.put)
         print(f"[green][INFO][/]: Sensor [bold]{self.literal_name}[/bold] spawned successfully. Listening to it")
 
     def destroy(self):
@@ -63,14 +67,14 @@ class LidarRaycast(SensorLidarRayCastStub, SensorSpawn, LIDARVisualizer):
         LIDARVisualizer.__init__(self, vis_range, vis_window)
         
         self.sensor_bp = world.get_blueprint_library().find(self.name)
-        self.queue = queue.Queue()
+        self.callback = queue.Queue()
         self.pc = np.zeros((1, 3))
     
     def extract_data(self):
         if not hasattr(self, "actor"):
             raise ReferenceError(f"Actor {self.__class__.__name__} has not been spawned")
 
-        data         = self.queue.get()
+        data         = self.callback.get()
         decoded_data = self.__decode_data__(data)
         self.pcd     = decoded_data[:, :-1]
         self.intense = decoded_data[:, -1]
@@ -94,7 +98,7 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
         self.palette = {int(k): tuple(v) for k, v in palette.items()}
         
         self.sensor_bp = world.get_blueprint_library().find(self.name)
-        self.queue = queue.Queue()
+        self.callback = queue.Queue()
         self.num_label = len(list(CarlaLabel))
         self._lut_data = self._build_lut_rgba()
         
@@ -104,7 +108,7 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
         if layers is not None and not isinstance(layers, list):
             raise TypeError("layers arg must be a list of name of layers")
 
-        data = self.queue.get()
+        data = self.callback.get()
         labels = self.__decode_semantic_labels__(data)
 
         if layers is None:
@@ -145,16 +149,155 @@ class RGB(SensorCameraRgbStub, SensorSpawn):
         SensorSpawn.__init__(self, self.name, world)
 
         self.sensor_bp = world.get_blueprint_library().find(self.name)
-        self.queue = queue.Queue()
+        self.callback = queue.Queue()
     
     def extract_data(self):
         if not hasattr(self, "actor"):
             raise ReferenceError(f"Actor {self.__class__.__name__} has not been spawned")
         
-        data = self.queue.get()
+        data = self.callback.get()
         frame = self.__decode_frame__(data)
         return frame
     
     @staticmethod
     def __decode_frame__(carla_image: carla.Image) -> np.ndarray:
         return np.frombuffer(carla_image.raw_data, dtype = np.uint8).reshape(carla_image.height, carla_image.width, 4)
+
+        
+class GNSS(SensorOtherGnssStub, SensorSpawn):
+    
+    class CustomCallback:
+        def __init__(self):
+            self._latest = None
+            self._lock = threading.Lock()
+            self._have_sample = threading.Event()
+            
+        def put(self, data: carla.GnssMeasurement):
+            with self._lock:
+                self._latest = data
+                self._have_sample.set()
+            
+        def get(self, wait: bool = True, timeout: float = 0.5):
+            if wait and not self._have_sample.wait(timeout):
+                return None
+            with self._lock:
+                data = self._latest
+            if data is None:
+                return None
+            
+            return {
+                "lat": float(data.latitude),
+                "lon": float(data.longitude),
+                "alt": float(data.altitude),
+            }
+            
+    class GNSSResult(Mapping):
+        def __init__(self, data: dict | None):
+            self._data = data or {}
+
+        # --- Mapping interface so you can do geo_location['geodetic'] ---
+        def __getitem__(self, key): return self._data[key]
+        def __iter__(self): return iter(self._data)
+        def __len__(self): return len(self._data)
+
+        # --- Pretty print ---
+        def __repr__(self):
+            if not self._data:
+                return "<GNSSResult: no data>"
+            g = self._data.get("geodetic", {})
+            parts = [
+                f"Geodetic(lat={g.get('lat', float('nan')):.6f}, "
+                f"lon={g.get('lon', float('nan')):.6f}, "
+                f"alt={g.get('alt', float('nan')):.2f})"
+            ]
+            if "ecef" in self._data:
+                e = self._data["ecef"]
+                parts.append(f"ECEF(x={e['x']:.2f}, y={e['y']:.2f}, z={e['z']:.2f})")
+            if "enu" in self._data:
+                u = self._data["enu"]
+                parts.append(f"ENU(north={u['east']:.2f}, east={u['north']:.2f}, up={u['up']:.2f})")
+            return " | ".join(parts)
+    
+    def __init__(self, world: carla.World, origin: tuple = (42.0, 2.0, 2.036)):
+        super().__init__()
+        SensorSpawn.__init__(self, self.name, world)
+        
+        self.sensor_bp = world.get_blueprint_library().find(self.name)
+        self.callback = self.CustomCallback()
+        
+        
+        self.a = 6378137
+        self.b = 6356752.3142
+        self.f = (self.a - self.b) / self.a
+        self.e_sq = self.f * (2 - self.f)
+        self.origin = origin
+    
+    def extract_data(self, return_ecf = False, return_enu = False):
+        geodetic = self.callback.get()
+        if geodetic is None:
+            result = None
+            return self.GNSSResult(None)
+
+        result = {"geodetic": geodetic}
+        if return_ecf:
+            result["ecef"] = self.geodetic_to_ecef(**geodetic)
+        if return_enu:
+            result["enu"] = self.geodetic_to_enu(**geodetic)
+
+        return self.GNSSResult(result)
+
+
+    def geodetic_to_ecef(self, lat, lon, alt):
+        lamb = np.radians(lat)
+        phi = np.radians(lon)
+        s = np.sin(lamb)
+        N = self.a / np.sqrt(1 - self.e_sq * s * s)
+
+        sin_lambda = np.sin(lamb)
+        cos_lambda = np.cos(lamb)
+        sin_phi = np.sin(phi)
+        cos_phi = np.cos(phi)
+
+        x = (alt + N) * cos_lambda * cos_phi
+        y = (alt + N) * cos_lambda * sin_phi
+        z = (alt + (1 - self.e_sq) * N) * sin_lambda
+
+        return {
+            'x': float(x),
+            'y': float(y),
+            'z': float(z)
+        }
+    
+    def ecef_to_enu(self, x, y, z):
+        lamb = np.radians(self.origin[0])
+        phi = np.radians(self.origin[1])
+        s = np.sin(lamb)
+        N = self.a / np.sqrt(1 - self.e_sq * s * s)
+
+        sin_lambda = np.sin(lamb)
+        cos_lambda = np.cos(lamb)
+        sin_phi = np.sin(phi)
+        cos_phi = np.cos(phi)
+
+        x0 = (self.origin[2] + N) * cos_lambda * cos_phi
+        y0 = (self.origin[2] + N) * cos_lambda * sin_phi
+        z0 = (self.origin[2] + (1 - self.e_sq) * N) * sin_lambda
+
+        xd = x - x0
+        yd = y - y0
+        zd = z - z0
+
+        xEast = -sin_phi * xd + cos_phi * yd
+        yNorth = -cos_phi * sin_lambda * xd - sin_lambda * sin_phi * yd + cos_lambda * zd
+        zUp = cos_lambda * cos_phi * xd + cos_lambda * sin_phi * yd + sin_lambda * zd
+
+        return {
+            'east': float(xEast),
+            'north': float(yNorth),
+            'up': float(zUp)
+        }
+
+    def geodetic_to_enu(self, lat, lon, alt):
+        ecf = self.geodetic_to_ecef(lat, lon, alt)
+        
+        return self.ecef_to_enu(**ecf)

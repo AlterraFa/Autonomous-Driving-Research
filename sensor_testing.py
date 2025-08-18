@@ -6,13 +6,16 @@ import carla
 import numpy as np
 import cv2
 import traceback
+
 from utils.spawner import Spawn, VehicleClass as VClass
 from utils.sensor_spawner import (
     SemanticSegmentation, 
     RGB,
     LidarRaycast,
+    GNSS,
     CarlaLabel as Clabel
 )
+from rich import print
 
 
 tm_port = 8000
@@ -40,7 +43,7 @@ if __name__ == "__main__":
 
     # spawn vehicle 
     spawner.spawn_mass_vehicle(20, autopilot = True, exclude = [VClass.Bikes, VClass.Trucks, VClass.Large])
-    spawner.spawn_single_vehicle(autopilot = True, random_offset = 30, exclude = VClass.Large)
+    spawner.spawn_single_vehicle(autopilot = True, random_offset = 30, exclude = [VClass.Large, VClass.Medium, VClass.Tiny])
     vehicle = spawner.single_vehicle
     
     image_queues = []; sensors = []
@@ -64,6 +67,9 @@ if __name__ == "__main__":
     lidar_sensor.set_attribute('channels', 64)
     lidar_sensor.set_attribute('points_per_second', 500000)
     lidar_sensor.spawn(attach_to = vehicle, z = 2)
+
+    gsss_sensor  = GNSS(world)
+    gsss_sensor.spawn(attach_to = vehicle, z = 2)
     
     
 
@@ -74,8 +80,11 @@ if __name__ == "__main__":
             semantic_image, labels = semantic_sensor.extract_data(alpha = 1.0, layers = None)
             rgb_image              = rgb_sensor.extract_data()
             pcd, intensity         = lidar_sensor.extract_data()
+            geo_location           = gsss_sensor.extract_data(return_ecf = True, return_enu = True)
+            print(geo_location)
+            print(vehicle.get_location())
 
-            lidar_sensor.visualize()
+            # lidar_sensor.visualize()
             
             cv2.imshow("Sensor stack", np.hstack([semantic_image, rgb_image]))
             key = cv2.waitKey(1)
@@ -90,8 +99,9 @@ if __name__ == "__main__":
         traceback.print_exc()
     finally:
         semantic_sensor.destroy()
-        rgb_sensor.destroy()
-        lidar_sensor.destroy()
+        rgb_sensor     .destroy()
+        lidar_sensor   .destroy()
+        gsss_sensor    .destroy()
         spawner.destroy_vehicle()
         for walker in world.get_actors().filter("*walker*"):
             walker.destroy()
