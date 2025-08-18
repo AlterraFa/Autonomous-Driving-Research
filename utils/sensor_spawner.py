@@ -167,51 +167,26 @@ class RGB(SensorCameraRgbStub, SensorSpawn):
         
 class GNSS(SensorOtherGnssStub, SensorSpawn):
     
-    class _Vec3(NDArrayOperatorsMixin):
-        __array_priority__ = 1000  # ensure our ops win over ndarray’s
-
-        def _vec(self) -> tuple[float, float, float]:
-            raise NotImplementedError
-
-        def __array__(self, dtype=None):
-            a = np.asarray(self._vec(), dtype=float)
-            return a.astype(dtype) if dtype is not None else a
-
-        def __iter__(self):
-            # allows tuple(self.Geodetic) etc.
-            return iter(self._vec())
-
-        def __len__(self):
-            return 3
-        
-        def __getitem__(self, idx):
-            v = self._vec()
-            if isinstance(idx, slice):
-                # Return a NumPy array for slices (e.g., [:2])
-                return np.asarray(v)[idx]
-            # int indexing -> single float (supports negatives too)
-            return v[idx]
-    
     @dataclass
-    class Geodetic(_Vec3):
+    class Geodetic:
         lat: float
         lon: float
         alt: float
-        def _vec(self): return(self.lat, self.lon, self.alt)
+        def to_numpy(self): return np.array([self.lat, self.lon, self.alt])
 
     @dataclass
-    class ECEF(_Vec3):
+    class ECEF:
         x: float
         y: float
         z: float
-        def _vec(self): return (self.x, self.y, self.z)
+        def to_numpy(self): return np.array([self.x, self.y, self.z])
 
     @dataclass
-    class ENU(_Vec3):
+    class ENU:
         east: float
         north: float
         up: float
-        def _vec(self): return (self.east, self.north, self.up)
+        def to_numpy(self): return np.array([self.east, self.north, self.up])
 
     class CustomCallback:
         def __init__(self):
