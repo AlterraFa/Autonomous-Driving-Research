@@ -14,6 +14,7 @@ from utils.sensor_spawner import (
     LidarRaycast,
     GNSS,
     IMU, 
+    Depth,
     CarlaLabel as Clabel
 )
 from rich import print
@@ -76,6 +77,9 @@ if __name__ == "__main__":
     imu_sensor   = IMU(world)
     imu_sensor.spawn(attach_to = vehicle)
     
+    depth_sensor = Depth(world)
+    depth_sensor.spawn(attach_to = vehicle, z = 2)
+    
 
     try:
 
@@ -86,10 +90,11 @@ if __name__ == "__main__":
             pcd, intensity         = lidar_sensor.extract_data()
             geo_location           = gsss_sensor.extract_data(return_ecf = True, return_enu = True)
             imu_data               = imu_sensor.extract_data()
-            print(imu_data, geo_location)
-            # lidar_sensor.visualize
+            depth_data             = depth_sensor.extract_data()
             
+            depth_gray = depth_sensor.to_log(depth_data, scale = 200)
             cv2.imshow("Sensor stack", np.hstack([semantic_image, rgb_image]))
+            cv2.imshow("Depth", depth_gray)
             key = cv2.waitKey(1)
             if key == ord('q'):
                 cv2.destroyAllWindows()
@@ -106,6 +111,7 @@ if __name__ == "__main__":
         lidar_sensor   .destroy()
         gsss_sensor    .destroy()
         imu_sensor     .destroy()
+        depth_sensor   .destroy()
         spawner.destroy_vehicle()
         for walker in world.get_actors().filter("*walker*"):
             walker.destroy()
