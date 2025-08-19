@@ -13,6 +13,7 @@ from utils.sensor_spawner import (
     RGB,
     LidarRaycast,
     GNSS,
+    IMU, 
     CarlaLabel as Clabel
 )
 from rich import print
@@ -69,8 +70,11 @@ if __name__ == "__main__":
     lidar_sensor.spawn(attach_to = vehicle, z = 2)
 
     gsss_sensor  = GNSS(world)
-    gsss_sensor.spawn(attach_to = vehicle, z = 2)
+    gsss_sensor.set_attribute("role_name", 'what')
+    gsss_sensor.spawn(attach_to = vehicle, z = 0)
     
+    imu_sensor   = IMU(world)
+    imu_sensor.spawn(attach_to = vehicle)
     
 
     try:
@@ -81,10 +85,9 @@ if __name__ == "__main__":
             rgb_image              = rgb_sensor.extract_data()
             pcd, intensity         = lidar_sensor.extract_data()
             geo_location           = gsss_sensor.extract_data(return_ecf = True, return_enu = True)
-            print(geo_location)
-            print(vehicle.get_location())
-
-            # lidar_sensor.visualize()
+            imu_data               = imu_sensor.extract_data()
+            print(imu_data, geo_location)
+            # lidar_sensor.visualize
             
             cv2.imshow("Sensor stack", np.hstack([semantic_image, rgb_image]))
             key = cv2.waitKey(1)
@@ -102,6 +105,7 @@ if __name__ == "__main__":
         rgb_sensor     .destroy()
         lidar_sensor   .destroy()
         gsss_sensor    .destroy()
+        imu_sensor     .destroy()
         spawner.destroy_vehicle()
         for walker in world.get_actors().filter("*walker*"):
             walker.destroy()

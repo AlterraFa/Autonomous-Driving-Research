@@ -8,14 +8,18 @@ from .stubs.sensor__camera__semantic_segmentation_stub import SensorCameraSemant
 from .stubs.sensor__camera__rgb_stub import SensorCameraRgbStub
 from .stubs.sensor__lidar__ray_cast_stub import SensorLidarRayCastStub
 from .stubs.sensor__other__gnss_stub import SensorOtherGnssStub
+from .stubs.sensor__other__imu_stub import SensorOtherImuStub
 from .lidar_visualization import LIDARVisualizer
+from .callback import CustomCallback
+
 from config.enum import CarlaLabel
 from typing import Optional
 from pathlib import Path
 from rich import print
 from collections.abc import Mapping
 from dataclasses import dataclass
-from numpy.lib.mixins import NDArrayOperatorsMixin
+
+np.printoptions(5)
     
 class SensorSpawn(object):
     def __init__(self, name, world: carla.World):
@@ -84,6 +88,7 @@ class LidarRaycast(SensorLidarRayCastStub, SensorSpawn, LIDARVisualizer):
     def __decode_data__(self, carla_pointcloud: carla.Image) -> np.ndarray:
         return np.frombuffer(carla_pointcloud.raw_data, dtype = np.float32).reshape((-1, 4))
     
+    @property
     def visualize(self) -> None:
         self.display(self.pcd, self.intense)
 
@@ -98,7 +103,6 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
             palette = json.load(f)
         self.palette = {int(k): tuple(v) for k, v in palette.items()}
         
-        self.sensor_bp = world.get_blueprint_library().find(self.name)
         self.callback = queue.Queue()
         self.num_label = len(list(CarlaLabel))
         self._lut_data = self._build_lut_rgba()
@@ -149,7 +153,6 @@ class RGB(SensorCameraRgbStub, SensorSpawn):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
 
-        self.sensor_bp = world.get_blueprint_library().find(self.name)
         self.callback = queue.Queue()
     
     def extract_data(self):
@@ -187,31 +190,6 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
         north: float
         up: float
         def to_numpy(self): return np.array([self.east, self.north, self.up])
-
-    class CustomCallback:
-        def __init__(self):
-            self._latest = None
-            self._lock = threading.Lock()
-            self._have_sample = threading.Event()
-            
-        def put(self, data: carla.GnssMeasurement):
-            with self._lock:
-                self._latest = data
-                self._have_sample.set()
-            
-        def get(self, wait: bool = True, timeout: float = 0.5):
-            if wait and not self._have_sample.wait(timeout):
-                return None
-            with self._lock:
-                data = self._latest
-            if data is None:
-                return None
-            
-            return {
-                "lat": float(data.latitude),
-                "lon": float(data.longitude),
-                "alt": float(data.altitude),
-            }
             
     class GNSSData(Mapping):
         def __init__(self,
@@ -232,17 +210,17 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
             if self.Geodetic is None:
                 return "<GNSSData: no data>"
             parts = [
-                f"Geodetic(lat={self.Geodetic.lat:.6f}, "
-                f"lon={self.Geodetic.lon:.6f}, "
-                f"alt={self.Geodetic.alt:.2f})"
+                f"Geodetic(lat={self.Geodetic.lat: .6f}, "
+                f"lon={self.Geodetic.lon: .6f}, "
+                f"alt={self.Geodetic.alt: .2f})"
             ]
             if self.ECEF is not None:
                 parts.append(
-                    f"ECEF(x={self.ECEF.x:.2f}, y={self.ECEF.y:.2f}, z={self.ECEF.z:.2f})"
+                    f"ECEF(x={self.ECEF.x: .2f}, y={self.ECEF.y: .2f}, z={self.ECEF.z: .2f})"
                 )
             if self.ENU is not None:
                 parts.append(
-                    f"ENU(east={self.ENU.east:.2f}, north={self.ENU.north:.2f}, up={self.ENU.up:.2f})"
+                    f"ENU(east={self.ENU.east: .2f}, north={self.ENU.north: .2f}, up={self.ENU.up: .2f})"
                 )
             return " | ".join(parts)
     
@@ -250,9 +228,12 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
         
-        self.sensor_bp = world.get_blueprint_library().find(self.name)
-        self.callback = self.CustomCallback()
-        
+
+        self.callback = CustomCallback({
+            "lat": "latitude",
+            "lon": "longitude",
+            "alt": "altitude"
+        })
         
         self.a = 6378137
         self.b = 6356752.3142
@@ -343,3 +324,63 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
         ecf = self.geodetic_to_ecef(lat, lon, alt)
         
         return self.ecef_to_enu(**ecf)
+    
+class IMU(SensorOtherImuStub, SensorSpawn):
+    
+    class IMUData(Mapping):
+        def __init__(self, 
+                    accel: np.ndarray = None,
+                    gyro: np.ndarray = None,
+                    comp: float = None):
+           self.Accel = accel
+           self.Gyro  = gyro
+           self.Comp  = comp
+           
+           self._data = {"Acceleration": self.Accel, "Gyroscope": self.Gyro, "Compass": self.Comp}
+           
+        def __iter__(self):
+            return iter(self._data)
+        
+        def __len__(self):
+            return 3
+        
+        def __getitem__(self, key):
+            return self._data[key]
+        
+        def __repr__(self):
+            if self.Accel is None:
+                return "<GNSSData: no data>"
+            parts = [
+                f"Acceleration(x={self.Accel[0]: .4f}, "
+                f"y={self.Accel[1]: .4f}, "
+                f"z={self.Accel[2]: .4f})"
+            ]
+            if self.Gyro is not None:
+                parts.append(
+                    f"Gyroscope(x={self.Gyro[0]: .4f}, y={self.Gyro[1]: .4f}, z={self.Gyro[2]: .4f})"
+                )
+            if self.Comp is not None:
+                parts.append(
+                    f"Compass={np.degrees(self.Comp): .4f}"
+                )
+            return " | ".join(parts)
+
+    def __init__(self, world: carla.World):
+        super().__init__()
+        SensorSpawn.__init__(self, self.name, world)
+        
+        self.callback = CustomCallback({
+            "accel": "accelerometer", 
+            "gyro": "gyroscope", 
+            "comp": "compass"
+        }) 
+        
+    def extract_data(self):
+        data = self.callback.get()
+        if data['accel'] is not None:
+            # convert carla.Vector3D to np.ndarray
+            data["accel"] = np.array([data['accel'].x, data['accel'].y, data['accel'].z])
+            data["gyro"] = np.array([data['gyro'].x, data['gyro'].y, data['gyro'].z])
+            return IMU.IMUData(accel = data['accel'], gyro = data['gyro'], comp = data['comp']) 
+        
+        return IMU.IMUData(*[None] * 3)
