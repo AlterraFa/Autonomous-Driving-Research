@@ -411,22 +411,60 @@ class Depth(SensorCameraDepthStub, SensorSpawn):
         return depth_norm * 1000.0
     
     @staticmethod
-    def to_log(depthM: np.ndarray, epsilon: float = 1e-6, scale: float = 100.0, invert: bool = False) -> np.ndarray:
-        x = np.log1p(depthM / scale)
+    def to_log(depth_meter: np.ndarray, epsilon: float = 1e-6, scale: float = 100.0, invert: bool = False) -> np.ndarray:
+        """Convert depth array to gray scaled depth image using log scale
+
+        Args:
+            depth_meter (np.ndarray): depth data in meters
+            epsilon (float, optional): prevent division by zero. Defaults to 1e-6.
+            scale (float, optional): scale intensity of pixels. Defaults to 100.0.
+            invert (bool, optional): invert to brighter when nearer. Defaults to False.
+
+        Returns:
+            np.ndarray (np.uint8): depth image 
+        """
+        x = np.log1p(depth_meter / scale)
         x /= x.max() + epsilon
         x = 1.0 - x if invert else x
         return (x * 255.0).astype(np.uint8)
     
     @staticmethod
-    def to_disparity(depthM: np.ndarray, min_depth: float = 1.0, max_depth: float = 80.0, epsilon = 1e-6) -> np.uint8:
-        d = np.clip(depthM, min_depth, max_depth)
+    def to_disparity(depth_meter: np.ndarray, min_depth: float = 1.0, max_depth: float = 80.0, epsilon = 1e-6) -> np.ndarray:
+        """
+        Convert depth in meters to a disparity-like grayscale image for visualization.
+
+        Disparity emphasizes nearer objects by mapping inverse depth to intensity.
+        Nearer objects appear brighter, farther objects darker.
+
+        Args:
+            depth_meter (np.ndarray): Depth map in meters (from CARLA decoded depth).
+            min_depth (float, optional): Minimum depth to consider (in meters). 
+                                        Depths smaller than this are clamped. Defaults to 1.0.
+            max_depth (float, optional): Maximum depth to consider (in meters). 
+                                        Depths larger than this are clamped. Defaults to 80.0.
+            epsilon (float, optional): Small constant to avoid division by zero. Defaults to 1e-6.
+
+        Returns:
+            np.ndarray: Grayscale disparity image (uint8), shape = depth_meter.shape,
+                        values in range [0, 255], where closer = brighter.
+        """
+        d = np.clip(depth_meter, min_depth, max_depth)
         disp = (1.0 / (d + epsilon) - 1.0 / max_depth) / (1.0 / (min_depth + epsilon) - 1.0 / max_depth)
         disp = np.clip(disp, 0.0, 1.0)
         return (disp * 255.0).astype(np.uint8) 
     
     @staticmethod
-    def to_windowed(depthM: np.ndarray, max_depth: float = 80.0, invert: bool = False) -> np.ndarray:
-        d = np.clip(depthM / max_depth, 0.0, 1.0)
+    def to_windowed(depth_meter: np.ndarray, max_depth: float = 80.0, invert: bool = False) -> np.ndarray:
+        """
+        Linear windowed depth → grayscale.
+        Args:
+            depth_meter: depth in meters.
+            max_depth: distances ≥ maxDepth map to the darkest end.
+            invert: if True, nearer → brighter.
+        Returns:
+            uint8 grayscale image [0,255].
+        """
+        d = np.clip(depth_meter / max_depth, 0.0, 1.0)
         if invert:           # nearer → brighter
             d = 1.0 - d
         return (d * 255.0).astype(np.uint8)
