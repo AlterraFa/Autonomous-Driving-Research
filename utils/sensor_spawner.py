@@ -9,6 +9,7 @@ from .stubs.sensor__camera__rgb_stub import SensorCameraRgbStub
 from .stubs.sensor__lidar__ray_cast_stub import SensorLidarRayCastStub
 from .stubs.sensor__other__gnss_stub import SensorOtherGnssStub
 from .stubs.sensor__other__imu_stub import SensorOtherImuStub
+from .stubs.sensor__camera__depth_stub import SensorCameraDepthStub
 from .lidar_visualization import LIDARVisualizer
 from .callback import CustomCallback
 
@@ -384,3 +385,48 @@ class IMU(SensorOtherImuStub, SensorSpawn):
             return IMU.IMUData(accel = data['accel'], gyro = data['gyro'], comp = data['comp']) 
         
         return IMU.IMUData(*[None] * 3)
+    
+class Depth(SensorCameraDepthStub, SensorSpawn):
+    def __init__(self, world: carla.World):
+        super().__init__()
+        SensorSpawn.__init__(self, self.name, world)
+        
+        self.callback = queue.Queue()
+        
+    def extract_data(self):
+        data = self.callback.get()
+        image = np.frombuffer(data.raw_data, dtype = np.uint8).reshape(data.height, data.width, -1)
+
+        depth_meter = self.__to_meter__(image)
+        return depth_meter
+        
+
+    @staticmethod
+    def __to_meter__(depth_map: np.ndarray) -> np.ndarray:
+        r = depth_map[:, :, 2].astype(np.float32)
+        g = depth_map[:, :, 1].astype(np.float32)
+        b = depth_map[:, :, 0].astype(np.float32)
+        
+        depth_norm = (r + g * 256.0 + b * 65536.0) / (256 ** 3 - 1)
+        return depth_norm * 1000.0
+    
+    @staticmethod
+    def to_log(depthM: np.ndarray, epsilon: float = 1e-6, scale: float = 100.0, invert: bool = False) -> np.ndarray:
+        x = np.log1p(depthM / scale)
+        x /= x.max() + epsilon
+        x = 1.0 - x if invert else x
+        return (x * 255.0).astype(np.uint8)
+    
+    @staticmethod
+    def to_disparity(depthM: np.ndarray, min_depth: float = 1.0, max_depth: float = 80.0, epsilon = 1e-6) -> np.uint8:
+        d = np.clip(depthM, min_depth, max_depth)
+        disp = (1.0 / (d + epsilon) - 1.0 / max_depth) / (1.0 / (min_depth + epsilon) - 1.0 / max_depth)
+        disp = np.clip(disp, 0.0, 1.0)
+        return (disp * 255.0).astype(np.uint8) 
+    
+    @staticmethod
+    def to_windowed(depthM: np.ndarray, max_depth: float = 80.0, invert: bool = False) -> np.ndarray:
+        d = np.clip(depthM / max_depth, 0.0, 1.0)
+        if invert:           # nearer → brighter
+            d = 1.0 - d
+        return (d * 255.0).astype(np.uint8)
