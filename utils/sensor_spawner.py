@@ -2,14 +2,8 @@ import carla
 import numpy as np
 import queue
 import json
-import threading
+import cv2
 
-from .stubs.sensor__camera__semantic_segmentation_stub import SensorCameraSemanticSegmentationStub
-from .stubs.sensor__camera__rgb_stub import SensorCameraRgbStub
-from .stubs.sensor__lidar__ray_cast_stub import SensorLidarRayCastStub
-from .stubs.sensor__other__gnss_stub import SensorOtherGnssStub
-from .stubs.sensor__other__imu_stub import SensorOtherImuStub
-from .stubs.sensor__camera__depth_stub import SensorCameraDepthStub
 from .lidar_visualization import LIDARVisualizer
 from .callback import CustomCallback
 
@@ -66,6 +60,7 @@ class SensorSpawn(object):
         sensor_name = ' '.join(temp + [string[1].capitalize()])
         return sensor_name
         
+from .stubs.sensor__lidar__ray_cast_stub import SensorLidarRayCastStub
 class LidarRaycast(SensorLidarRayCastStub, SensorSpawn, LIDARVisualizer):
     def __init__(self, world, vis_range = 50, vis_window = (800, 600)):
         super().__init__()
@@ -93,6 +88,7 @@ class LidarRaycast(SensorLidarRayCastStub, SensorSpawn, LIDARVisualizer):
     def visualize(self) -> None:
         self.display(self.pcd, self.intense)
 
+from .stubs.sensor__camera__semantic_segmentation_stub import SensorCameraSemanticSegmentationStub
 class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
     
     def __init__(self, world: carla.World):
@@ -149,6 +145,7 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
         return labels
 
 
+from .stubs.sensor__camera__rgb_stub import SensorCameraRgbStub
 class RGB(SensorCameraRgbStub, SensorSpawn):
     def __init__(self, world: carla.World):
         super().__init__()
@@ -169,6 +166,7 @@ class RGB(SensorCameraRgbStub, SensorSpawn):
         return np.frombuffer(carla_image.raw_data, dtype = np.uint8).reshape(carla_image.height, carla_image.width, 4)
 
         
+from .stubs.sensor__other__gnss_stub import SensorOtherGnssStub
 class GNSS(SensorOtherGnssStub, SensorSpawn):
     
     @dataclass
@@ -326,6 +324,7 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
         
         return self.ecef_to_enu(**ecf)
     
+from .stubs.sensor__other__imu_stub import SensorOtherImuStub
 class IMU(SensorOtherImuStub, SensorSpawn):
     
     class IMUData(Mapping):
@@ -386,7 +385,82 @@ class IMU(SensorOtherImuStub, SensorSpawn):
         
         return IMU.IMUData(*[None] * 3)
     
+from .stubs.sensor__camera__depth_stub import SensorCameraDepthStub
 class Depth(SensorCameraDepthStub, SensorSpawn):
+    class DepthMap(np.ndarray):
+        __array_priority__ = 1000
+
+        def __new__(cls, arr, **meta):
+            obj = np.asarray(arr, dtype=np.float32).view(cls)
+            obj.meta = meta
+            return obj
+
+        def __array_finalize__(self, obj):
+            if obj is None: return
+            self.meta = getattr(obj, "meta", {})
+
+        def to_windowed(self, max_depth: float = 80.0, invert: bool = True) -> np.ndarray:
+            """
+            Linear windowed depth → grayscale.
+            Args:
+                depth_meter: depth in meters.
+                max_depth: distances ≥ max_depth map to the darkest end.
+                invert: if True, nearer → brighter.
+            Returns:
+                uint8 grayscale image [0,255].
+            """
+            d = np.clip(self / max_depth, 0.0, 1.0)
+            if invert:
+                d = 1.0 - d
+            return (d * 255.0).astype(np.uint8)
+
+        def to_log(self, max_depth: float = 80.0, log_scale: float = 100.0,
+                    invert: bool = True, epsilon: float = 1e-6) -> np.ndarray:
+            """Convert depth array to gray scaled depth image using log scale
+
+            Args:
+                depth_meter (np.ndarray): depth data in meters
+                epsilon (float, optional): prevent division by zero. Defaults to 1e-6.
+                scale (float, optional): scale intensity of pixels. Defaults to 100.0.
+                invert (bool, optional): invert to brighter when nearer. Defaults to False.
+
+            Returns:
+                np.ndarray (np.uint8): depth image 
+            """
+            d = np.clip(self, 0.0, max_depth)
+            x = np.log1p(d / (log_scale + epsilon))
+            x /= np.log1p(max_depth / (log_scale + epsilon)) + epsilon
+            x = np.clip(x, 0.0, 1.0)
+            if invert:
+                x = 1.0 - x
+            return (x * 255.0).astype(np.uint8)
+
+        def to_disparity(self, min_depth: float = 1.0, max_depth: float = 80.0,
+                        epsilon: float = 1e-6) -> np.ndarray:
+            """
+            Convert depth in meters to a disparity-like grayscale image for visualization.
+
+            Disparity emphasizes nearer objects by mapping inverse depth to intensity.
+            Nearer objects appear brighter, farther objects darker.
+
+            Args:
+                depth_meter (np.ndarray): Depth map in meters (from CARLA decoded depth).
+                min_depth (float, optional): Minimum depth to consider (in meters). 
+                                            Depths smaller than this are clamped. Defaults to 1.0.
+                max_depth (float, optional): Maximum depth to consider (in meters). 
+                                            Depths larger than this are clamped. Defaults to 80.0.
+                epsilon (float, optional): Small constant to avoid division by zero. Defaults to 1e-6.
+
+            Returns:
+                np.ndarray: Grayscale disparity image (uint8), shape = depth_meter.shape,
+                            values in range [0, 255], where closer = brighter.
+            """
+            d = np.clip(self, min_depth, max_depth)
+            disp = (1.0 / (d + epsilon) - 1.0 / max_depth) / \
+                (1.0 / (min_depth + epsilon) - 1.0 / max_depth)
+            disp = np.clip(disp, 0.0, 1.0)
+            return (disp * 255.0).astype(np.uint8)
+
     def __init__(self, world: carla.World):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
@@ -398,7 +472,7 @@ class Depth(SensorCameraDepthStub, SensorSpawn):
         image = np.frombuffer(data.raw_data, dtype = np.uint8).reshape(data.height, data.width, -1)
 
         depth_meter = self.__to_meter__(image)
-        return depth_meter
+        return Depth.DepthMap(depth_meter)
         
 
     @staticmethod
@@ -410,61 +484,74 @@ class Depth(SensorCameraDepthStub, SensorSpawn):
         depth_norm = (r + g * 256.0 + b * 65536.0) / (256 ** 3 - 1)
         return depth_norm * 1000.0
     
-    @staticmethod
-    def to_log(depth_meter: np.ndarray, epsilon: float = 1e-6, scale: float = 100.0, invert: bool = False) -> np.ndarray:
-        """Convert depth array to gray scaled depth image using log scale
+from .stubs.sensor__camera__instance_segmentation_stub import SensorCameraInstanceSegmentationStub
+class InstanceSegmentation(SensorCameraInstanceSegmentationStub, SensorSpawn):
+    def __init__(self, world: carla.World, sat = 0.65):
+        super().__init__()
+        SensorSpawn.__init__(self, self.name, world)
+        
+        self.callback = queue.Queue()
+        
+        self.sat = sat
+        self.cache = {}
+        
+    def extract_data(self):
+        data = self.callback.get()
+        image = np.frombuffer(data.raw_data, dtype = np.uint8).reshape(data.height, data.width, -1)
+        
+        b = image[:, :, 0].astype(np.uint32)
+        g = image[:, :, 1].astype(np.uint32)
+        r = image[:, :, 2].astype(np.uint32)
+        ids = r + (g << 8) + (b << 16)          # 24-bit instance id
 
-        Args:
-            depth_meter (np.ndarray): depth data in meters
-            epsilon (float, optional): prevent division by zero. Defaults to 1e-6.
-            scale (float, optional): scale intensity of pixels. Defaults to 100.0.
-            invert (bool, optional): invert to brighter when nearer. Defaults to False.
-
-        Returns:
-            np.ndarray (np.uint8): depth image 
-        """
-        x = np.log1p(depth_meter / scale)
-        x /= x.max() + epsilon
-        x = 1.0 - x if invert else x
-        return (x * 255.0).astype(np.uint8)
+        return ids.astype(np.int32) 
     
     @staticmethod
-    def to_disparity(depth_meter: np.ndarray, min_depth: float = 1.0, max_depth: float = 80.0, epsilon = 1e-6) -> np.ndarray:
-        """
-        Convert depth in meters to a disparity-like grayscale image for visualization.
-
-        Disparity emphasizes nearer objects by mapping inverse depth to intensity.
-        Nearer objects appear brighter, farther objects darker.
-
-        Args:
-            depth_meter (np.ndarray): Depth map in meters (from CARLA decoded depth).
-            min_depth (float, optional): Minimum depth to consider (in meters). 
-                                        Depths smaller than this are clamped. Defaults to 1.0.
-            max_depth (float, optional): Maximum depth to consider (in meters). 
-                                        Depths larger than this are clamped. Defaults to 80.0.
-            epsilon (float, optional): Small constant to avoid division by zero. Defaults to 1e-6.
-
-        Returns:
-            np.ndarray: Grayscale disparity image (uint8), shape = depth_meter.shape,
-                        values in range [0, 255], where closer = brighter.
-        """
-        d = np.clip(depth_meter, min_depth, max_depth)
-        disp = (1.0 / (d + epsilon) - 1.0 / max_depth) / (1.0 / (min_depth + epsilon) - 1.0 / max_depth)
-        disp = np.clip(disp, 0.0, 1.0)
-        return (disp * 255.0).astype(np.uint8) 
+    def instance_edge(instance_id: np.ndarray, color=(255,255,255)) -> np.ndarray:
+        edges = (cv2.Canny((instance_id % 256).astype(np.uint8), 0, 1) > 0)  # quick edge proxy
+        edgeImg = np.zeros((*instance_id.shape, 3), np.uint8)
+        edgeImg[edges] = color
+        return edgeImg
     
     @staticmethod
-    def to_windowed(depth_meter: np.ndarray, max_depth: float = 80.0, invert: bool = False) -> np.ndarray:
-        """
-        Linear windowed depth → grayscale.
-        Args:
-            depth_meter: depth in meters.
-            max_depth: distances ≥ maxDepth map to the darkest end.
-            invert: if True, nearer → brighter.
-        Returns:
-            uint8 grayscale image [0,255].
-        """
-        d = np.clip(depth_meter / max_depth, 0.0, 1.0)
-        if invert:           # nearer → brighter
-            d = 1.0 - d
-        return (d * 255.0).astype(np.uint8)
+    def colorized(instanceId: np.ndarray, sat: float = 0.65) -> np.ndarray:
+        h, w = instanceId.shape
+        ids, inv = np.unique(instanceId, return_inverse=True)
+
+        phi = 0.61803398875
+        h_ = (ids * phi) % 1.0
+        s_ = np.full_like(h_, float(np.clip(sat, 0, 1)))
+        v_ = np.ones_like(h_)
+
+        i = np.floor(h_ * 6).astype(int) % 6
+        f = h_ * 6 - np.floor(h_ * 6)
+
+        p = v_ * (1 - s_)
+        q = v_ * (1 - f * s_)
+        t = v_ * (1 - (1 - f) * s_)
+
+        r = np.empty_like(h_); g = np.empty_like(h_); b = np.empty_like(h_)
+        m0 = (i == 0); r[m0], g[m0], b[m0] = v_[m0], t[m0], p[m0]
+        m1 = (i == 1); r[m1], g[m1], b[m1] = q[m1], v_[m1], p[m1]
+        m2 = (i == 2); r[m2], g[m2], b[m2] = p[m2], v_[m2], t[m2]
+        m3 = (i == 3); r[m3], g[m3], b[m3] = p[m3], q[m3], v_[m3]
+        m4 = (i == 4); r[m4], g[m4], b[m4] = t[m4], p[m4], v_[m4]
+        m5 = (i == 5); r[m5], g[m5], b[m5] = v_[m5], p[m5], q[m5]
+
+        bgr = (np.stack([b, g, r], axis=1) * 255.0).astype(np.uint8)
+        bgr[ids <= 0] = (0, 0, 0)
+
+        out = bgr[inv].reshape(h, w, 3)
+        return out
+
+    
+def overlay(rgb_image: np.ndarray, to_overlay: np.ndarray, alpha = 0.1):
+    rgb_dim = rgb_image.shape[-1]
+    if to_overlay.ndim == 2:
+        to_overlay = np.array([to_overlay] * rgb_dim)
+    elif to_overlay.ndim == 3:
+        if to_overlay.shape[-1] == 1:
+            to_overlay = np.dstack([to_overlay] * rgb_dim)
+
+    
+    return  rgb_image * (1 - alpha) + to_overlay * alpha
