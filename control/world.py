@@ -1,0 +1,35 @@
+import carla
+from rich import print
+
+class World:
+    def __init__(self, client: carla.Client, tm_port: int, delta = 0.05):
+        self.client = client
+        self.world = client.get_world()
+        self.tm = client.get_trafficmanager(tm_port)
+        self.tm_port = tm_port
+
+        self.sync = False; self.delta = delta
+        self.timeout = 1.0
+        self.settings: carla.WorldSettings = self.world.get_settings()
+        
+    def switch_map(self, name: str):
+        self.client.load_world(name)
+        
+    def apply_settings(self):
+        self.client.set_timeout(self.timeout)
+        self.settings.synchronous_mode = self.sync
+        self.settings.fixed_delta_seconds = self.delta if self.sync != 0 else None
+        self.world.apply_settings(self.settings)
+        self.tm.set_synchronous_mode(self.sync)
+
+    def factory_reset(self):
+        print("[yellow][WARNING][/]: Reseting world to factory")
+        self.sync = False
+        self.settings.synchronous_mode = self.sync
+        self.settings.fixed_delta_seconds = self.delta if self.sync else None
+        try:
+            self.tm.set_synchronous_mode(self.sync)
+            self.world.apply_settings(self.settings)
+        except Exception as e:
+            print(f"[red][ERROR][/]: Failed to reset world -> {e}")
+        print("[green][INFO]: World reset to async[/]")
