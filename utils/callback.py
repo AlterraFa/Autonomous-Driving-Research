@@ -1,8 +1,4 @@
 import threading
-try:
-    import carla
-except:
-    raise ImportError("Did not find carla")
 
 class CustomCallback:
     def __init__(self, attr_list: dict = None):
@@ -12,7 +8,7 @@ class CustomCallback:
 
         self._attr_list = attr_list
         
-    def put(self, data: carla.GnssMeasurement):
+    def put(self, data):
         with self._lock:
             self._latest = data
             self._have_sample.set()
@@ -25,7 +21,8 @@ class CustomCallback:
         if data is None:
             return None
         
-        if self._attr_list is None or (len(self._attr_list) != 0 and isinstance(self._attr_list, dict) == False): return data
+        if self._attr_list is None or (len(self._attr_list) != 0 and isinstance(self._attr_list, dict) == False): 
+            return data
         else:
             data_load = {}
             for shorthand, fullname in self._attr_list.items():

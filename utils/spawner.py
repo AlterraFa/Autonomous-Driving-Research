@@ -37,7 +37,7 @@ class Spawn:
 
         self.vehicles = []; self.walkers = []; self.sensors = []
 
-    def spawn_mass_vehicle(self, size: int, transform: carla.Transform = None, autopilot = True, exclude: VehicleClass = None):
+    def spawn_mass_vehicle(self, size: int, transform: carla.Transform = None, autopilot = True, exclude: list[VehicleClass] = None):
         if size < 0:
             print(f"[red][ERROR][/]: Number of spawning vehicles must be a positive integer")
             exit(12)
@@ -102,7 +102,7 @@ class Spawn:
         self.world.tick()
         print(f"[green][INFO][/]: Spawned single successfully. Name: {str(vehicle_bp.id)}. {self.get_size} vehicles in environment")
         
-    def destroy_vehicle(self):
+    def destroy_all_vehicles(self):
         for vehicle in self.get_vehicles:
             vehicle.destroy()
         print("[green][INFO][/]: Destroyed all vehicles")

@@ -1,6 +1,5 @@
 import carla
 import numpy as np
-import queue
 import json
 import cv2
 
@@ -24,7 +23,7 @@ class SensorSpawn(object):
         self.literal_name = self.__literal_name__(self.name)
         self.actor        = None
         
-    def spawn(self, attach_to: None, **kwargs):
+    def spawn(self, attach_to = None, **kwargs):
         loc = carla.Location(
             x=kwargs.get("x", 0.0),
             y=kwargs.get("y", 0.0),
@@ -68,7 +67,7 @@ class LidarRaycast(SensorLidarRayCastStub, SensorSpawn, LIDARVisualizer):
         LIDARVisualizer.__init__(self, vis_range, vis_window)
         
         self.sensor_bp = world.get_blueprint_library().find(self.name)
-        self.callback = queue.Queue()
+        self.callback = CustomCallback()
         self.pc = np.zeros((1, 3))
     
     def extract_data(self):
@@ -100,7 +99,7 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
             palette = json.load(f)
         self.palette = {int(k): tuple(v) for k, v in palette.items()}
         
-        self.callback = queue.Queue()
+        self.callback = CustomCallback()
         self.num_label = len(list(CarlaLabel))
         self._lut_data = self._build_lut_rgba()
         
@@ -151,7 +150,7 @@ class RGB(SensorCameraRgbStub, SensorSpawn):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
 
-        self.callback = queue.Queue()
+        self.callback = CustomCallback()
     
     def extract_data(self):
         if not hasattr(self, "actor"):
@@ -465,7 +464,7 @@ class Depth(SensorCameraDepthStub, SensorSpawn):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
         
-        self.callback = queue.Queue()
+        self.callback = CustomCallback()
         
     def extract_data(self):
         data = self.callback.get()
@@ -490,7 +489,7 @@ class InstanceSegmentation(SensorCameraInstanceSegmentationStub, SensorSpawn):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
         
-        self.callback = queue.Queue()
+        self.callback = CustomCallback()
         
         self.sat = sat
         self.cache = {}
