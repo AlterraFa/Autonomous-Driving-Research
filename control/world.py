@@ -9,7 +9,7 @@ class World:
         self.tm_port = tm_port
 
         self.sync = False; self.delta = delta
-        self.timeout = 1.0
+        self.timeout = 1.0; self.disable_render = False
         self.settings: carla.WorldSettings = self.world.get_settings()
         
     def switch_map(self, name: str):
@@ -19,6 +19,7 @@ class World:
         self.client.set_timeout(self.timeout)
         self.settings.synchronous_mode = self.sync
         self.settings.fixed_delta_seconds = self.delta if self.sync != 0 else None
+        self.settings.no_rendering_mode = self.disable_render
         self.world.apply_settings(self.settings)
         self.tm.set_synchronous_mode(self.sync)
 

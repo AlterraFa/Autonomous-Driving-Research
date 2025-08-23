@@ -42,6 +42,23 @@ class SensorSpawn(object):
         self.actor = self.world.spawn_actor(self.sensor_bp, transform, attach_to = attach_to)
         self.actor.listen(self.callback.put)
         print(f"[green][INFO][/]: Sensor [bold]{self.literal_name}[/bold] spawned successfully. Listening to it")
+    
+    def change_view(self, **kwargs):
+        loc = carla.Location(
+            x=kwargs.get("x", 0.0),
+            y=kwargs.get("y", 0.0),
+            z=kwargs.get("z", 0.0)
+        )
+
+        # Extract rotation
+        rot = carla.Rotation(
+            roll=kwargs.get("roll", 0.0),
+            pitch=kwargs.get("pitch", 0.0),
+            yaw=kwargs.get("yaw", 0.0)
+        )
+        transform = carla.Transform(loc, rot)
+        
+        self.actor.set_transform(transform)
 
     def destroy(self):
         if hasattr(self, "actor"):
@@ -90,7 +107,47 @@ class LidarRaycast(SensorLidarRayCastStub, SensorSpawn, LIDARVisualizer):
 from .stubs.sensor__camera__semantic_segmentation_stub import SensorCameraSemanticSegmentationStub
 class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
     
-    def __init__(self, world: carla.World):
+    class SemanticData(np.ndarray):
+        __array_priority__ = 1000
+
+        def __new__(cls, arr, **meta):
+            obj = np.asarray(arr, dtype=np.uint32).view(cls)
+            obj.meta = meta
+            return obj
+
+        def __array_finalize__(self, obj):
+            if obj is None: return
+            self.meta = getattr(obj, "meta", {})
+
+        def to_image(self, layers: list[CarlaLabel] = None, alpha: float = 1.0) -> np.ndarray:
+            if layers is not None and not isinstance(layers, list):
+                raise TypeError("layers arg must be a list of name of layers")
+            
+            _lut_data = self.meta['lut']
+            num_label = self.meta['num_label']
+            
+            if layers is None:
+                lut = _lut_data
+            else:
+                sel = np.zeros(num_label, dtype=bool)
+                for lbl in layers:
+                    sel[int(lbl.value)] = True
+                lut = self._lut_data.copy()
+                lut[~sel] = 0
+
+            overlay = lut[self]
+
+            a = int(round(max(0.0, min(1.0, float(alpha))) * 255))
+            if a < 256:
+                rgb = overlay[..., :3].astype(np.uint16)
+                overlay[..., :3] = (rgb * a // 255).astype(np.uint8)
+                overlay[..., 3] = 255
+                
+            return overlay
+
+
+    
+    def __init__(self, world: carla.World, convert_to: SemanticData = None):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
 
@@ -103,33 +160,21 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
         self.num_label = len(list(CarlaLabel))
         self._lut_data = self._build_lut_rgba()
         
-    def extract_data(self, layers: Optional[list[CarlaLabel]] = None, alpha = 1):
+        self.convert_to = convert_to
+        
+    def extract_data(self):
         if not hasattr(self, "actor"):
             raise ReferenceError(f"Actor {self.__class__.__name__} has not been spawned")
-        if layers is not None and not isinstance(layers, list):
-            raise TypeError("layers arg must be a list of name of layers")
 
         data = self.callback.get()
         labels = self.__decode_semantic_labels__(data)
 
-        if layers is None:
-            lut = self._lut_data
-        else:
-            sel = np.zeros(self.num_label, dtype=bool)
-            for lbl in layers:
-                sel[int(lbl.value)] = True
-            lut = self._lut_data.copy()
-            lut[~sel] = 0
-
-        overlay = lut[labels]
-
-        a = int(round(max(0.0, min(1.0, float(alpha))) * 255))
-        if a < 256:
-            rgb = overlay[..., :3].astype(np.uint16)
-            overlay[..., :3] = (rgb * a // 255).astype(np.uint8)
-            overlay[..., 3] = 255
-
-        return overlay, labels  # RGBA uint8
+        
+        if self.convert_to is None:
+            return labels
+        
+        sem_data = SemanticSegmentation.SemanticData(labels, lut = self._lut_data, num_label = self.num_label)
+        return self.convert_to(sem_data)
     
     def _build_lut_rgba(self) -> np.ndarray:
         lut = np.zeros((self.num_label, 4), dtype=np.uint8)
@@ -331,11 +376,11 @@ class IMU(SensorOtherImuStub, SensorSpawn):
                     accel: np.ndarray = None,
                     gyro: np.ndarray = None,
                     comp: float = None):
-           self.Accel = accel
-           self.Gyro  = gyro
-           self.Comp  = comp
+           self.Acceleration = accel
+           self.Gyroscope    = gyro
+           self.Compass      = comp
            
-           self._data = {"Acceleration": self.Accel, "Gyroscope": self.Gyro, "Compass": self.Comp}
+           self._data = {"Acceleration": self.Acceleration, "Gyroscope": self.Gyroscope, "Compass": self.Compass}
            
         def __iter__(self):
             return iter(self._data)
@@ -347,20 +392,20 @@ class IMU(SensorOtherImuStub, SensorSpawn):
             return self._data[key]
         
         def __repr__(self):
-            if self.Accel is None:
+            if self.Acceleration is None:
                 return "<GNSSData: no data>"
             parts = [
-                f"Acceleration(x={self.Accel[0]: .4f}, "
-                f"y={self.Accel[1]: .4f}, "
-                f"z={self.Accel[2]: .4f})"
+                f"Acceleration(x={self.Acceleration[0]: .4f}, "
+                f"y={self.Acceleration[1]: .4f}, "
+                f"z={self.Acceleration[2]: .4f})"
             ]
-            if self.Gyro is not None:
+            if self.Gyroscope is not None:
                 parts.append(
-                    f"Gyroscope(x={self.Gyro[0]: .4f}, y={self.Gyro[1]: .4f}, z={self.Gyro[2]: .4f})"
+                    f"Gyroscope(x={self.Gyroscope[0]: .4f}, y={self.Gyroscope[1]: .4f}, z={self.Gyroscope[2]: .4f})"
                 )
-            if self.Comp is not None:
+            if self.Compass is not None:
                 parts.append(
-                    f"Compass={np.degrees(self.Comp): .4f}"
+                    f"Compass={np.degrees(self.Compass): .4f}"
                 )
             return " | ".join(parts)
 
@@ -460,18 +505,20 @@ class Depth(SensorCameraDepthStub, SensorSpawn):
             disp = np.clip(disp, 0.0, 1.0)
             return (disp * 255.0).astype(np.uint8)
 
-    def __init__(self, world: carla.World):
+    def __init__(self, world: carla.World, convert_to: DepthMap = None):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
         
         self.callback = CustomCallback()
+        self.convert = convert_to
         
     def extract_data(self):
         data = self.callback.get()
         image = np.frombuffer(data.raw_data, dtype = np.uint8).reshape(data.height, data.width, -1)
 
         depth_meter = self.__to_meter__(image)
-        return Depth.DepthMap(depth_meter)
+        depth_map = Depth.DepthMap(depth_meter)
+        return depth_map if self.convert is None else self.convert(depth_map)
         
 
     @staticmethod
@@ -542,15 +589,3 @@ class InstanceSegmentation(SensorCameraInstanceSegmentationStub, SensorSpawn):
 
         out = bgr[inv].reshape(h, w, 3)
         return out
-
-    
-def overlay(rgb_image: np.ndarray, to_overlay: np.ndarray, alpha = 0.1):
-    rgb_dim = rgb_image.shape[-1]
-    if to_overlay.ndim == 2:
-        to_overlay = np.array([to_overlay] * rgb_dim)
-    elif to_overlay.ndim == 3:
-        if to_overlay.shape[-1] == 1:
-            to_overlay = np.dstack([to_overlay] * rgb_dim)
-
-    
-    return  rgb_image * (1 - alpha) + to_overlay * alpha

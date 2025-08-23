@@ -3,10 +3,14 @@ import numpy as np
 import time
 
 from control.world import World
+from control.vehicle_control import Vehicle
+from utils.sensor_spawner import *
 
 from typing import Optional
 from enum import Enum
 from rich import print
+from typing import Union, Dict
+from traceback import print_exc
 
 
 class CameraView(Enum):
@@ -20,20 +24,25 @@ class CameraView(Enum):
     }
 
 class CarlaViewer:
-    def __init__(self, world: World, vehicle, width: int, height: int, sync: bool = False, fps: int = 144):
+    def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, sync: bool = False, fps: int = 60):
         self.virt_world = world
         self.world = world.world
         self.width = width
         self.height = height
         self.sync = sync
         self.fps = fps
-        self.vehicle = vehicle
+
+        self.virt_vehicle = vehicle
+        self.vehicle      = vehicle.vehicle
+
+        self.vehicle_name = vehicle.literal_name()
+        self.world_name   = self.world.get_map().name.split("/")[-1]
 
         self.display: Optional[pygame.Surface] = None
         self.clock: Optional[pygame.time.Clock] = None
         self.running = False
         self.rgb_sensor = None  
-        self.sensors_list = dict()
+        self.sensors_list: Dict[str, Union[RGB, Depth, SemanticSegmentation, GNSS, IMU, LidarRaycast]] = {}
         self.camera_keys = []
         
         self.cleanup_done = False
@@ -80,11 +89,11 @@ class CarlaViewer:
         self.clock = pygame.time.Clock()
 
 
-    def handle_events(self) -> bool:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                return False
-        return True
+    # def handle_events(self) -> bool:
+    #     for event in pygame.event.get():
+    #         if event.type == pygame.QUIT:
+    #             return False
+    #     return True
 
     @staticmethod
     def to_surface(frame: np.ndarray) -> pygame.Surface:
@@ -114,7 +123,6 @@ class CarlaViewer:
     def draw_frame(self, frame: np.ndarray) -> None:
         surface = self.to_surface(frame)
         self.display.blit(surface, (0, 0))
-        pygame.display.flip()
 
     def step_world(self) -> None:
         if self.sync:
@@ -122,42 +130,84 @@ class CarlaViewer:
         else:
             self.world.wait_for_tick()
             
-    def change_view(self, view_name):
-        self.choosen_sensor.spawn(attach_to = self.vehicle, **getattr(CameraView, view_name).value)
+    def change_view_all(self, view_name: str):
+        for camera_name in self.camera_keys:
+            self.sensors_list[camera_name].change_view(**getattr(CameraView, view_name).value)
+    
+    def draw_hud(self):
+        snapshot = self.world.get_snapshot()
+        current_platform_time = snapshot.timestamp.platform_timestamp  # server wall clock
+        if self.last_platform_time is not None:
+            dt_real = current_platform_time - self.last_platform_time
+            self.server_fps = 1.0 / dt_real if dt_real > 0 else 0
+        self.last_platform_time = current_platform_time
+
+        accel = self.sensors_list['imu'].extract_data().Acceleration
+        try: heading = self.sensors_list['imu'].extract_data().Compass * 180 / np.pi
+        except: heading = "N/A"
+        try: accel = self.sensors_list['imu'].extract_data().Acceleration
+        except: accel = "N/A"
+        try: gyro = self.sensors_list['imu'].extract_data().Gyroscope
+        except: gyro = "N/A"
+        try: enu = self.sensors_list['gnss'].extract_data(return_ecf = True, return_enu = True).ENU
+        except: enu = "N/A"
+        try: geo = self.sensors_list['gnss'].extract_data(return_ecf = True, return_enu = True).Geodetic
+        except: geo = "N/A"
+        
+        
+        self.hud.update_measurement(server_fps = self.server_fps, client_fps = self.fps, 
+                        vehicle_name = self.vehicle_name, world_name = self.world_name,
+                        velocity = self.virt_vehicle.get_velocity(False), heading = heading,
+                        accel = accel, gyro = gyro, enu = enu, geo = geo)
+        
+        self.hud.update_control(**self.virt_vehicle.get_ctrl())
 
     def run(self) -> None:
         if self.display is None:
             self.init_win()
 
+        self.last_platform_time = None; self.server_fps = 0
         self.controller = KeyboardController()
-        try:
-            while self.controller.process_events():
-                self.step_world()
-                start = time.time()
-                if not self.handle_events():
-                    self.controller.running = False
-                    break
+        self.hud = HUD("jetbrainsmononerdfontpropo", fontSize = 12)
+        self.virt_vehicle.set_autopilot(self.controller.autopilot) # First init for autopilot
 
-                data = self.choosen_sensor.extract_data()
-                if isinstance(data, tuple): frame = data[0]
-                else: frame = data
+
+        try:
+            while self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
+                self.step_world()
+                self.draw_hud()
+
+                frame = self.choosen_sensor.extract_data()
                 if frame is not None:
                     self.draw_frame(frame)
+                    self.hud.draw(self.display)
+                    self.hud.draw_controls(self.display)
                     
                     
                 if self.controller.view_changed:
-                    self.choosen_sensor.change_view(**getattr(CameraView, self.controller.view_name).value)
+                    self.change_view_all(self.controller.view_name)
                 if self.controller.camera_changed:
                     self.switch_camera(self.controller.camera_step)
-                
-                # print(1 / (time.time() - start), end = '\r')
+                self.virt_vehicle.set_autopilot(self.controller.autopilot)
+                if self.controller.autopilot == False:
+                    self.virt_vehicle.apply_control(self.controller.delta_throt, 
+                                                    self.controller.delta_steer, 
+                                                    self.controller.delta_brake,
+                                                    self.controller.reverse,
+                                                    self.controller.hand_brake)
+
+                pygame.display.flip()
                 if self.clock:
                     self.clock.tick(self.fps)
+
+
+
         except KeyboardInterrupt:
             print("[yellow][INFO]: Viewer interrupted by user[/]")
             self.controller.running = False
         except Exception as e:
             print(f"[red][ERROR]: Viewer error: {e}[/]")
+            print_exc()
             self.controller.running = False
         finally:
             self.close()
@@ -188,7 +238,6 @@ class CarlaViewer:
         except Exception as e:
             print(f"[red][ERROR]: Pygame quit failed: {e}[/]")
 
-
     def __del__(self):
         """Destructor to ensure cleanup"""
         if not self.cleanup_done:
@@ -199,14 +248,21 @@ class KeyboardController:
         pygame.key.set_repeat()  # no auto-repeat by default
         self.running = True
         
+        
         self.view_name = "FIRST_PERSON"; self.view_changed = False
         self.camera_step = 1; self.camera_changed = False
         self.prev_keys_view = pygame.key.get_pressed()
+        
+        self.autopilot = False
+        self.delta_throt = 0; self.delta_steer = 0; self.delta_brake = 0
+        self.reverse = False
+        self.hand_brake = False
 
-    def process_events(self):
+    def process_events(self, server_time: float):
         """Process keyboard + window events.
         Returns False if the program should quit."""
-        for event in pygame.event.get():
+        events = pygame.event.get()
+        for event in events:
             if event.type == pygame.QUIT:
                 self.running = False
         
@@ -214,24 +270,218 @@ class KeyboardController:
         if keys[pygame.K_k] or keys[pygame.K_ESCAPE]:
             self.running = False
 
-        self.process_view()
+        self.process_view(events)
+        self.process_ctrl(events, server_time)
         return self.running
     
-    def process_view(self):
+    def process_view(self, events):
         self.view_changed = False; self.camera_changed = False
+        for event in events:
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_UP:
+                    self.view_name = "FIRST_PERSON"
+                    self.view_changed = True
+                    print(f"[green][INFO][/]: View toggled → [i]{'First Person'}[/i]")
+
+                elif event.key == pygame.K_DOWN:
+                    self.view_name = "THIRD_PERSON"
+                    self.view_changed = True
+                    print(f"[green][INFO][/]: View toggled → [i]{'Third Person'}[/i]")
+
+                elif event.key == pygame.K_RIGHT:
+                    self.camera_changed = True
+                    self.camera_step = 1
+
+                elif event.key == pygame.K_LEFT:
+                    self.camera_changed = True
+                    self.camera_step = -1
+
+    def process_ctrl(self, events, server_time):
+        self.delta_throt = 0; self.delta_steer = 0; self.delta_brake = 0
+        for event in events:
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    self.running = False
+                    return False
+
+                elif event.key == pygame.K_BACKQUOTE:   # the ` key under ESC
+                    self.autopilot = not self.autopilot
+                    print(f"[yellow][WARNING][/]: Autopilot toggled → [i][{'green'if self.autopilot else 'red'}]{'Engaged' if self.autopilot else 'Disengaged'}[/i][/]")
+
+                elif event.key == pygame.K_q:
+                    self.reverse = not self.reverse
+                    
+                elif event.key == pygame.K_SPACE:
+                    self.hand_brake = not self.hand_brake
+                
         keys = pygame.key.get_pressed()
-        if keys[pygame.K_UP]:
-            self.view_name = "FIRST_PERSON"
-            self.view_changed = True
-        elif keys[pygame.K_DOWN]:
-            self.view_name = "THIRD_PERSON"
-            self.view_changed = True
-            
-        if keys[pygame.K_RIGHT] and not self.prev_keys[pygame.K_RIGHT]:
-            self.camera_changed = True
-            self.camera_step = 1
-        elif keys[pygame.K_LEFT] and not self.prev_keys[pygame.K_LEFT]:
-            self.camera_changed = True
-            self.camera_step = -1
-            
-        self.prev_keys = keys
+        steer_inc = 5e-4 * server_time * 1000
+        if keys[pygame.K_w]:
+            self.delta_throt = 0.01
+        if keys[pygame.K_s]:
+            self.delta_brake = 0.2
+        if keys[pygame.K_a]:
+            self.delta_steer = -steer_inc
+        if keys[pygame.K_d]:
+            self.delta_steer = steer_inc
+                    
+
+        
+class HUD:
+    def __init__(self, fontName="Arial", fontSize=24):
+        pygame.font.init()
+        self.font = pygame.font.SysFont(fontName, fontSize, bold = True)
+        self.server_fps = 0
+        self.client_fps = 0
+        self.vehicle_name = ""
+        self.world_name = ""
+        self.velocity = 0
+        self.heading = 0
+        self.accel = 'N/A'
+        self.gyro = 'N/A'
+        self.enu = 'N/A'
+        self.geo = 'N/A'
+        
+        self.ctrl = {
+            "throttle": 0.0,
+            "steer": 0.0,
+            "brake": 0.0,
+            "reverse": False,
+            "handbrake": False,
+            "manual": False,
+            "gear": 0,
+            'autopilot': False
+        }
+        
+    def update_measurement(self, **kwargs):
+        self.client_fps = kwargs.get("client_fps", self.client_fps)
+        self.server_fps = kwargs.get("server_fps", self.server_fps)
+        self.vehicle_name = kwargs.get("vehicle_name", self.vehicle_name)
+        self.world_name = kwargs.get("world_name", self.world_name)
+        self.velocity = kwargs.get("velocity", self.velocity)
+        self.heading = kwargs.get("heading", self.heading)
+        self.accel = kwargs.get("accel", self.accel)
+        self.gyro  = kwargs.get("gyro", self.gyro)
+        self.enu   = kwargs.get('enu', self.enu)
+        self.geo   = kwargs.get('geo', self.geo)
+
+    def update_control(self, **kwargs):
+        for key in self.ctrl:
+            if key in kwargs:
+                self.ctrl[key] = kwargs[key]
+
+        
+    @staticmethod
+    def heading_to_cardinal(deg: float) -> str:
+        directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+        idx = int((deg + 22.5) % 360 // 45)
+        return directions[idx] if isinstance(deg, Union[float, int]) else ""
+
+    def draw(self, surface: pygame.Surface):
+
+        overlay = pygame.Surface((310, surface.get_height()), pygame.SRCALPHA)
+        pygame.draw.rect(overlay, (0, 0, 0, 100), overlay.get_rect())
+        surface.blit(overlay, (0, 0))
+        
+        if isinstance(self.accel, str): accel_str = self.accel
+        else: accel_str = f"( {self.accel[0]: 6.2f}, {self.accel[1]: 6.2f}, {self.accel[2]: 6.2f} )"
+        if isinstance(self.gyro, str): gyro_str = self.gyro
+        else: gyro_str = f"( {self.gyro[0]: 6.2f}, {self.gyro[1]: 6.2f}, {self.gyro[2]: 6.2f} )"
+        if isinstance(self.geo, str): geo_str = self.geo
+        else: geo_str = f"( {self.geo.lat: 6.6f}, {self.geo.lon: 6.6f} )"
+        
+        if isinstance(self.enu, str):
+            h_str = "N/A"
+            loc_str = "N/A"
+        else:
+            h_str = f"{self.enu.up: 6.2f} m" 
+            loc_str = f"( {self.enu.east: 6.2f}, {self.enu.north: 6.2f} )"
+
+
+        value_strings = [
+            f"{int(self.server_fps)} FPS",
+            f"{int(self.client_fps)} FPS",
+            self.vehicle_name,
+            self.world_name,
+            f'{self.velocity:.2f} (km/h)',
+            f'{self.heading}',
+            accel_str,
+            loc_str,
+            h_str,
+            geo_str
+        ]
+        max_string = max(max(len(s) for s in value_strings), 15)
+        spacing = 15
+        
+        serverfpsText = self.font.render(f"{'Server side:':<{spacing}}{f'{int(self.server_fps)} FPS':>{max_string}}", True, (255, 255, 255))
+        surface.blit(serverfpsText, (10, 10)) 
+
+        clientfpsText = self.font.render(f"{'Client side:':<{spacing}}{f'{int(self.client_fps)} FPS':>{max_string}}", True, (255, 255, 255))
+        surface.blit(clientfpsText, (10, 30)) 
+
+        vehicleText = self.font.render(f"{'Vehicle name:':<{spacing}}{self.vehicle_name:>{max_string}}", True, (255, 255, 255))
+        surface.blit(vehicleText, (10, 70)) 
+
+        worldText = self.font.render(f"{'World name:':<{spacing}}{self.world_name:>{max_string}}", True, (255, 255, 255))
+        surface.blit(worldText, (10, 90)) 
+
+        velocityText = self.font.render(f"{'Velocity:':<{spacing}}{f'{self.velocity:.2f} (km/h)':>{max_string}}", True, (255, 255, 255))
+        surface.blit(velocityText, (10, 130)) 
+
+        headingText = self.font.render(f"{'Heading:':<{spacing}}{f'{self.heading:.1f}° {self.heading_to_cardinal(self.heading)}':>{max_string}}", True, (255, 255, 255))
+        surface.blit(headingText, (10, 150)) 
+
+        accelText = self.font.render(f"{'Acceleration:':<{spacing}}{f'{accel_str}':>{max_string}}", True, (255, 255, 255))
+        surface.blit(accelText, (10, 170)) 
+        
+        gyroText = self.font.render(f"{'Gyroscope:':<{spacing}}{f'{gyro_str}':>{max_string}}", True, (255, 255, 255))
+        surface.blit(gyroText, (10, 190)) 
+
+        locText = self.font.render(f"{'Location:':<{spacing}}{f'{loc_str}':>{max_string}}", True, (255, 255, 255))
+        surface.blit(locText, (10, 210)) 
+
+        geoText = self.font.render(f"{'Geodetic:':<{spacing}}{f'{geo_str}':>{max_string}}", True, (255, 255, 255))
+        surface.blit(geoText, (10, 230)) 
+
+        heightText = self.font.render(f"{'Height:':<{spacing}}{f'{h_str}':>{max_string}}", True, (255, 255, 255))
+        surface.blit(heightText, (10, 250)) 
+        
+    def draw_controls(self, surface, x=10, y=290):
+        line_h = 20
+        bar_w, bar_h = 150, 10   # bar size
+        bar_x = x + 100          # where bars start (shifted right of labels)
+
+        white = (255, 255, 255)
+        green = (0, 200, 0)
+        red   = (200, 0, 0)
+
+        # ---- Throttle bar ----
+        surface.blit(self.font.render("Throttle:", True, white), (x, y))
+        pygame.draw.rect(surface, white, (bar_x, y+5, bar_w, bar_h), 1)  # outline
+        pygame.draw.rect(surface, green, (bar_x, y+5, min(int(bar_w * self.ctrl['throttle']), bar_w), bar_h))
+
+        # ---- Steer bar (centered at 0) ----
+        surface.blit(self.font.render("Steer:", True, white), (x, y+line_h))
+        pygame.draw.rect(surface, white, (bar_x, y+line_h+5, bar_w, bar_h), 1)  # outline
+        steer_val = self.ctrl['steer']  # -1 .. +1
+        if steer_val >= 0:
+            # fill right side
+            pygame.draw.rect(surface, green, (bar_x + bar_w//2, y+line_h+5,
+                                            min(int((bar_w//2) * steer_val), (bar_w//2)), bar_h))
+        else:
+            # fill left side
+            pygame.draw.rect(surface, green, (bar_x + bar_w//2 + int((bar_w//2)*steer_val), y+line_h+5,
+                                            max(int(-(bar_w//2) * steer_val), -(bar_w//2)), bar_h))
+
+        # ---- Brake bar ----
+        surface.blit(self.font.render("Brake:", True, white), (x, y+2*line_h))
+        pygame.draw.rect(surface, white, (bar_x, y+2*line_h+5, bar_w, bar_h), 1)  # outline
+        pygame.draw.rect(surface, red, (bar_x, y+2*line_h+5, min(int(bar_w * self.ctrl['brake']), bar_w), bar_h))
+
+        # ---- Others as text ----
+        spacing = 33
+        surface.blit(self.font.render(f"{'Throttle:':<{spacing}} {'■' if self.ctrl['reverse'] else '□'}", True, white), (x, y+3*line_h))
+        surface.blit(self.font.render(f"{'Hand brake:':<{spacing}} {'■' if self.ctrl['handbrake'] else '□'}", True, white), (x, y+4*line_h))
+        surface.blit(self.font.render(f"{'Manual:':<{spacing}} {'■' if self.ctrl['manual'] else '□'}", True, white), (x, y+5*line_h))
+        surface.blit(self.font.render(f"{'Gear:':<{spacing}} {self.ctrl['gear']}", True, white), (x, y+6*line_h))
+        surface.blit(self.font.render(f"{'Autopilot:':<{spacing}} {'■' if self.ctrl['autopilot'] else '□'}", True, (255,255,255)), (x, y+7*line_h))

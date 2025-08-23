@@ -15,6 +15,8 @@ from utils.sensor_spawner import (
     GNSS,
     IMU, 
     Depth,
+    InstanceSegmentation,
+    overlay, 
     CarlaLabel as Clabel
 )
 from rich import print
@@ -58,7 +60,7 @@ if __name__ == "__main__":
     rgb_sensor = RGB(world)
     rgb_sensor.set_attribute(name = "image_size_x", value = 800)
     rgb_sensor.set_attribute(name = "image_size_y", value = 600)
-    rgb_sensor.spawn(attach_to = vehicle, z = 2, yaw = 0)
+    rgb_sensor.spawn(attach_to = None, z = 2, yaw = 0)
     
     lidar_sensor = LidarRaycast(world)
     lidar_sensor.set_attribute("dropoff_general_rate", 0.1)
@@ -80,6 +82,11 @@ if __name__ == "__main__":
     depth_sensor = Depth(world)
     depth_sensor.spawn(attach_to = vehicle, z = 2)
     
+    instance_sensor = InstanceSegmentation(world)
+    instance_sensor.spawn(attach_to = vehicle, z = 2)
+    
+    steer = 0; max_steer = 30
+    throttle = 0; max_throttle = 100
 
     try:
 
@@ -87,15 +94,28 @@ if __name__ == "__main__":
             frame_id = world.tick()
             semantic_image, labels = semantic_sensor.extract_data(alpha = 1.0, layers = None)
             rgb_image              = rgb_sensor.extract_data()
-            pcd, intensity         = lidar_sensor.extract_data()
             geo_location           = gsss_sensor.extract_data(return_ecf = True, return_enu = True)
             imu_data               = imu_sensor.extract_data()
             depth_data             = depth_sensor.extract_data()
+            print(geo_location)
             
-            depth_gray = depth_sensor.to_log(depth_data, scale = 200)
             cv2.imshow("Sensor stack", np.hstack([semantic_image, rgb_image]))
-            cv2.imshow("Depth", depth_gray)
+            
             key = cv2.waitKey(1)
+            if key == ord("w"):
+                throttle += 1
+            if key == ord('s'):
+                throttle -= 1
+            if abs(throttle) > max_throttle: throttle = max_throttle * (throttle / abs(throttle))
+            if key == ord("a"):
+                steer += 1
+            if key == ord('d'):
+                steer -= 1
+            if abs(steer) > max_steer: steer = max_steer * (steer / abs(steer))
+            vehicle.apply_control(carla.VehicleControl(throttle = throttle, steer = steer))
+            print(throttle)
+            
+            
             if key == ord('q'):
                 cv2.destroyAllWindows()
                 break
@@ -106,13 +126,17 @@ if __name__ == "__main__":
     except Exception as e:
         traceback.print_exc()
     finally:
+        import time
+        time.sleep(5)
+        
         semantic_sensor.destroy()
         rgb_sensor     .destroy()
         lidar_sensor   .destroy()
         gsss_sensor    .destroy()
         imu_sensor     .destroy()
         depth_sensor   .destroy()
-        spawner.destroy_vehicle()
+        instance_sensor.destroy()
+        spawner.destroy_all_vehicles()
         for walker in world.get_actors().filter("*walker*"):
             walker.destroy()
         
