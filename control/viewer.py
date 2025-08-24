@@ -45,7 +45,6 @@ class CarlaViewer:
         self.sensors_list: Dict[str, Union[RGB, Depth, SemanticSegmentation, GNSS, IMU, LidarRaycast]] = {}
         self.camera_keys = []
         
-        self.cleanup_done = False
         
     def init_sensor(self, sensors: list):
         """Lazy initialize sensors"""
@@ -88,12 +87,6 @@ class CarlaViewer:
         pygame.display.set_caption(title)
         self.clock = pygame.time.Clock()
 
-
-    # def handle_events(self) -> bool:
-    #     for event in pygame.event.get():
-    #         if event.type == pygame.QUIT:
-    #             return False
-    #     return True
 
     @staticmethod
     def to_surface(frame: np.ndarray) -> pygame.Surface:
@@ -212,12 +205,9 @@ class CarlaViewer:
             self.controller.running = False
         finally:
             self.close()
+            self.virt_vehicle.stop()
 
     def close(self) -> None:
-        if self.cleanup_done:
-            return
-        self.controller.running = False
-        self.cleanup_done = True
         
         print("[blue][INFO]: Closing CarlaViewer...[/]")
         try:
@@ -226,11 +216,7 @@ class CarlaViewer:
             print(f"[red][ERROR]: World reset failed: {e}[/]")
 
         for name, sensor in list(self.sensors_list.items()):
-            try:
-                sensor.destroy()
-            except Exception as e:
-                print(f"[red][ERROR]: Failed to cleanup sensor {name}: {e}[/]")
-        self.sensors_list.clear()
+            sensor.destroy()
 
         try:
             if pygame.get_init():
@@ -238,11 +224,6 @@ class CarlaViewer:
                 print("[green][INFO]: Pygame closed successfully[/]")
         except Exception as e:
             print(f"[red][ERROR]: Pygame quit failed: {e}[/]")
-
-    def __del__(self):
-        """Destructor to ensure cleanup"""
-        if not self.cleanup_done:
-            self.close()
 
 class KeyboardController:
     def __init__(self):
