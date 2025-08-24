@@ -18,7 +18,7 @@ class Vehicle:
         self.hand_brake = False
         self.reverse    = False
 
-        self.decay = 0.05
+        self.decay = 0.08
 
     def set_autopilot(self, enable: bool):
         self.vehicle.set_autopilot(enable)
@@ -59,7 +59,7 @@ class Vehicle:
             "autopilot": self._autopilot
         }
         
-    def apply_control(self, throt_delta: float, steer_delta: float, brake_delta: float, reverse: bool, hand_brake: bool):
+    def apply_control(self, throt_delta: float, steer_delta: float, brake_delta: float, reverse: bool, hand_brake: bool, regulate_speed: bool):
         
         self.throttle += throt_delta
         self.steer += steer_delta
@@ -88,8 +88,11 @@ class Vehicle:
         if brake_delta == 0:   # ease brake back toward 0
             if self.brake > 0:
                 self.brake = max(0.0, self.brake - self.decay)
-                
-        
+
+        if regulate_speed and self.get_velocity(False) >= self.vehicle.get_speed_limit() and brake_delta == 0:
+            self.throttle = .3
+            self.brake = .2
+                 
         
         if self._autopilot:
             self.throttle = 0

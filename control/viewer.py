@@ -160,7 +160,7 @@ class CarlaViewer:
                         velocity = self.virt_vehicle.get_velocity(False), heading = heading,
                         accel = accel, gyro = gyro, enu = enu, geo = geo)
         
-        self.hud.update_control(**self.virt_vehicle.get_ctrl())
+        self.hud.update_control(**self.virt_vehicle.get_ctrl(), regulate_speed = self.controller.regulate_speed)
 
     def run(self) -> None:
         if self.display is None:
@@ -194,7 +194,8 @@ class CarlaViewer:
                                                     self.controller.delta_steer, 
                                                     self.controller.delta_brake,
                                                     self.controller.reverse,
-                                                    self.controller.hand_brake)
+                                                    self.controller.hand_brake,
+                                                    self.controller.regulate_speed)
 
                 pygame.display.flip()
                 if self.clock:
@@ -257,6 +258,7 @@ class KeyboardController:
         self.delta_throt = 0; self.delta_steer = 0; self.delta_brake = 0
         self.reverse = False
         self.hand_brake = False
+        self.regulate_speed = False
 
     def process_events(self, server_time: float):
         """Process keyboard + window events.
@@ -314,6 +316,9 @@ class KeyboardController:
                 elif event.key == pygame.K_SPACE:
                     self.hand_brake = not self.hand_brake
                 
+                elif event.key == pygame.K_f:
+                    self.regulate_speed = not self.regulate_speed
+                
         keys = pygame.key.get_pressed()
         steer_inc = 5e-4 * server_time * 1000
         if keys[pygame.K_w]:
@@ -350,7 +355,8 @@ class HUD:
             "handbrake": False,
             "manual": False,
             "gear": 0,
-            'autopilot': False
+            'autopilot': False,
+            'regulate_speed': False
         }
         
     def update_measurement(self, **kwargs):
@@ -485,3 +491,4 @@ class HUD:
         surface.blit(self.font.render(f"{'Manual:':<{spacing}} {'■' if self.ctrl['manual'] else '□'}", True, white), (x, y+5*line_h))
         surface.blit(self.font.render(f"{'Gear:':<{spacing}} {self.ctrl['gear']}", True, white), (x, y+6*line_h))
         surface.blit(self.font.render(f"{'Autopilot:':<{spacing}} {'■' if self.ctrl['autopilot'] else '□'}", True, (255,255,255)), (x, y+7*line_h))
+        surface.blit(self.font.render(f"{'Regulate speed:':<{spacing}} {'■' if self.ctrl['regulate_speed'] else '□'}", True, (255,255,255)), (x, y+8*line_h))
