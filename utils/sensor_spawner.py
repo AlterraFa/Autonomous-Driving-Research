@@ -119,7 +119,7 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
             if obj is None: return
             self.meta = getattr(obj, "meta", {})
 
-        def to_image(self, layers: list[CarlaLabel] = None, alpha: float = 1.0) -> np.ndarray:
+        def to_image(self, layers: list[CarlaLabel] = None) -> np.ndarray:
             if layers is not None and not isinstance(layers, list):
                 raise TypeError("layers arg must be a list of name of layers")
             
@@ -137,12 +137,6 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
 
             overlay = lut[self]
 
-            a = int(round(max(0.0, min(1.0, float(alpha))) * 255))
-            if a < 256:
-                rgb = overlay[..., :3].astype(np.uint16)
-                overlay[..., :3] = (rgb * a // 255).astype(np.uint8)
-                overlay[..., 3] = 255
-                
             return overlay
 
 

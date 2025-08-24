@@ -66,7 +66,7 @@ class Spawn:
         print(f"[green][INFO][/]: Spawned mass successfully. {self.get_size} vehicles in environment")
         
         
-    def spawn_single_vehicle(self, bp_id: Vehicle_BP = None, transform: carla.Transform = None, random_offset: float = 0, autopilot = True, exclude: Vehicle_BP = None):
+    def spawn_single_vehicle(self, bp_id: Vehicle_BP = None, name: str = "ego", transform: carla.Transform = None, random_offset: float = 0, autopilot = True, exclude: Vehicle_BP = None):
         if bp_id is None:
             flattened_exclude = list(self.flatten(exclude)) if exclude is not None else []
             while True:
@@ -82,6 +82,8 @@ class Spawn:
         else:
             print("[green][INFO][/]: A specific blueprint was choosen, skipping exclude")
             vehicle_bp = self.blueprints.find(bp_id)
+            
+        vehicle_bp.set_attribute("role_name", name)  
         
 
         while True:
