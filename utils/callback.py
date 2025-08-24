@@ -1,6 +1,6 @@
 import threading
 
-class CustomCallback:
+class Extractor:
     def __init__(self, attr_list: dict = None):
         self._latest = None
         self._lock = threading.Lock()

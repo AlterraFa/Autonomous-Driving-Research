@@ -4,7 +4,7 @@ import json
 import cv2
 
 from .lidar_visualization import LIDARVisualizer
-from .callback import CustomCallback
+from .callback import Extractor
 
 from config.enum import CarlaLabel
 from typing import Optional
@@ -84,7 +84,7 @@ class LidarRaycast(SensorLidarRayCastStub, SensorSpawn, LIDARVisualizer):
         LIDARVisualizer.__init__(self, vis_range, vis_window)
         
         self.sensor_bp = world.get_blueprint_library().find(self.name)
-        self.callback = CustomCallback()
+        self.callback = Extractor()
         self.pc = np.zeros((1, 3))
     
     def extract_data(self):
@@ -132,7 +132,7 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
                 sel = np.zeros(num_label, dtype=bool)
                 for lbl in layers:
                     sel[int(lbl.value)] = True
-                lut = self._lut_data.copy()
+                lut = _lut_data.copy()
                 lut[~sel] = 0
 
             overlay = lut[self]
@@ -156,7 +156,7 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
             palette = json.load(f)
         self.palette = {int(k): tuple(v) for k, v in palette.items()}
         
-        self.callback = CustomCallback()
+        self.callback = Extractor()
         self.num_label = len(list(CarlaLabel))
         self._lut_data = self._build_lut_rgba()
         
@@ -195,7 +195,7 @@ class RGB(SensorCameraRgbStub, SensorSpawn):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
 
-        self.callback = CustomCallback()
+        self.callback = Extractor()
     
     def extract_data(self):
         if not hasattr(self, "actor"):
@@ -272,7 +272,7 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
         SensorSpawn.__init__(self, self.name, world)
         
 
-        self.callback = CustomCallback({
+        self.callback = Extractor({
             "lat": "latitude",
             "lon": "longitude",
             "alt": "altitude"
@@ -413,7 +413,7 @@ class IMU(SensorOtherImuStub, SensorSpawn):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
         
-        self.callback = CustomCallback({
+        self.callback = Extractor({
             "accel": "accelerometer", 
             "gyro": "gyroscope", 
             "comp": "compass"
@@ -509,7 +509,7 @@ class Depth(SensorCameraDepthStub, SensorSpawn):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
         
-        self.callback = CustomCallback()
+        self.callback = Extractor()
         self.convert = convert_to
         
     def extract_data(self):
@@ -536,7 +536,7 @@ class InstanceSegmentation(SensorCameraInstanceSegmentationStub, SensorSpawn):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
         
-        self.callback = CustomCallback()
+        self.callback = Extractor()
         
         self.sat = sat
         self.cache = {}
