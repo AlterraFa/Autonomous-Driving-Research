@@ -46,8 +46,9 @@ def main(args):
     if args.replay != "None":
         folder = os.path.dirname(__file__)
         path_2_recording = folder + "/" + args.replay
+        path_2_waypoints = path_2_recording.split(".")[0] + ".npy"
         client.show_recorder_file_info(path_2_recording, False)
-        client.replay_file(path_2_recording, 0, 0, 0)
+        client.replay_file(path_2_recording, 0, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
 
         vehicle = wait_for_actor_by_role(virt_world.world, "ego")
         if vehicle is None:
@@ -56,12 +57,14 @@ def main(args):
         
         game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
         game_viewer.init_sensor([rgb_sensor, semantic_sensor, gnss_sensor, imu_sensor, depth_sensor])
-        game_viewer.run()
+        game_viewer.run(replay_logging = path_2_waypoints)
 
+        client.stop_replayer(True)
         return
     else:
         
         spawner = Spawn(virt_world.world, virt_world.tm)
+        spawner.destroy_all_vehicles()
         spawner.spawn_mass_vehicle(10, exclude = [VClass.Large, VClass.Tiny])
         spawner.spawn_single_vehicle(bp_id = "vehicle.dodge.charger_2020", exclude = [VClass.Large, VClass.Medium, VClass.Tiny], autopilot = False)
         controlling_vehicle = Vehicle(spawner.single_vehicle, virt_world.world)
@@ -72,9 +75,11 @@ def main(args):
             client.start_recorder(f"{folder}/log/recording_{date}.log")
         game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
         game_viewer.init_sensor([rgb_sensor, semantic_sensor, gnss_sensor, imu_sensor, depth_sensor])
-        game_viewer.run()
         if args.record:
+            game_viewer.run(save_logging = f"{folder}/log/recording_{date}")
             client.stop_recorder()
+        else:
+            game_viewer.run()
 
         spawner.destroy_all_vehicles()
 

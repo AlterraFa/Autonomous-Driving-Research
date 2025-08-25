@@ -34,3 +34,8 @@ class World:
         except Exception as e:
             print(f"[red][ERROR][/]: Failed to reset world -> {e}")
         print("[green][INFO]: World reset to async[/]")
+
+    def draw_waypoints(self, waypoints):
+        for point in waypoints:
+            point_loc = carla.Location(x = point[0], y = point[1], z = point[2])
+            self.world.debug.draw_point(point_loc, size = 0.2, color = carla.Color(0, 255, 0), life_time = 0)
