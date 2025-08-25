@@ -1,6 +1,7 @@
 import pygame
 import numpy as np
 import time
+import json
 
 from control.world import World
 from control.vehicle_control import Vehicle
@@ -154,8 +155,18 @@ class CarlaViewer:
                         accel = accel, gyro = gyro, enu = enu, geo = geo)
         
         self.hud.update_control(**self.virt_vehicle.get_ctrl(), regulate_speed = self.controller.regulate_speed)
+        
+    @staticmethod
+    def to_location(loc):
+        if isinstance(loc, carla.Waypoint):
+            return loc.transform.location
+        if isinstance(loc, carla.Transform):
+            return loc.location
+        if isinstance(loc, carla.Location):
+            return loc
+        return None
 
-    def run(self) -> None:
+    def run(self, save_logging: str = None, replay_logging: str = None) -> None:
         if self.display is None:
             self.init_win()
 
@@ -164,7 +175,13 @@ class CarlaViewer:
         self.hud = HUD("jetbrainsmononerdfontpropo", fontSize = 12)
         self.virt_vehicle.set_autopilot(self.controller.autopilot) # First init for autopilot
 
-
+        if save_logging != None:
+            last_wp = None
+            waypoints_storage = []
+        elif replay_logging != None:
+            waypoints_storage = np.load(replay_logging)
+            self.virt_world.draw_waypoints(waypoints_storage)
+        
         try:
             while self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
                 self.step_world()
@@ -189,6 +206,19 @@ class CarlaViewer:
                                                     self.controller.reverse,
                                                     self.controller.hand_brake,
                                                     self.controller.regulate_speed)
+                
+                if save_logging != None: 
+                    if last_wp is None:
+                        last_wp = self.virt_vehicle.waypoint
+                        location = self.to_location(last_wp)
+                        waypoints_storage += [[location.x, location.y, location.z]]
+                    elif last_wp != self.virt_vehicle.waypoint:
+                        last_wp = self.virt_vehicle.waypoint
+                        location = self.to_location(last_wp)
+                        waypoints_storage += [[location.x, location.y, location.z]]
+                elif replay_logging != None:
+                    ...
+                
 
                 pygame.display.flip()
                 if self.clock:
@@ -206,6 +236,8 @@ class CarlaViewer:
         finally:
             self.close()
             self.virt_vehicle.stop()
+            if save_logging != None:
+                np.save(save_logging, np.array(waypoints_storage))
 
     def close(self) -> None:
         
