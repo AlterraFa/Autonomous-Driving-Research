@@ -32,21 +32,19 @@ class Vehicle:
         self.tl_thread.start()
         self.ts_thread = threading.Thread(target = self._poll_traffic_sign, daemon = True); self.ts_events = []
         self.ts_thread.start()
-        self.junction_thread = threading.Thread(target = self._poll_junction, daemon = True)
+        self.junction_thread = threading.Thread(target = self._poll_junction, daemon = True); self.junctions = {}
         self.junction_thread.start()
-        self.waypoint_thread = threading.Thread(target = self._poll_waypoint, daemon = True)
+        self.waypoint_thread = threading.Thread(target = self._poll_waypoint, daemon = True); self.waypoint = None
         self.waypoint_thread.start()
+        self.location_thread = threading.Thread(target = self._poll_location, daemon = True); self.location = carla.Location(x = 0, y = 0, z = 0)
+        self.location_thread.start()
+        self.threads = [self.tl_thread, self.ts_thread, self.junction_thread, self.waypoint_thread, self.location_thread]
+        
         
     def stop(self):
         self._stop.set()
-        if self.tl_thread.is_alive():
-            self.tl_thread.join(timeout = 1.0)
-        if self.ts_thread.is_alive():
-            self.ts_thread.join(timeout = 1.0)
-        if self.junction_thread.is_alive():
-            self.junction_thread.join(timeout = 1.0)
-        if self.waypoint_thread.is_alive():
-            self.waypoint_thread.join(timeout = 1.0)
+        for thread in self.threads:
+            if thread.is_alive(): thread.join(timeout = 1.0)
 
     def set_autopilot(self, enable: bool):
         self.vehicle.set_autopilot(enable)
@@ -144,6 +142,25 @@ class Vehicle:
                                                         hand_brake = self.hand_brake,
                                                         manual_gear_shift = False,
                                                         gear = 0))
+    
+    def _poll_location(self, hz: float = 10.0, move_thresh_m = 2.0):
+        period = 1 / hz
+        last_loc = None
+        while not self._stop.is_set():
+            t0 = time.time()
+            try:
+                curr_loc = self.vehicle.get_location()
+                if last_loc is not None and curr_loc.distance(last_loc) < move_thresh_m:
+                    continue
+                else:
+                    last_loc = curr_loc
+                    
+                self.location = last_loc
+            except:
+                print_exc()
+
+            dt = time.time() - t0
+            if dt < period: time.sleep(period - dt)
         
     def _poll_traffic_light(self, hz: float = 10.0):
         period = 1 / hz
@@ -156,7 +173,7 @@ class Vehicle:
                 else:
                     self.tl_state = tl.get_state()
             except:
-                time.sleep(0.05)
+                print_exc()
 
             dt = time.time() - t0
             if dt < period: time.sleep(period - dt)
@@ -269,7 +286,6 @@ class Vehicle:
     def _poll_junction(self, lookahead_m = 5.0, hz: float = 10.0, move_thresh_m: float = 2.0):
         period = 1 / hz
         last_loc = None
-        self.junctions = {}
         while not self._stop.is_set():
             t0 = time.time() 
             try:
