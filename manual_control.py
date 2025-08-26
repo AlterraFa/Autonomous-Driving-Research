@@ -7,6 +7,7 @@ import argparse
 import pygame
 import datetime
 from functools import partial
+import re
 
 from utils.spawner import Spawn, VehicleClass as VClass
 from utils.sensor_spawner import (
@@ -22,6 +23,22 @@ from control.world import World
 from control.vehicle_control import Vehicle, wait_for_actor_by_role
 from control.viewer import CarlaViewer
 
+def get_recording_duration(log_path: str) -> float:
+    """
+    Returns the recording duration in seconds for a CARLA .log file.
+    """
+    client = carla.Client("localhost", 2000)
+    client.set_timeout(5.0)
+
+    report = client.show_recorder_file_info(log_path, True)
+
+    m = re.search(r"Duration:\s*([0-9.]+)\s*seconds", report)
+    if m:
+        duration = float(m.group(1))
+        print(f"Recording duration: {duration:.2f} seconds")
+    else:
+        print("No duration found")
+    return duration
 
     
 def main(args):
@@ -45,8 +62,9 @@ def main(args):
     
     if args.replay != "None":
         folder = os.path.dirname(__file__)
-        path_2_recording = folder + "/" + args.replay
-        path_2_waypoints = path_2_recording.split(".")[0] + ".npy"
+        path_2_recording = folder + "/" + args.replay + "/log.log"
+        path_2_waypoints = folder + "/" + args.replay + "/trajectory.npy"
+        duration = get_recording_duration(path_2_recording)
         client.show_recorder_file_info(path_2_recording, False)
         client.replay_file(path_2_recording, 0, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
 
@@ -57,7 +75,7 @@ def main(args):
         
         game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
         game_viewer.init_sensor([rgb_sensor, semantic_sensor, gnss_sensor, imu_sensor, depth_sensor])
-        game_viewer.run(replay_logging = path_2_waypoints)
+        game_viewer.run(replay_logging = [path_2_waypoints, duration], debug = True)
 
         client.stop_replayer(True)
         return
@@ -72,11 +90,13 @@ def main(args):
         if args.record:
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             folder = os.path.dirname(__file__)
-            client.start_recorder(f"{folder}/log/recording_{date}.log")
+            directory = f"{folder}/log/recording_{date}"
+            os.mkdir(directory)
+            client.start_recorder(f"{directory}/log.log")
         game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
         game_viewer.init_sensor([rgb_sensor, semantic_sensor, gnss_sensor, imu_sensor, depth_sensor])
         if args.record:
-            game_viewer.run(save_logging = f"{folder}/log/recording_{date}")
+            game_viewer.run(save_logging = directory, record_type = args.record_type)
             client.stop_recorder()
         else:
             game_viewer.run()
@@ -131,10 +151,15 @@ if __name__ == "__main__":
         help = "Record carla state"
     )
     argparser.add_argument(
+        "--record-type",
+        default = "location",
+        help = "Specify a record type (default: location)"
+    )
+    argparser.add_argument(
         "--replay",
         type = str,
         default = "None",
-        help = "Replay Carla recording"   
+        help = "Replay Carla recording (.log file path is needed, recording time of .npy must correspond to .log)"   
     )
     
     args = argparser.parse_args()

@@ -166,7 +166,7 @@ class CarlaViewer:
             return loc
         return None
 
-    def run(self, save_logging: str = None, replay_logging: str = None) -> None:
+    def run(self, save_logging: str = None, record_type: str = "location", replay_logging: str = None, debug = False) -> None:
         if self.display is None:
             self.init_win()
 
@@ -179,8 +179,8 @@ class CarlaViewer:
             last_wp = None
             waypoints_storage = []
         elif replay_logging != None:
-            waypoints_storage = np.load(replay_logging)
-            self.virt_world.draw_waypoints(waypoints_storage)
+            waypoints_storage = np.load(replay_logging[0])
+            if debug: self.virt_world.draw_waypoints(waypoints_storage, duration = replay_logging[1])
         
         try:
             while self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
@@ -209,15 +209,16 @@ class CarlaViewer:
                 
                 if save_logging != None: 
                     if last_wp is None:
-                        last_wp = self.virt_vehicle.waypoint
+                        last_wp = getattr(self.virt_vehicle, record_type)
                         location = self.to_location(last_wp)
                         waypoints_storage += [[location.x, location.y, location.z]]
-                    elif last_wp != self.virt_vehicle.waypoint:
-                        last_wp = self.virt_vehicle.waypoint
+                    elif last_wp != self.virt_vehicle.location:
+                        last_wp = getattr(self.virt_vehicle, record_type)
                         location = self.to_location(last_wp)
                         waypoints_storage += [[location.x, location.y, location.z]]
                 elif replay_logging != None:
                     ...
+                    
                 
 
                 pygame.display.flip()
@@ -237,7 +238,7 @@ class CarlaViewer:
             self.close()
             self.virt_vehicle.stop()
             if save_logging != None:
-                np.save(save_logging, np.array(waypoints_storage))
+                np.save(save_logging + "/trajectory", np.array(waypoints_storage))
 
     def close(self) -> None:
         
