@@ -65,6 +65,9 @@ def main(args):
         path_2_recording = folder + "/" + args.replay + "/log.log"
         path_2_waypoints = folder + "/" + args.replay + "/trajectory.npy"
         duration = get_recording_duration(path_2_recording)
+
+        spawner = Spawn(virt_world.world, virt_world.tm)
+        spawner.destroy_all_vehicles()
         client.show_recorder_file_info(path_2_recording, False)
         client.replay_file(path_2_recording, 0, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
 
@@ -83,9 +86,10 @@ def main(args):
         
         spawner = Spawn(virt_world.world, virt_world.tm)
         spawner.destroy_all_vehicles()
-        spawner.spawn_mass_vehicle(10, exclude = [VClass.Large, VClass.Tiny])
+        spawner.spawn_mass_vehicle(6, exclude = [VClass.Large, VClass.Tiny])
         spawner.spawn_single_vehicle(bp_id = "vehicle.dodge.charger_2020", exclude = [VClass.Large, VClass.Medium, VClass.Tiny], autopilot = False)
         controlling_vehicle = Vehicle(spawner.single_vehicle, virt_world.world)
+        virt_world.tm.ignore_signs_percentage(controlling_vehicle.vehicle, args.ignore_signs)
         
         if args.record:
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -160,6 +164,12 @@ if __name__ == "__main__":
         type = str,
         default = "None",
         help = "Replay Carla recording (.log file path is needed, recording time of .npy must correspond to .log)"   
+    )
+    argparser.add_argument(
+        "--ignore-signs",
+        type = float,
+        default = 0,
+        help = "Ignore traffic sign rules (by percentage)"
     )
     
     args = argparser.parse_args()
