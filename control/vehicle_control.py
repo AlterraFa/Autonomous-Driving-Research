@@ -86,35 +86,44 @@ class Vehicle:
             "autopilot": self._autopilot
         }
         
-    def apply_control(self, throt_delta: float, steer_delta: float, brake_delta: float, reverse: bool, hand_brake: bool, regulate_speed: bool):
-        
-        self.throttle += throt_delta
-        self.steer += steer_delta
-        self.brake += brake_delta
-        self.reverse = reverse
-        self.hand_brake = hand_brake
+    def apply_control(self, throt_delta: float, steer_delta: float, brake_delta: float, reverse: bool, hand_brake: bool, regulate_speed: bool, use_joystick: bool = False):
 
-        self.throt_delta = throt_delta
-        self.steer_delta = steer_delta
-        self.brake_delta = brake_delta
+        if use_joystick == False:
+            self.throttle += throt_delta
+            self.steer += steer_delta
+            self.brake += brake_delta
+            self.reverse = reverse
+            self.hand_brake = hand_brake
 
-        if throt_delta == 0:   # ease throttle back toward 0
-            if self.throttle > 0:
-                self.throttle = max(0.0, self.throttle - 0.03)
-            elif self.throttle < 0:
-                self.throttle = min(0.0, self.throttle + 0.03)
+            self.throt_delta = throt_delta
+            self.steer_delta = steer_delta
+            self.brake_delta = brake_delta
 
-        if steer_delta == 0:   # ease steering back toward 0
-            if abs(self.steer) <= self.decay:
-                self.steer = 0.0   # snap to neutral
-            elif self.steer > 0:
-                self.steer -= self.decay
-            elif self.steer < 0:
-                self.steer += self.decay
+            if throt_delta == 0:   # ease throttle back toward 0
+                if self.throttle > 0:
+                    self.throttle = max(0.0, self.throttle - 0.03)
+                elif self.throttle < 0:
+                    self.throttle = min(0.0, self.throttle + 0.03)
 
-        if brake_delta == 0:   # ease brake back toward 0
-            if self.brake > 0:
-                self.brake = max(0.0, self.brake - self.decay)
+            if steer_delta == 0:   # ease steering back toward 0
+                if abs(self.steer) <= self.decay:
+                    self.steer = 0.0   # snap to neutral
+                elif self.steer > 0:
+                    self.steer -= self.decay
+                elif self.steer < 0:
+                    self.steer += self.decay
+
+            if brake_delta == 0:   # ease brake back toward 0
+                if self.brake > 0:
+                    self.brake = max(0.0, self.brake - self.decay)
+
+        else: 
+            self.throttle = throt_delta
+            self.steer = steer_delta
+            self.brake = brake_delta
+            self.reverse = reverse
+            self.hand_brake = hand_brake
+
 
         if regulate_speed and self.get_velocity(False) >= self.vehicle.get_speed_limit() and brake_delta == 0:
             self.throttle = .3
@@ -143,7 +152,7 @@ class Vehicle:
                                                         manual_gear_shift = False,
                                                         gear = 0))
     
-    def _poll_location(self, hz: float = 10.0, move_thresh_m = 2.0):
+    def _poll_location(self, hz: float = 10.0, move_thresh_m = 1.0):
         period = 1 / hz
         last_loc = None
         while not self._stop.is_set():
@@ -151,11 +160,14 @@ class Vehicle:
             try:
                 curr_loc = self.vehicle.get_location()
                 if last_loc is not None and curr_loc.distance(last_loc) < move_thresh_m:
+                    dt = time.time() - t0
+                    if dt < period:
+                        time.sleep(period - dt)
                     continue
                 else:
                     last_loc = curr_loc
-                    
-                self.location = last_loc
+                
+                with self._lock: self.location = last_loc
             except:
                 print_exc()
 
@@ -213,7 +225,10 @@ class Vehicle:
 
 
                 if last_loc is not None and wp.transform.location.distance(last_loc) < move_thresh_m:
-                    time.sleep(period); continue
+                    dt = time.time() - t0
+                    if dt < period:
+                        time.sleep(period - dt)
+                    continue
                 last_loc = wp.transform.location
                 
                 stops    = wp.get_landmarks_of_type(lookahead_m, carla.LandmarkType.StopSign, stop_at_junction = False)
@@ -244,8 +259,7 @@ class Vehicle:
                     })
                 
                 events.sort(key = lambda e: e["distance"])
-                with self._lock:
-                    self.ts_events = events
+                with self._lock: self.ts_events = events
 
                 
             except Exception:
@@ -273,8 +287,7 @@ class Vehicle:
                     continue
                 last_loc = wp.transform.location
 
-                with self._lock:
-                    self.waypoint = wp
+                with self._lock: self.waypoint = wp
 
             except:
                 ...
@@ -308,8 +321,7 @@ class Vehicle:
                     max_junctions = 10
                 ) 
                 
-                with self._lock:
-                    self.junctions = jsx
+                with self._lock:  self.junctions = jsx
                 
             except:
                 ...

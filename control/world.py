@@ -37,5 +37,5 @@ class World:
 
     def draw_waypoints(self, waypoints, duration: float = 0):
         for point in waypoints:
-            point_loc = carla.Location(x = point[0], y = point[1], z = point[2])
+            point_loc = carla.Location(x = float(point[0]), y = float(point[1]), z = float(point[2]))
             self.world.debug.draw_point(point_loc, size = 0.2, color = carla.Color(0, 255, 0), life_time = duration)

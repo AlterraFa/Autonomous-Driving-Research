@@ -1,11 +1,13 @@
 import pygame
 import numpy as np
 import time
-import json
+
 
 from control.world import World
 from control.vehicle_control import Vehicle
 from utils.sensor_spawner import *
+from utils.buffer import TrajectoryBuffer
+from config.enum import JoyControl, JoyKey
 
 from typing import Optional
 from enum import Enum
@@ -25,7 +27,7 @@ class CameraView(Enum):
     }
 
 class CarlaViewer:
-    def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, sync: bool = False, fps: int = 60):
+    def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, sync: bool = False, fps: int = 70):
         self.virt_world = world
         self.world = world.world
         self.width = width
@@ -45,7 +47,10 @@ class CarlaViewer:
         self.rgb_sensor = None  
         self.sensors_list: Dict[str, Union[RGB, Depth, SemanticSegmentation, GNSS, IMU, LidarRaycast]] = {}
         self.camera_keys = []
+
         
+        self.controller = Controller()
+        self.hud = HUD("jetbrainsmononerdfontpropo", fontSize = 12)
         
     def init_sensor(self, sensors: list):
         """Lazy initialize sensors"""
@@ -171,13 +176,10 @@ class CarlaViewer:
             self.init_win()
 
         self.last_platform_time = None; self.server_fps = 0
-        self.controller = KeyboardController()
-        self.hud = HUD("jetbrainsmononerdfontpropo", fontSize = 12)
         self.virt_vehicle.set_autopilot(self.controller.autopilot) # First init for autopilot
 
         if save_logging != None:
-            last_wp = None
-            waypoints_storage = []
+            trajectory_buff = TrajectoryBuffer(dist_thresh_m = 1.0)
         elif replay_logging != None:
             waypoints_storage = np.load(replay_logging[0])
             if debug: self.virt_world.draw_waypoints(waypoints_storage, duration = replay_logging[1])
@@ -200,27 +202,19 @@ class CarlaViewer:
                     self.switch_camera(self.controller.camera_step)
                 self.virt_vehicle.set_autopilot(self.controller.autopilot)
                 if self.controller.autopilot == False:
-                    self.virt_vehicle.apply_control(self.controller.delta_throt, 
-                                                    self.controller.delta_steer, 
-                                                    self.controller.delta_brake,
+                    self.virt_vehicle.apply_control(self.controller.throt_ctrl, 
+                                                    self.controller.steer_ctrl, 
+                                                    self.controller.brake_ctrl,
                                                     self.controller.reverse,
                                                     self.controller.hand_brake,
-                                                    self.controller.regulate_speed)
+                                                    self.controller.regulate_speed,
+                                                    self.controller.has_joystick)
                 
                 if save_logging != None: 
-                    if last_wp is None:
-                        last_wp = getattr(self.virt_vehicle, record_type)
-                        location = self.to_location(last_wp)
-                        waypoints_storage += [[location.x, location.y, location.z]]
-                    elif last_wp != self.virt_vehicle.location:
-                        last_wp = getattr(self.virt_vehicle, record_type)
-                        location = self.to_location(last_wp)
-                        waypoints_storage += [[location.x, location.y, location.z]]
+                    trajectory_buff.add_if_needed(self.to_location(getattr(self.virt_vehicle, record_type)))
                 elif replay_logging != None:
                     ...
                     
-                
-
                 pygame.display.flip()
                 if self.clock:
                     self.clock.tick(self.fps)
@@ -235,21 +229,18 @@ class CarlaViewer:
             print_exc()
             self.controller.running = False
         finally:
-            self.close()
             self.virt_vehicle.stop()
+            self.close()
             if save_logging != None:
-                np.save(save_logging + "/trajectory", np.array(waypoints_storage))
+                trajectory_buff.save(save_logging + "/trajectory")
 
     def close(self) -> None:
         
         print("[blue][INFO]: Closing CarlaViewer...[/]")
-        try:
-            self.virt_world.factory_reset()
-        except Exception as e:
-            print(f"[red][ERROR]: World reset failed: {e}[/]")
 
         for name, sensor in list(self.sensors_list.items()):
             sensor.destroy()
+        self.virt_world.factory_reset()
 
         try:
             if pygame.get_init():
@@ -257,9 +248,28 @@ class CarlaViewer:
                 print("[green][INFO]: Pygame closed successfully[/]")
         except Exception as e:
             print(f"[red][ERROR]: Pygame quit failed: {e}[/]")
-
-class KeyboardController:
+        
+class Controller:
     def __init__(self):
+        pygame.joystick.init()
+
+        self.has_joystick = pygame.joystick.get_count() > 0
+        if self.has_joystick:
+            print("[blue][INFO][/]: Joystick detected, prioritized using it")
+            joystick = pygame.joystick.Joystick(0)
+            self.joystick = joystick
+            self.joystick.init()
+            print("[blue][INFO][/]: Joystick name:", joystick.get_name())
+            print("[blue][INFO][/]: Number of axes:", joystick.get_numaxes())
+            print("[blue][INFO][/]: Number of buttons:", joystick.get_numbuttons())
+            print("[blue][INFO][/]: Number of hats:", joystick.get_numhats())
+        else:
+            print("[yellow][WARNING][/]: No joystick detected. Falling back to keyboard input")
+
+        self.deadzone_stick = 0.12
+        self.deadzone_trigger = 0.05
+        self.steer_curve = 3  # 1.0 = linear, >1 smoother center
+        
         pygame.key.set_repeat()  # no auto-repeat by default
         self.running = True
         
@@ -269,10 +279,22 @@ class KeyboardController:
         self.prev_keys_view = pygame.key.get_pressed()
         
         self.autopilot = False
-        self.delta_throt = 0; self.delta_steer = 0; self.delta_brake = 0
+        self.throt_ctrl = 0; self.steer_ctrl = 0; self.brake_ctrl = 0
         self.reverse = False
         self.hand_brake = False
         self.regulate_speed = False
+        
+    def _apply_deadzone(self, x: float, dz: float) -> float:
+        if abs(x) < dz:
+            return 0.0
+        s = (abs(x) - dz) / (1.0 - dz)
+        return s if x > 0 else -s
+
+    def _curve(self, x: float) -> float:
+        return (abs(x) ** self.steer_curve) * (1 if x >= 0 else -1)
+
+    def _trigger_01(self, v: float) -> float:
+        return max(0.0, min(1.0, (v + 1.0) * 0.5))
 
     def process_events(self, server_time: float):
         """Process keyboard + window events.
@@ -311,9 +333,23 @@ class KeyboardController:
                 elif event.key == pygame.K_LEFT:
                     self.camera_changed = True
                     self.camera_step = -1
+                    
+            # joystick hat → mirror your view/camera controls
+            if self.has_joystick and event.type == pygame.JOYHATMOTION:
+                hx, hy = event.value
+                if hy == 1:
+                    self.view_name = "FIRST_PERSON"; self.view_changed = True
+                    print(f"[green][INFO][/]: View toggled → [i]{'First Person'}[/i]")
+                elif hy == -1:
+                    self.view_name = "THIRD_PERSON"; self.view_changed = True
+                    print(f"[green][INFO][/]: View toggled → [i]{'Third Person'}[/i]")
+                if hx != 0:
+                    self.camera_changed = True
+                    self.camera_step = 1 if hx > 0 else -1
+
 
     def process_ctrl(self, events, server_time):
-        self.delta_throt = 0; self.delta_steer = 0; self.delta_brake = 0
+        self.throt_ctrl = 0; self.steer_ctrl = 0; self.brake_ctrl = 0
         for event in events:
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
@@ -332,19 +368,44 @@ class KeyboardController:
                 
                 elif event.key == pygame.K_f:
                     self.regulate_speed = not self.regulate_speed
+                    
                 
         keys = pygame.key.get_pressed()
         steer_inc = 5e-4 * server_time * 1000
         if keys[pygame.K_w]:
-            self.delta_throt = 0.01
+            self.throt_ctrl = 0.01
         if keys[pygame.K_s]:
-            self.delta_brake = 0.2
+            self.brake_ctrl = 0.2
         if keys[pygame.K_a]:
-            self.delta_steer = -steer_inc
+            self.steer_ctrl = -steer_inc
         if keys[pygame.K_d]:
-            self.delta_steer = steer_inc
-                    
+            self.steer_ctrl = steer_inc
 
+        if self.has_joystick:
+            for event in events:
+                if event.type == pygame.JOYBUTTONDOWN:
+                    if event.button == JoyControl.JoyKey.A:
+                        self.autopilot = not self.autopilot
+                        print(f"[yellow][WARNING][/]: Autopilot toggled → [i][{'green' if self.autopilot else 'red'}]{'Engaged' if self.autopilot else 'Disengaged'}[/i][/]")
+                    elif event.button == JoyControl.JoyKey.B:
+                        self.reverse = not self.reverse
+                    elif event.button == JoyControl.JoyKey.LB:
+                        self.hand_brake = not self.hand_brake
+                    elif event.button == JoyControl.JoyKey.RB:
+                        self.regulate_speed = not self.regulate_speed
+                    
+            left_x = self._apply_deadzone(self.joystick.get_axis(JoyControl.JoyStick.LX), self.deadzone_stick)
+            # left_y = self._apply_deadzone(self.joystick.get_axis(1), self.deadzone_stick)
+
+            lt = self._trigger_01(self.joystick.get_axis(JoyControl.JoyStick.LT))
+            rt = self._trigger_01(self.joystick.get_axis(JoyControl.JoyStick.RT))
+            lt = 0.0 if lt < self.deadzone_trigger else lt
+            rt = 0.0 if rt < self.deadzone_trigger else rt
+
+            self.steer_ctrl = self._curve(left_x) * .5
+
+            self.throt_ctrl = rt
+            self.brake_ctrl = lt
         
 class HUD:
     def __init__(self, fontName="Arial", fontSize=24):
