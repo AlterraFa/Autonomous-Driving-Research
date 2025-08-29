@@ -99,3 +99,21 @@ class CarlaLabel(IntEnum):
     Bridge        = 26
     RailTrack     = 27
     GuardRail     = 28
+class JoyControl:
+
+    class JoyKey(IntEnum):
+        A = 0
+        B = 1
+        X = 2
+        Y = 3
+        
+        LB = 4
+        RB = 5
+
+    class JoyStick(IntEnum):
+        LX = 0
+        LY = 1
+        LT = 2
+        RX = 3
+        RY = 4
+        RT = 5
