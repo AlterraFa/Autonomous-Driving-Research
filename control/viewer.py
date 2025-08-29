@@ -154,6 +154,9 @@ class CarlaViewer:
         try: geo = self.sensors_list['gnss'].extract_data(return_ecf = True, return_enu = True).Geodetic
         except: geo = "N/A"
         
+        self.heading = np.radians(heading)
+        self.enu     = enu
+        
         runtime = time.time() - getattr(self, "start_time", time.time())
         
         self.hud.update_measurement(server_fps = self.server_fps, client_fps = self.fps, 
@@ -186,7 +189,6 @@ class CarlaViewer:
         elif replay_logging != None:
             waypoints_storage = np.load(replay_logging[0])
             path_handling = PathHandler(waypoints_storage)
-            if debug: self.virt_world.draw_waypoints(waypoints_storage, duration = replay_logging[1])
         
         try:
             while self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
@@ -217,14 +219,20 @@ class CarlaViewer:
                 if save_logging != None: 
                     trajectory_buff.add_if_needed(self.to_location(getattr(self.virt_vehicle, record_type)))
                 elif replay_logging != None:
-                    enu = self.sensors_list["gnss"].extract_data(return_enu = True).ENU
-                    actual_pos = enu.to_numpy()
+                    actual_pos = self.enu.to_numpy()
                     dist_travelled, *_ = path_handling.project(actual_pos)
+                    
 
                     try:
                         for offset in [5, 10, 15]:
                             interp_waypoint = path_handling.pose(dist_travelled + 2 + offset)[:-1]
-                            self.virt_world.draw_single_waypoint(interp_waypoint, duration = 1.5 * (1.0 / self.server_fps))
+                            if debug: self.virt_world.draw_single_waypoint(interp_waypoint, duration = 1.5 * (1.0 / self.server_fps))
+
+                            ego_waypoint    = self.virt_vehicle.ego_transform(interp_waypoint, self.heading, actual_pos)
+                        
+                        # with open("check.txt", "a") as f:
+                        #     f.write(f"{time.time() - self.start_time:.2f}: {interp_waypoint}\n")    
+                        
                     except:
                         print_exc()
                         print("[red][ERROR][/]: End of interpolated path")
@@ -489,6 +497,13 @@ class HUD:
         if isinstance(self.geo, str): geo_str = self.geo
         else: geo_str = f"( {self.geo.lat: 6.6f}, {self.geo.lon: 6.6f} )"
         
+        runtime = self.runtime
+        hours   = int(runtime // 3600)
+        minutes = int((runtime % 3600) // 60)
+        seconds = int(runtime % 60)
+        millis  = int((runtime % 1) * 1000)
+        time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+        
         if isinstance(self.enu, str):
             h_str = "N/A"
             loc_str = "N/A"
@@ -508,7 +523,7 @@ class HUD:
             loc_str,
             h_str,
             geo_str,
-            f"{self.runtime:.2f}s"
+            time_str
         ]
         max_string = max(max(len(s) for s in value_strings), 15)
         spacing = 15
@@ -519,7 +534,7 @@ class HUD:
         clientfpsText = self.font.render(f"{'Client side:':<{spacing}}{f'{int(self.client_fps)} FPS':>{max_string}}", True, (255, 255, 255))
         surface.blit(clientfpsText, (10, 30)) 
 
-        runtimeText = self.font.render(f"{'Runtime:':<{spacing}}{f'{self.runtime:.2f} s':>{max_string}}", True, (255, 255, 255))
+        runtimeText = self.font.render(f"{'Runtime:':<{spacing}}{f'{time_str} s':>{max_string}}", True, (255, 255, 255))
         surface.blit(runtimeText, (10, 50)) 
 
         vehicleText = self.font.render(f"{'Vehicle name:':<{spacing}}{self.vehicle_name:>{max_string}}", True, (255, 255, 255))

@@ -31,7 +31,7 @@ class PathHandler(NodeFinder):
     psi is heading in radians if provided.
     """
     def __init__(self, defined_path: np.ndarray):
-        super().__init__(40, defined_path)
+        super().__init__(10, defined_path)
         
         assert defined_path.ndim == 2 and defined_path.shape[1] in (3, 4), \
             "defined_path must be (N,3) [x,y,z] or (N,4) [x,y,z,psi]"
