@@ -60,12 +60,12 @@ def main(args):
     if args.replay != "None" and args.record == True:
         raise NotImplementedError(f"Replay and recording simultaneously selected.")
     
+    script_path = os.path.abspath(__file__)
+    folder = os.path.dirname(script_path)
     if args.replay != "None":
         spawner = Spawn(virt_world.world, virt_world.tm)
         spawner.destroy_all_vehicles()
 
-        script_path = os.path.abspath(__file__)
-        folder = os.path.dirname(script_path)
         path_2_recording = folder + "/" + args.replay + "/log.log"
         path_2_waypoints = folder + "/" + args.replay + "/trajectory.npy"
         duration = get_recording_duration(path_2_recording)
@@ -95,7 +95,6 @@ def main(args):
         
         if args.record:
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            folder = os.path.dirname(__file__)
             directory = f"{folder}/log/recording_{date}"
             os.mkdir(directory)
             client.start_recorder(f"{directory}/log.log")

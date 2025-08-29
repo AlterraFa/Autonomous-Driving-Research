@@ -76,7 +76,7 @@ def main(args):
     
     game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
     game_viewer.init_sensor([rgb_sensor, semantic_sensor, gnss_sensor, imu_sensor, depth_sensor])
-    game_viewer.run(replay_logging = [path_2_waypoints, duration], debug = False)
+    game_viewer.run(replay_logging = [path_2_waypoints, duration], debug = True)
 
     client.stop_replayer(True)
     
