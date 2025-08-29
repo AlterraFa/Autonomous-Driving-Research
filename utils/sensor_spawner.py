@@ -353,7 +353,7 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
 
         return {
             'east': float(xEast),
-            'north': float(yNorth),
+            'north': float(-yNorth), # Remember that the axis is flipped
             'up': float(zUp)
         }
 

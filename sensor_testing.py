@@ -16,7 +16,6 @@ from utils.sensor_spawner import (
     IMU, 
     Depth,
     InstanceSegmentation,
-    overlay, 
     CarlaLabel as Clabel
 )
 from rich import print
@@ -52,7 +51,7 @@ if __name__ == "__main__":
     
     image_queues = []; sensors = []
 
-    semantic_sensor = SemanticSegmentation(world)    
+    semantic_sensor = SemanticSegmentation(world, convert_to = SemanticSegmentation.SemanticData.to_image)    
     semantic_sensor.set_attribute(name = "image_size_x", value = 800)
     semantic_sensor.set_attribute(name = "image_size_y", value = 600)
     semantic_sensor.spawn(attach_to = vehicle, z = 2, yaw = 0)
@@ -92,11 +91,13 @@ if __name__ == "__main__":
 
         while True:
             frame_id = world.tick()
-            semantic_image, labels = semantic_sensor.extract_data(alpha = 1.0, layers = None)
-            rgb_image              = rgb_sensor.extract_data()
-            geo_location           = gsss_sensor.extract_data(return_ecf = True, return_enu = True)
-            imu_data               = imu_sensor.extract_data()
-            depth_data             = depth_sensor.extract_data()
+            semantic_image = semantic_sensor.extract_data()
+            rgb_image      = rgb_sensor.extract_data()
+            geo_location   = gsss_sensor.extract_data(return_ecf = True, return_enu = True)
+            imu_data       = imu_sensor.extract_data()
+            depth_data     = depth_sensor.extract_data()
+            lidar_data     = lidar_sensor.extract_data()
+            lidar_sensor.visualize
             print(geo_location)
             
             cv2.imshow("Sensor stack", np.hstack([semantic_image, rgb_image]))
@@ -113,7 +114,6 @@ if __name__ == "__main__":
                 steer -= 1
             if abs(steer) > max_steer: steer = max_steer * (steer / abs(steer))
             vehicle.apply_control(carla.VehicleControl(throttle = throttle, steer = steer))
-            print(throttle)
             
             
             if key == ord('q'):
@@ -126,9 +126,6 @@ if __name__ == "__main__":
     except Exception as e:
         traceback.print_exc()
     finally:
-        import time
-        time.sleep(5)
-        
         semantic_sensor.destroy()
         rgb_sensor     .destroy()
         lidar_sensor   .destroy()
