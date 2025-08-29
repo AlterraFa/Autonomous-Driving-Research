@@ -5,9 +5,10 @@ import time
 
 from control.world import World
 from control.vehicle_control import Vehicle
+from control.path import PathHandler
 from utils.sensor_spawner import *
 from utils.buffer import TrajectoryBuffer
-from config.enum import JoyControl, JoyKey
+from config.enum import JoyControl
 
 from typing import Optional
 from enum import Enum
@@ -153,11 +154,12 @@ class CarlaViewer:
         try: geo = self.sensors_list['gnss'].extract_data(return_ecf = True, return_enu = True).Geodetic
         except: geo = "N/A"
         
+        runtime = time.time() - getattr(self, "start_time", time.time())
         
         self.hud.update_measurement(server_fps = self.server_fps, client_fps = self.fps, 
                         vehicle_name = self.vehicle_name, world_name = self.world_name,
                         velocity = self.virt_vehicle.get_velocity(False), heading = heading,
-                        accel = accel, gyro = gyro, enu = enu, geo = geo)
+                        accel = accel, gyro = gyro, enu = enu, geo = geo, runtime = runtime)
         
         self.hud.update_control(**self.virt_vehicle.get_ctrl(), regulate_speed = self.controller.regulate_speed)
         
@@ -171,17 +173,19 @@ class CarlaViewer:
             return loc
         return None
 
+    @profile
     def run(self, save_logging: str = None, record_type: str = "location", replay_logging: str = None, debug = False) -> None:
         if self.display is None:
             self.init_win()
 
-        self.last_platform_time = None; self.server_fps = 0
+        self.last_platform_time = None; self.server_fps = self.fps; self.start_time = time.time()
         self.virt_vehicle.set_autopilot(self.controller.autopilot) # First init for autopilot
 
         if save_logging != None:
             trajectory_buff = TrajectoryBuffer(dist_thresh_m = 1.0)
         elif replay_logging != None:
             waypoints_storage = np.load(replay_logging[0])
+            path_handling = PathHandler(waypoints_storage)
             if debug: self.virt_world.draw_waypoints(waypoints_storage, duration = replay_logging[1])
         
         try:
@@ -213,8 +217,20 @@ class CarlaViewer:
                 if save_logging != None: 
                     trajectory_buff.add_if_needed(self.to_location(getattr(self.virt_vehicle, record_type)))
                 elif replay_logging != None:
-                    ...
+                    enu = self.sensors_list["gnss"].extract_data(return_enu = True).ENU
+                    actual_pos = enu.to_numpy()
+                    dist_travelled, *_ = path_handling.project(actual_pos)
+
+                    try:
+                        for offset in [5, 10, 15]:
+                            interp_waypoint = path_handling.pose(dist_travelled + 2 + offset)[:-1]
+                            self.virt_world.draw_single_waypoint(interp_waypoint, duration = 1.5 * (1.0 / self.server_fps))
+                    except:
+                        print_exc()
+                        print("[red][ERROR][/]: End of interpolated path")
+                        break
                     
+                
                 pygame.display.flip()
                 if self.clock:
                     self.clock.tick(self.fps)
@@ -421,6 +437,7 @@ class HUD:
         self.gyro = 'N/A'
         self.enu = 'N/A'
         self.geo = 'N/A'
+        self.runtime = 0
         
         self.ctrl = {
             "throttle": 0.0,
@@ -445,6 +462,7 @@ class HUD:
         self.gyro  = kwargs.get("gyro", self.gyro)
         self.enu   = kwargs.get('enu', self.enu)
         self.geo   = kwargs.get('geo', self.geo)
+        self.runtime = kwargs.get("runtime", self.runtime)
 
     def update_control(self, **kwargs):
         for key in self.ctrl:
@@ -489,7 +507,8 @@ class HUD:
             accel_str,
             loc_str,
             h_str,
-            geo_str
+            geo_str,
+            f"{self.runtime:.2f}s"
         ]
         max_string = max(max(len(s) for s in value_strings), 15)
         spacing = 15
@@ -500,34 +519,37 @@ class HUD:
         clientfpsText = self.font.render(f"{'Client side:':<{spacing}}{f'{int(self.client_fps)} FPS':>{max_string}}", True, (255, 255, 255))
         surface.blit(clientfpsText, (10, 30)) 
 
+        runtimeText = self.font.render(f"{'Runtime:':<{spacing}}{f'{self.runtime:.2f} s':>{max_string}}", True, (255, 255, 255))
+        surface.blit(runtimeText, (10, 50)) 
+
         vehicleText = self.font.render(f"{'Vehicle name:':<{spacing}}{self.vehicle_name:>{max_string}}", True, (255, 255, 255))
-        surface.blit(vehicleText, (10, 70)) 
+        surface.blit(vehicleText, (10, 90)) 
 
         worldText = self.font.render(f"{'World name:':<{spacing}}{self.world_name:>{max_string}}", True, (255, 255, 255))
-        surface.blit(worldText, (10, 90)) 
+        surface.blit(worldText, (10, 110)) 
 
         velocityText = self.font.render(f"{'Velocity:':<{spacing}}{f'{self.velocity:.2f} (km/h)':>{max_string}}", True, (255, 255, 255))
-        surface.blit(velocityText, (10, 130)) 
+        surface.blit(velocityText, (10, 150)) 
 
         headingText = self.font.render(f"{'Heading:':<{spacing}}{f'{self.heading:.1f}° {self.heading_to_cardinal(self.heading)}':>{max_string}}", True, (255, 255, 255))
-        surface.blit(headingText, (10, 150)) 
+        surface.blit(headingText, (10, 170)) 
 
         accelText = self.font.render(f"{'Acceleration:':<{spacing}}{f'{accel_str}':>{max_string}}", True, (255, 255, 255))
-        surface.blit(accelText, (10, 170)) 
+        surface.blit(accelText, (10, 190)) 
         
         gyroText = self.font.render(f"{'Gyroscope:':<{spacing}}{f'{gyro_str}':>{max_string}}", True, (255, 255, 255))
-        surface.blit(gyroText, (10, 190)) 
+        surface.blit(gyroText, (10, 210)) 
 
         locText = self.font.render(f"{'Location:':<{spacing}}{f'{loc_str}':>{max_string}}", True, (255, 255, 255))
-        surface.blit(locText, (10, 210)) 
+        surface.blit(locText, (10, 230)) 
 
         geoText = self.font.render(f"{'Geodetic:':<{spacing}}{f'{geo_str}':>{max_string}}", True, (255, 255, 255))
-        surface.blit(geoText, (10, 230)) 
+        surface.blit(geoText, (10, 250)) 
 
         heightText = self.font.render(f"{'Height:':<{spacing}}{f'{h_str}':>{max_string}}", True, (255, 255, 255))
-        surface.blit(heightText, (10, 250)) 
+        surface.blit(heightText, (10, 270)) 
         
-    def draw_controls(self, surface, x=10, y=290):
+    def draw_controls(self, surface, x=10, y=310):
         line_h = 20
         bar_w, bar_h = 150, 10   # bar size
         bar_x = x + 100          # where bars start (shifted right of labels)
