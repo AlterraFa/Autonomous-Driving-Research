@@ -5,7 +5,7 @@ import time
 
 from control.world import World
 from control.vehicle_control import Vehicle
-from control.path import PathHandler
+from control.path import PathHandler, TurnClassify
 from utils.sensor_spawner import *
 from utils.buffer import TrajectoryBuffer
 from config.enum import JoyControl
@@ -188,7 +188,12 @@ class CarlaViewer:
             trajectory_buff = TrajectoryBuffer(dist_thresh_m = 1.0)
         elif replay_logging != None:
             waypoints_storage = np.load(replay_logging[0])
-            path_handling = PathHandler(waypoints_storage)
+            path_handling = PathHandler(waypoints_storage); 
+            path_handling.position_idx = 60
+            # path_handling.position_idx = 790
+            offset = [3, 5, 7, 9, 11]
+            scout = [12, 14, 16, 18, 20]
+            turn_classifier = TurnClassify(4.8)
         
         try:
             while self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
@@ -219,25 +224,19 @@ class CarlaViewer:
                 if save_logging != None: 
                     trajectory_buff.add_if_needed(self.to_location(getattr(self.virt_vehicle, record_type)))
                 elif replay_logging != None:
-                    actual_pos = self.enu.to_numpy()
-                    dist_travelled, *_ = path_handling.project(actual_pos)
+                    position  = self.enu.to_numpy()
+                    ego_waypoints, global_waypoints = path_handling.waypoints(position, offset, self.heading, return_global = True)
+                    for waypoint in global_waypoints:
+                        self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps))
+                    ego_scout, global_scout = path_handling.waypoints(position, scout, self.heading, return_global = True)
+                    # for waypoint in global_scout:
+                    #     self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps), color = (255, 0, 0))
                     
-
-                    try:
-                        for offset in [5, 10, 15]:
-                            interp_waypoint = path_handling.pose(dist_travelled + 2 + offset)[:-1]
-                            if debug: self.virt_world.draw_single_waypoint(interp_waypoint, duration = 1.5 * (1.0 / self.server_fps))
-
-                            ego_waypoint    = self.virt_vehicle.ego_transform(interp_waypoint, self.heading, actual_pos)
-                        
-                        # with open("check.txt", "a") as f:
-                        #     f.write(f"{time.time() - self.start_time:.2f}: {interp_waypoint}\n")    
-                        
-                    except:
-                        print_exc()
-                        print("[red][ERROR][/]: End of interpolated path")
-                        break
                     
+                    is_at_junction = self.virt_world.get_waypoint_junction(global_waypoints[-1])
+                    exit_junction  = not self.virt_world.get_waypoint_junction(global_waypoints[2])
+                    turn_signal    = turn_classifier.turning_type(is_at_junction, exit_junction, np.r_[ego_waypoints, ego_scout])
+                    print("Go straight" if turn_signal == 0 else "Turn left" if turn_signal == 1 else "Turn right" if turn_signal == 2 else None, path_handling.position_idx)
                 
                 pygame.display.flip()
                 if self.clock:

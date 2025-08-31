@@ -54,7 +54,6 @@ class PathHandler(NodeFinder):
                                bounds_error=False, fill_value="extrapolate")
         self.z_of_s = interp1d(self.s, self.path_xyz[:, 2], kind="linear",
                                bounds_error=False, fill_value="extrapolate")
-
         if self.has_yaw:
             yaw = np.unwrap(defined_path[keep, 3].astype(float))
             self._yaw_unwrapped_of_s = interp1d(self.s, yaw, kind="linear",
@@ -147,4 +146,84 @@ class PathHandler(NodeFinder):
         t = np.dot(P - A, AB) / denom
         return (0.0 < t) and (t < 1.0)
 
+    def waypoints(self, position: np.ndarray, offsets: list[float], yaw: float, return_global = False):
+        dist_travelled, *_ = self.project(position)
+        wp = []
+        for offset in offsets:
+            wp += [self.pose(dist_travelled + 2 + offset)[:-1]]
+        wp = np.asarray(wp)
+        if not return_global:
+            return self._ego_transform(wp, yaw, position)
+        else:
+            return self._ego_transform(wp, yaw, position), wp
+        
+    def _ego_transform(self, point: np.ndarray, rot: float, trans: np.ndarray):
+        x, y, z = trans
+        c, s = np.cos(rot), np.sin(rot)
+
+        T = np.array([
+            [ c,  s, -x*c - y*s],
+            [ s, -c, -x*s + y*c],
+            [ 0,  0,        1 ]
+        ])
+
+        pts = np.atleast_2d(point)
+        pts = np.hstack([pts[:, :2], np.ones((pts.shape[0], 1))])
+        local_pts = (T @ pts.T).T
+        return local_pts[:, :2] if len(local_pts) > 1 else local_pts[0, :2]
+
+class TurnClassify:
+    def __init__(self, threshold: float):
+        self.thresh = threshold
+        self.first_filter = []
+        self.second_filter = []
+        self.signal = None
+        pass
+
+    @staticmethod
+    def consecutive_angles(points: np.ndarray, signed: bool = False) -> np.ndarray:
+        pts = points[:, :2]
+        A, B, C = pts[:-2], pts[1:-1], pts[2:]
+        
+        AB = B - A
+        BC = C - B
+        
+        # normalize
+        ABn = AB / np.linalg.norm(AB, axis=1, keepdims=True)
+        BCn = BC / np.linalg.norm(BC, axis=1, keepdims=True)
+        
+        dot = np.sum(ABn * BCn, axis=1)
+        dot = np.clip(dot, -1.0, 1.0)
+        
+        angles = np.arccos(dot)
+        
+        if signed:
+            cross = ABn[:,0]*BCn[:,1] - ABn[:,1]*BCn[:,0]
+            angles *= np.sign(cross)
+        
+        return angles
     
+    def turning_type(self, enable: bool, disable: bool, waypoints: np.ndarray):
+        if enable:
+            curve_deg  = np.degrees(self.consecutive_angles(waypoints, True))
+            direction  = np.sign(curve_deg[np.argmax(np.abs(curve_deg))]) == 1
+            is_turning = np.any(np.abs(curve_deg) > self.thresh)
+            
+            if not is_turning:
+                cmd = 0
+            elif direction > 0:
+                cmd = 1
+            else:
+                cmd = 2
+            self.first_filter.append(cmd)
+            first_signal  = np.argmax(np.bincount(self.first_filter, minlength = 3))
+            self.second_filter.append(first_signal)
+            second_signal = np.argmax(np.bincount(self.second_filter, minlength = 3))
+            
+            self.signal = second_signal
+        if disable and not enable:
+            self.signal = None
+            self.first_filter.clear()
+            self.second_filter.clear()
+        
+        return self.signal
