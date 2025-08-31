@@ -405,22 +405,6 @@ class Vehicle:
 
         found.sort(key=lambda e: e["distance_m"])
         return found
-    
-    def ego_transform(self, point: np.ndarray, rot: float, trans: np.ndarray):
-        x, y, z = trans
-        c, s = np.cos(rot), np.sin(rot)
-
-        T = np.array([
-            [ c,  s, -x*c - y*s],
-            [ s, -c, -x*s + y*c],
-            [ 0,  0,        1 ]
-        ])
-
-        pts = np.atleast_2d(point)
-        pts = np.hstack([pts[:, :2], np.ones((pts.shape[0], 1))])
-        local_pts = (T @ pts.T).T
-        return local_pts[:, :2] if len(local_pts) > 1 else local_pts[0, :2]
-            
 
 def _vec2(loc: carla.Location):
     return np.array([loc.x, loc.y], dtype=np.float32)
