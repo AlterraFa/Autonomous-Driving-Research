@@ -189,11 +189,16 @@ class CarlaViewer:
         elif replay_logging != None:
             waypoints_storage = np.load(replay_logging[0])
             path_handling = PathHandler(waypoints_storage); 
+            # For debugging
             # path_handling.position_idx = 60
-            # path_handling.position_idx = 790
-            offset = [3, 5, 7, 9, 11]
-            scout = [12, 14, 16, 18, 20]
-            turn_classifier = TurnClassify(threshold = 5)
+            # path_handling.position_idx = 760
+            # path_handling.position_idx = 1150
+            # path_handling.position_idx = 2260
+            # path_handling.position_idx = 3980
+            offset          = [3, 5, 7, 9, 11]
+            forward_scout   = [12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32]
+            backward_scout  = [-14, -12, -10, -8, -6, -4, -2]
+            turn_classifier = TurnClassify(world = self.virt_world.world, threshold = 5)
         
         try:
             while self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
@@ -228,15 +233,22 @@ class CarlaViewer:
                     ego_waypoints, global_waypoints = path_handling.waypoints(position, offset, self.heading, return_global = True)
                     for waypoint in global_waypoints:
                         self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps))
-                    ego_scout, global_scout = path_handling.waypoints(position, scout, self.heading, return_global = True)
-                    # for waypoint in global_scout:
-                    #     self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps), color = (255, 0, 0))
+                    _, global_forward_scout = path_handling.waypoints(position, forward_scout, self.heading, return_global = True)
+                    for waypoint in global_forward_scout:
+                        self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps), color = (255, 0, 0))
+                    _, global_backward_scout = path_handling.waypoints(position, backward_scout, self.heading, return_global = True)
+                    for waypoint in global_backward_scout:
+                        self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps), color = (255, 0, 0))
                     
                     
-                    is_at_junction = self.virt_world.get_waypoint_junction(global_waypoints[-1])
-                    exit_junction  = not self.virt_world.get_waypoint_junction(global_waypoints[0])
-                    turn_signal    = turn_classifier.turning_type(is_at_junction, exit_junction, np.r_[ego_waypoints, ego_scout])
-                    # print("Go straight" if turn_signal == 0 else "Turn left" if turn_signal == 1 else "Turn right" if turn_signal == 2 else None, path_handling.position_idx)
+                    is_at_junction, junction = self.virt_world.get_waypoint_junction(global_waypoints[-1])
+                    not_exit_junction, _     = self.virt_world.get_waypoint_junction(global_waypoints[2])
+                    is_exit_junction         = not not_exit_junction
+                    turn_signal    = turn_classifier.turning_type(is_at_junction, junction, 
+                                                                  is_exit_junction, 
+                                                                  np.r_[global_backward_scout, global_waypoints, global_forward_scout], 
+                                                                  thresh_deg = 15)
+                    # print(path_handling.position_idx)
                     self.hud.update_logging(turn = turn_signal)
                     self.hud.draw_logging(self.display)
                 
@@ -625,6 +637,8 @@ class HUD:
             direction_str = "Turn left"
         elif self.logging['turn'] == 2:
             direction_str = "Turn right"
+        else:
+            direction_str = "N/A"
 
         spacing = 15
 
