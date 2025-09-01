@@ -206,7 +206,8 @@ class TurnClassify:
     def turning_type(self, enable: bool, disable: bool, waypoints: np.ndarray):
         if enable:
             curve_deg  = np.degrees(self.consecutive_angles(waypoints, True))
-            direction  = np.sign(curve_deg[np.argmax(np.abs(curve_deg))]) == 1
+            dominant   = curve_deg[np.argmax(np.abs(curve_deg))]
+            direction  = dominant > 0
             is_turning = np.any(np.abs(curve_deg) > self.thresh)
             
             if not is_turning:
@@ -222,7 +223,7 @@ class TurnClassify:
             
             self.signal = second_signal
         if disable and not enable:
-            self.signal = None
+            self.signal = -1
             self.first_filter.clear()
             self.second_filter.clear()
         

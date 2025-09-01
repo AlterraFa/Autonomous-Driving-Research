@@ -189,11 +189,11 @@ class CarlaViewer:
         elif replay_logging != None:
             waypoints_storage = np.load(replay_logging[0])
             path_handling = PathHandler(waypoints_storage); 
-            path_handling.position_idx = 60
+            # path_handling.position_idx = 60
             # path_handling.position_idx = 790
             offset = [3, 5, 7, 9, 11]
             scout = [12, 14, 16, 18, 20]
-            turn_classifier = TurnClassify(4.8)
+            turn_classifier = TurnClassify(threshold = 5)
         
         try:
             while self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
@@ -234,9 +234,11 @@ class CarlaViewer:
                     
                     
                     is_at_junction = self.virt_world.get_waypoint_junction(global_waypoints[-1])
-                    exit_junction  = not self.virt_world.get_waypoint_junction(global_waypoints[2])
+                    exit_junction  = not self.virt_world.get_waypoint_junction(global_waypoints[0])
                     turn_signal    = turn_classifier.turning_type(is_at_junction, exit_junction, np.r_[ego_waypoints, ego_scout])
-                    print("Go straight" if turn_signal == 0 else "Turn left" if turn_signal == 1 else "Turn right" if turn_signal == 2 else None, path_handling.position_idx)
+                    # print("Go straight" if turn_signal == 0 else "Turn left" if turn_signal == 1 else "Turn right" if turn_signal == 2 else None, path_handling.position_idx)
+                    self.hud.update_logging(turn = turn_signal)
+                    self.hud.draw_logging(self.display)
                 
                 pygame.display.flip()
                 if self.clock:
@@ -457,6 +459,10 @@ class HUD:
             'autopilot': False,
             'regulate_speed': False
         }
+    
+        self.logging = {
+            "turn": -1
+        }
         
     def update_measurement(self, **kwargs):
         self.client_fps = kwargs.get("client_fps", self.client_fps)
@@ -475,7 +481,11 @@ class HUD:
         for key in self.ctrl:
             if key in kwargs:
                 self.ctrl[key] = kwargs[key]
-
+                
+    def update_logging(self, **kwargs):
+        for key in self.logging:
+            if key in kwargs:
+                self.logging[key] = kwargs[key]
         
     @staticmethod
     def heading_to_cardinal(deg: float) -> str:
@@ -524,43 +534,43 @@ class HUD:
             geo_str,
             time_str
         ]
-        max_string = max(max(len(s) for s in value_strings), 15)
+        self.max_string = max(max(len(s) for s in value_strings), 15)
         spacing = 15
         
-        serverfpsText = self.font.render(f"{'Server side:':<{spacing}}{f'{int(self.server_fps)} FPS':>{max_string}}", True, (255, 255, 255))
+        serverfpsText = self.font.render(f"{'Server side:':<{spacing}}{f'{int(self.server_fps)} FPS':>{self.max_string}}", True, (255, 255, 255))
         surface.blit(serverfpsText, (10, 10)) 
 
-        clientfpsText = self.font.render(f"{'Client side:':<{spacing}}{f'{int(self.client_fps)} FPS':>{max_string}}", True, (255, 255, 255))
+        clientfpsText = self.font.render(f"{'Client side:':<{spacing}}{f'{int(self.client_fps)} FPS':>{self.max_string}}", True, (255, 255, 255))
         surface.blit(clientfpsText, (10, 30)) 
 
-        runtimeText = self.font.render(f"{'Runtime:':<{spacing}}{f'{time_str} s':>{max_string}}", True, (255, 255, 255))
+        runtimeText = self.font.render(f"{'Runtime:':<{spacing}}{f'{time_str} s':>{self.max_string}}", True, (255, 255, 255))
         surface.blit(runtimeText, (10, 50)) 
 
-        vehicleText = self.font.render(f"{'Vehicle name:':<{spacing}}{self.vehicle_name:>{max_string}}", True, (255, 255, 255))
+        vehicleText = self.font.render(f"{'Vehicle name:':<{spacing}}{self.vehicle_name:>{self.max_string}}", True, (255, 255, 255))
         surface.blit(vehicleText, (10, 90)) 
 
-        worldText = self.font.render(f"{'World name:':<{spacing}}{self.world_name:>{max_string}}", True, (255, 255, 255))
+        worldText = self.font.render(f"{'World name:':<{spacing}}{self.world_name:>{self.max_string}}", True, (255, 255, 255))
         surface.blit(worldText, (10, 110)) 
 
-        velocityText = self.font.render(f"{'Velocity:':<{spacing}}{f'{self.velocity:.2f} (km/h)':>{max_string}}", True, (255, 255, 255))
+        velocityText = self.font.render(f"{'Velocity:':<{spacing}}{f'{self.velocity:.2f} (km/h)':>{self.max_string}}", True, (255, 255, 255))
         surface.blit(velocityText, (10, 150)) 
 
-        headingText = self.font.render(f"{'Heading:':<{spacing}}{f'{self.heading:.1f}° {self.heading_to_cardinal(self.heading)}':>{max_string}}", True, (255, 255, 255))
+        headingText = self.font.render(f"{'Heading:':<{spacing}}{f'{self.heading:.1f}° {self.heading_to_cardinal(self.heading)}':>{self.max_string}}", True, (255, 255, 255))
         surface.blit(headingText, (10, 170)) 
 
-        accelText = self.font.render(f"{'Acceleration:':<{spacing}}{f'{accel_str}':>{max_string}}", True, (255, 255, 255))
+        accelText = self.font.render(f"{'Acceleration:':<{spacing}}{f'{accel_str}':>{self.max_string}}", True, (255, 255, 255))
         surface.blit(accelText, (10, 190)) 
         
-        gyroText = self.font.render(f"{'Gyroscope:':<{spacing}}{f'{gyro_str}':>{max_string}}", True, (255, 255, 255))
+        gyroText = self.font.render(f"{'Gyroscope:':<{spacing}}{f'{gyro_str}':>{self.max_string}}", True, (255, 255, 255))
         surface.blit(gyroText, (10, 210)) 
 
-        locText = self.font.render(f"{'Location:':<{spacing}}{f'{loc_str}':>{max_string}}", True, (255, 255, 255))
+        locText = self.font.render(f"{'Location:':<{spacing}}{f'{loc_str}':>{self.max_string}}", True, (255, 255, 255))
         surface.blit(locText, (10, 230)) 
 
-        geoText = self.font.render(f"{'Geodetic:':<{spacing}}{f'{geo_str}':>{max_string}}", True, (255, 255, 255))
+        geoText = self.font.render(f"{'Geodetic:':<{spacing}}{f'{geo_str}':>{self.max_string}}", True, (255, 255, 255))
         surface.blit(geoText, (10, 250)) 
 
-        heightText = self.font.render(f"{'Height:':<{spacing}}{f'{h_str}':>{max_string}}", True, (255, 255, 255))
+        heightText = self.font.render(f"{'Height:':<{spacing}}{f'{h_str}':>{self.max_string}}", True, (255, 255, 255))
         surface.blit(heightText, (10, 270)) 
         
     def draw_controls(self, surface, x=10, y=310):
@@ -603,3 +613,20 @@ class HUD:
         surface.blit(self.font.render(f"{'Gear:':<{spacing}} {self.ctrl['gear']}", True, white), (x, y+6*line_h))
         surface.blit(self.font.render(f"{'Autopilot:':<{spacing}} {'■' if self.ctrl['autopilot'] else '□'}", True, (255,255,255)), (x, y+7*line_h))
         surface.blit(self.font.render(f"{'Regulate speed:':<{spacing}} {'■' if self.ctrl['regulate_speed'] else '□'}", True, (255,255,255)), (x, y+8*line_h))
+
+    def draw_logging(self, surface, x = 10, y = 490):
+        line_h = 20
+        
+        if self.logging['turn'] == -1:
+            direction_str = "Keep lane"
+        elif self.logging['turn'] == 0:
+            direction_str = "Go straight"
+        elif self.logging['turn'] == 1:
+            direction_str = "Turn left"
+        elif self.logging['turn'] == 2:
+            direction_str = "Turn right"
+
+        spacing = 15
+
+        directionText = self.font.render(f"{'Turn signal:':<{spacing}}{f'{direction_str}':>{self.max_string}}", True, (255, 255, 255))
+        surface.blit(directionText, (x, y + 1 * line_h)) 
