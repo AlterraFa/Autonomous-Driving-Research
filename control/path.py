@@ -1,4 +1,6 @@
 import numpy as np
+import carla
+from collections import deque
 from scipy.interpolate import interp1d
 
 def wrap_to_pi(theta):
@@ -173,11 +175,12 @@ class PathHandler(NodeFinder):
         return local_pts[:, :2] if len(local_pts) > 1 else local_pts[0, :2]
 
 class TurnClassify:
-    def __init__(self, threshold: float):
+    def __init__(self, world, threshold: float):
         self.thresh = threshold
-        self.first_filter = []
-        self.second_filter = []
+        self.first_filter = deque(maxlen = 150)
+        self.second_filter = deque(maxlen = 150)
         self.signal = None
+        self.world = world
         pass
 
     @staticmethod
@@ -203,28 +206,137 @@ class TurnClassify:
         
         return angles
     
-    def turning_type(self, enable: bool, disable: bool, waypoints: np.ndarray):
+    @staticmethod
+    def _find_entry_clusters(wp_pairs, waypoints):
+        
+        best_dist = float("inf")
+        best_entry = None
+        best_loc = None
+        best_exit = None
+
+        for entry_wp, exit_wp in wp_pairs:
+            loc = entry_wp.transform.location
+            entry_xyz = np.array([loc.x, loc.y, loc.z])
+            dists = np.linalg.norm(waypoints - entry_xyz, axis=1)
+            min_d = dists.min()
+            if min_d < best_dist:
+                best_dist = min_d
+                best_entry = entry_wp
+                best_exit = exit_wp
+                best_loc = entry_xyz
+
+        if best_entry is None:
+            return []
+
+        cluster = []
+        for entry_wp, exit_wp in wp_pairs:
+            loc = entry_wp.transform.location
+            loc_xyz = np.array([loc.x, loc.y, loc.z])
+            if np.allclose(loc_xyz, best_loc, atol=1e-6):  # exact same point
+                cluster.append((entry_wp, exit_wp))
+                
+        return cluster
+    
+    @staticmethod
+    def _find_exit(wp_pairs, waypoints):
+        
+        best_dist = float("inf")
+        best_entry = None
+        best_loc = None
+        best_exit = None
+
+        for entry_wp, exit_wp in wp_pairs:
+            loc = exit_wp.transform.location
+            exit_xyz = np.array([loc.x, loc.y, loc.z])
+            dists = np.linalg.norm(waypoints - exit_xyz, axis=1)
+            min_d = dists.min()
+            if min_d < best_dist:
+                best_dist = min_d
+                best_entry = entry_wp
+                best_exit = exit_wp
+                best_loc = exit_xyz
+
+        return best_entry, best_exit
+    
+    @staticmethod
+    def waypoint_heading(wp):
+        fwd = wp.transform.get_forward_vector()
+        yaw = np.arctan2(fwd.y, fwd.x)
+        return yaw
+
+
+    def turning_type(self, enable: bool, junction, disable: bool, waypoints: np.ndarray, thresh_deg = 45):
+        """
+        Classify the vehicle's maneuver through a junction as straight, left, or right
+        based on the heading change between the closest entry and exit waypoints.
+
+        Parameters
+        ----------
+        enable : bool
+            If True, perform classification. When enabled, the method will:
+            1. Get all (entry, exit) waypoint pairs from the junction.
+            2. Find the entry cluster closest to the vehicle's current path waypoints.
+            3. Select the exit waypoint from that cluster that is closest to the path.
+            4. Compute the heading (yaw) of both the chosen entry and exit waypoints.
+            5. Calculate the wrapped heading difference Δ (radians) using atan2.
+            6. Classify the maneuver:
+                self.signal = 0 → straight  (|Δ| < thresh_deg)
+                self.signal = 1 → right turn (Δ < -thresh_deg)
+                self.signal = 2 → left turn  (Δ > +thresh_deg)
+
+        junction : carla.Junction
+            The CARLA junction object obtained from a waypoint's `.get_junction()` call.
+            Must contain driving lane waypoints.
+
+        disable : bool
+            If True and `enable` is False, reset classification state by setting
+            `self.signal = -1`.
+
+        waypoints : np.ndarray, shape (N,3)
+            Array of vehicle trajectory points [x, y, z] used to determine which
+            entry/exit pair is closest to the current path.
+
+        thresh_deg : float, optional (default=45)
+            Angular threshold in degrees to decide what counts as "straight".
+            Turns smaller than this threshold are treated as going straight.
+
+        Returns
+        -------
+        signal : int
+            -1 if disabled/reset,
+            0 if straight maneuver,
+            1 if right turn,
+            2 if left turn.
+
+        Notes
+        -----
+        - This method uses only entry/exit waypoint heading difference, so small
+        zig-zags or lane curvature inside the junction will still be classified
+        correctly by the net heading change.
+        - Uses CARLA debug draw to visualize the chosen entry (blue point) and
+        exit (blue point) locations for one frame at 70 FPS.
+        """
         if enable:
-            curve_deg  = np.degrees(self.consecutive_angles(waypoints, True))
-            dominant   = curve_deg[np.argmax(np.abs(curve_deg))]
-            direction  = dominant > 0
-            is_turning = np.any(np.abs(curve_deg) > self.thresh)
+            wp_pairs       = junction.get_waypoints(carla.LaneType.Driving)
+            possible_pairs = self._find_entry_clusters(wp_pairs, waypoints)                    
+            choosen_pairs  = self._find_exit(possible_pairs, waypoints)
+
+            self.world.debug.draw_point(choosen_pairs[0].transform.location, size = 0.18, color = carla.Color(0, 0, 255), life_time = 1.5 * (1 / 70))
+            self.world.debug.draw_point(choosen_pairs[1].transform.location, size = 0.18, color = carla.Color(0, 0, 255), life_time = 1.5 * (1 / 70))
             
-            if not is_turning:
-                cmd = 0
-            elif direction > 0:
-                cmd = 1
+            entry_heading  = self.waypoint_heading(choosen_pairs[0])
+            exit_heading   = self.waypoint_heading(choosen_pairs[1])
+
+            delta = np.arctan2(np.sin(exit_heading - entry_heading),
+                       np.cos(exit_heading - entry_heading))
+            
+            if abs(delta) < np.radians(thresh_deg):
+                self.signal = 0
+            elif delta < 0:
+                self.signal = 1
             else:
-                cmd = 2
-            self.first_filter.append(cmd)
-            first_signal  = np.argmax(np.bincount(self.first_filter, minlength = 3))
-            self.second_filter.append(first_signal)
-            second_signal = np.argmax(np.bincount(self.second_filter, minlength = 3))
-            
-            self.signal = second_signal
+                self.signal = 2
         if disable and not enable:
             self.signal = -1
-            self.first_filter.clear()
-            self.second_filter.clear()
-        
+
         return self.signal

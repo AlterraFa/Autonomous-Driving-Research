@@ -62,6 +62,6 @@ class World:
         if wp.is_junction:
             junction = wp.get_junction()
             if junction.id not in excluded_junctions: # Not a 2 way junction
-                return True
-            return False
-        return False
+                return True, junction
+            return False, None
+        return False, None
