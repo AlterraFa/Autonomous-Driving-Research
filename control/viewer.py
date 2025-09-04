@@ -177,7 +177,7 @@ class CarlaViewer:
         return None
 
     @profile
-    def run(self, save_logging: str = None, record_type: str = "location", replay_logging: str = None, debug = False) -> None:
+    def run(self, save_logging: str = None, use_temporal_wp: bool = False, replay_logging: str = None, debug = False) -> None:
         if self.display is None:
             self.init_win()
 
@@ -185,20 +185,25 @@ class CarlaViewer:
         self.virt_vehicle.set_autopilot(self.controller.autopilot) # First init for autopilot
 
         if save_logging != None:
-            trajectory_buff = TrajectoryBuffer(dist_thresh_m = 1.0)
+            trajectory_buff = TrajectoryBuffer(min_dt_s = .2)
         elif replay_logging != None:
             waypoints_storage = np.load(replay_logging[0])
             path_handling = PathHandler(waypoints_storage); 
             # For debugging
             # path_handling.position_idx = 60
+            # path_handling.position_idx = 250
+            # path_handling.position_idx = 300
             # path_handling.position_idx = 760
             # path_handling.position_idx = 1150
             # path_handling.position_idx = 2260
             # path_handling.position_idx = 3980
-            offset          = [3, 5, 7, 9, 11]
-            forward_scout   = [12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32]
-            backward_scout  = [-14, -12, -10, -8, -6, -4, -2]
-            turn_classifier = TurnClassify(world = self.virt_world.world, threshold = 5)
+
+            scout_points = [i for i in range(-18, 33, 2)]
+            if not use_temporal_wp:
+                offset          = [3, 5, 7, 8, 9]
+            else:
+                offset          = [.2, .4, .6, .8, 1.0]
+            turn_classifier = TurnClassify(world = self.world, threshold_deg = 15)
         
         try:
             while self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
@@ -227,28 +232,24 @@ class CarlaViewer:
                                                     self.controller.has_joystick)
                 
                 if save_logging != None: 
-                    trajectory_buff.add_if_needed(self.to_location(getattr(self.virt_vehicle, record_type)))
+                    trajectory_buff.add_if_needed(self.enu.to_numpy())
                 elif replay_logging != None:
                     position  = self.enu.to_numpy()
-                    ego_waypoints, global_waypoints = path_handling.waypoints(position, offset, self.heading, return_global = True)
-                    for waypoint in global_waypoints:
-                        self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps))
-                    _, global_forward_scout = path_handling.waypoints(position, forward_scout, self.heading, return_global = True)
-                    for waypoint in global_forward_scout:
-                        self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps), color = (255, 0, 0))
-                    _, global_backward_scout = path_handling.waypoints(position, backward_scout, self.heading, return_global = True)
-                    for waypoint in global_backward_scout:
-                        self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps), color = (255, 0, 0))
+                    ego_waypoints, global_waypoints = path_handling.waypoints(position, offset, self.heading, return_global = True, use_time = use_temporal_wp)
+                    _, global_scout                 = path_handling.waypoints(position, scout_points, self.heading, return_global = True)
+                    if debug:
+                        for waypoint in global_waypoints:
+                            self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps))
+                        for waypoint in global_scout:
+                            self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps), color = (255, 0, 0), size = 0.1)
                     
                     
-                    is_at_junction, junction = self.virt_world.get_waypoint_junction(global_waypoints[-1])
-                    not_exit_junction, _     = self.virt_world.get_waypoint_junction(global_waypoints[2])
+                    is_at_junction, junction = self.virt_world.get_waypoint_junction(global_scout[14])
+                    not_exit_junction, _     = self.virt_world.get_waypoint_junction(global_scout[10])
                     is_exit_junction         = not not_exit_junction
                     turn_signal    = turn_classifier.turning_type(is_at_junction, junction, 
                                                                   is_exit_junction, 
-                                                                  np.r_[global_backward_scout, global_waypoints, global_forward_scout], 
-                                                                  thresh_deg = 15)
-                    # print(path_handling.position_idx)
+                                                                  global_scout)
                     self.hud.update_logging(turn = turn_signal)
                     self.hud.draw_logging(self.display)
                 
@@ -269,7 +270,7 @@ class CarlaViewer:
             self.virt_vehicle.stop()
             self.close()
             if save_logging != None:
-                trajectory_buff.save(save_logging + "/trajectory")
+                trajectory_buff.save(save_logging + "/trajectory_spatial")
 
     def close(self) -> None:
         

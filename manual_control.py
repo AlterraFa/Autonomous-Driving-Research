@@ -80,7 +80,7 @@ def main(args):
         
         game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
         game_viewer.init_sensor([rgb_sensor, semantic_sensor, gnss_sensor, imu_sensor, depth_sensor])
-        game_viewer.run(replay_logging = [path_2_waypoints, duration], debug = True)
+        game_viewer.run(replay_logging = [path_2_waypoints, duration], use_temporal_wp = args.temporal, debug = True)
 
         client.stop_replayer(True)
         return
@@ -101,7 +101,7 @@ def main(args):
         game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
         game_viewer.init_sensor([rgb_sensor, semantic_sensor, gnss_sensor, imu_sensor, depth_sensor])
         if args.record:
-            game_viewer.run(save_logging = directory, record_type = args.record_type)
+            game_viewer.run(save_logging = directory)
             client.stop_recorder()
         else:
             game_viewer.run()
@@ -156,11 +156,6 @@ if __name__ == "__main__":
         help = "Record carla state"
     )
     argparser.add_argument(
-        "--record-type",
-        default = "location",
-        help = "Specify a record type (default: location)"
-    )
-    argparser.add_argument(
         "--replay",
         type = str,
         default = "None",
@@ -172,8 +167,16 @@ if __name__ == "__main__":
         default = 0,
         help = "Ignore traffic sign rules (by percentage)"
     )
+    argparser.add_argument(
+        "--temporal",
+        action="store_true",
+        help="Use temporal (time-based) waypoint generation instead of spatial."
+    )
     
     args = argparser.parse_args()
     args.width, args.height = [int(x) for x in args.res.split('x')]
 
     main(args)
+    []
+    [0, 2, 1, 3, 4, 5, 7]
+    [0, 2, 3, 6, 10, 15, 22]

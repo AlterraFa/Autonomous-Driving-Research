@@ -66,7 +66,11 @@ def main(args):
 
     duration = get_recording_duration(path_2_recording)
     client.show_recorder_file_info(path_2_recording, False)
-    client.replay_file(path_2_recording, 2, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
+    client.replay_file(path_2_recording, 0, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
+    # client.replay_file(path_2_recording, 50, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
+    # client.replay_file(path_2_recording, 170, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
+    # client.replay_file(path_2_recording, 240, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
+    # client.replay_file(path_2_recording, 760, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
 
     vehicle = wait_for_actor_by_role(virt_world.world, "ego")
     if vehicle is None:
@@ -75,7 +79,7 @@ def main(args):
     
     game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
     game_viewer.init_sensor([rgb_sensor, semantic_sensor, gnss_sensor, imu_sensor, depth_sensor])
-    game_viewer.run(replay_logging = [path_2_waypoints, duration], debug = True)
+    game_viewer.run(replay_logging = [path_2_waypoints, duration], use_temporal_wp = args.temporal, debug = True)
 
     client.stop_replayer(True)
     
@@ -122,7 +126,11 @@ if __name__ == "__main__":
         help = "Replay Carla recording (.log file path is needed, recording time of .npy must correspond to .log)",   
         required = True
     )
-    
+    argparser.add_argument(
+        "--temporal",
+        action="store_true",
+        help="Use temporal (time-based) waypoint generation instead of spatial."
+    )
     args = argparser.parse_args()
     args.width, args.height = [int(x) for x in args.res.split('x')]
 

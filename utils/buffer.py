@@ -2,8 +2,8 @@ import time
 import numpy as np
 
 class TrajectoryBuffer:
-    def __init__(self, init_cap=8192, dist_thresh_m=1.0, min_dt_s=0.05):
-        self.arr = np.empty((init_cap, 3), dtype=np.float32)
+    def __init__(self, init_cap = 8192, dist_thresh_m = 0, min_dt_s = 0.05):
+        self.arr = np.empty((init_cap, 4), dtype=np.float32)
         self.n = 0
         self.last = None
         self.last_t = 0.0
@@ -17,15 +17,17 @@ class TrajectoryBuffer:
 
     def add_if_needed(self, loc):
         t = time.time()
-        p = (float(loc.x), float(loc.y), float(loc.z))
+        p = [float(loc.x), float(loc.y), float(loc.z)]
         if self.last is not None:
             if (t - self.last_t) < self.min_dt:
                 return
-            if self._dist3(p, self.last) < self.dist_thresh:
+            if self._dist3(p, self.last) <= self.dist_thresh:
                 return
+            
+        p.append(t - self.last_t)
         self.last, self.last_t = p, t
         if self.n >= self.arr.shape[0]:
-            new = np.empty((self.arr.shape[0]*2, 3), dtype=np.float32)
+            new = np.empty((self.arr.shape[0]*2, 4), dtype=np.float32)
             new[:self.n] = self.arr[:self.n]
             self.arr = new
         self.arr[self.n] = p
