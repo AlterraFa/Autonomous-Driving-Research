@@ -1,19 +1,20 @@
 import numpy as np
 import carla
-from collections import deque
 from scipy.interpolate import interp1d
 
 def wrap_to_pi(theta):
     return (theta + np.pi) % (2 * np.pi) - np.pi
     
 class NodeFinder:
-    def __init__(self, Ld, path, **kwargs):
+    def __init__(self, Ld, path, update_dist = .5, **kwargs):
         super().__init__(**kwargs)
         self.Ld = Ld
         self.position_idx = 0
         self.path = path
-        
+        self.update_dist = update_dist
+
     def update_state(self, distance):
+
         in_range_path_idx = np.where(np.abs(distance - self.Ld) <= self.Ld)[0]
         split_indices = np.where(np.diff(in_range_path_idx) != 1)[0] + 1
         consec_groups = np.split(in_range_path_idx, split_indices)
@@ -21,60 +22,97 @@ class NodeFinder:
         for group_indices in consec_groups:
             if self.position_idx in group_indices:
                 min_index_group = np.argmin(np.abs(distance[group_indices]))
-                if group_indices[min_index_group] > self.position_idx:
-                    self.position_idx = group_indices[min_index_group]
+                candidate_idx = group_indices[min_index_group]
+                if candidate_idx > self.position_idx and abs(distance[candidate_idx] - distance[self.position_idx]) > self.update_dist:
+                    self.position_idx = candidate_idx
                 return self.position_idx
         
         return self.position_idx
-
 class PathHandler(NodeFinder):
     """
-    defined_path: shape (N,3) -> [x, y, z] or (N,4) -> [x, y, z, psi]
-    psi is heading in radians if provided.
+    defined_path: 
+      (N,3) -> [x, y, z]
+      (N,4) -> [x, y, z, t]   (t = timestamp or cumulative time)
     """
     def __init__(self, defined_path: np.ndarray):
         super().__init__(10, defined_path)
-        
-        assert defined_path.ndim == 2 and defined_path.shape[1] in (3, 4), \
-            "defined_path must be (N,3) [x,y,z] or (N,4) [x,y,z,psi]"
-        self.path_xyz = defined_path[:, :3].astype(float)
-        self.has_yaw = defined_path.shape[1] == 4
 
+        assert defined_path.ndim == 2 and defined_path.shape[1] in (3, 4), \
+            "defined_path must be (N,3) [x,y,z] or (N,4) [x,y,z,t]"
+        
+        self.path_xyz = defined_path[:, :3].astype(float)
+        self.has_time = defined_path.shape[1] == 4
+
+        # --- arc-length for projection ---
         diffs   = np.diff(self.path_xyz, axis=0)
         seg_len = np.linalg.norm(diffs, axis=1)
         s       = np.concatenate(([0.0], np.cumsum(seg_len)))
-        keep    = np.r_[True, seg_len > 1e-9]
-        
+        keep    = np.r_[True, seg_len >= 0]
+
+        eps   = 1e-6
+        count = 0
+        for i in range(1, len(s)):
+            if seg_len[i-1] == 0:
+                count += 1
+                s[i] += eps * count
+            else:
+                count = 0
+
         self.path_xyz = self.path_xyz[keep]
         self.s = s[keep]
         self.seg_vec = np.diff(self.path_xyz, axis=0)
         self.seg_len = np.linalg.norm(self.seg_vec, axis=1)
 
+        # --- interpolation in s ---
         self.x_of_s = interp1d(self.s, self.path_xyz[:, 0], kind="linear",
                                bounds_error=False, fill_value="extrapolate")
         self.y_of_s = interp1d(self.s, self.path_xyz[:, 1], kind="linear",
                                bounds_error=False, fill_value="extrapolate")
         self.z_of_s = interp1d(self.s, self.path_xyz[:, 2], kind="linear",
                                bounds_error=False, fill_value="extrapolate")
-        if self.has_yaw:
-            yaw = np.unwrap(defined_path[keep, 3].astype(float))
-            self._yaw_unwrapped_of_s = interp1d(self.s, yaw, kind="linear",
-                                                bounds_error=False, fill_value="extrapolate")
-        else:
-            self._yaw_unwrapped_of_s = None
 
-        self.s_min = float(self.s[0])
-        self.s_max = float(self.s[-1])
-    
-    def pose(self, s_query: float):
-        """Return [x, y, z, yaw] at arc-length s_query (yaw=None if not available)."""
-        x = float(self.x_of_s(s_query))
-        y = float(self.y_of_s(s_query))
-        z = float(self.z_of_s(s_query))
-        if self._yaw_unwrapped_of_s is None:
-            return np.array([x, y, z, np.nan])
-        yaw = wrap_to_pi(float(self._yaw_unwrapped_of_s(s_query)))
-        return np.array([x, y, z, yaw])
+        self.s_min, self.s_max = float(self.s[0]), float(self.s[-1])
+
+        # --- interpolation in t if available ---
+        if self.has_time:
+            self.timer = 0
+            t_col = defined_path[:, -1].astype(float)[keep]
+            self.t = np.cumsum(t_col)
+            
+            self.x_of_t = interp1d(self.t, self.path_xyz[:, 0], kind="linear",
+                                   bounds_error=False, fill_value="extrapolate")
+            self.y_of_t = interp1d(self.t, self.path_xyz[:, 1], kind="linear",
+                                   bounds_error=False, fill_value="extrapolate")
+            self.z_of_t = interp1d(self.t, self.path_xyz[:, 2], kind="linear",
+                                   bounds_error=False, fill_value="extrapolate")
+            self.t_of_s = interp1d(self.s, self.t, kind = "linear",
+                                   bounds_error=False, fill_value="extrapolate")
+
+            self.t_min, self.t_max = float(self.t[0]), float(self.t[-1])
+        else:
+            self.t = None
+            
+
+    def pose(self, query: float, use_time: bool = False):
+        """
+        Return [x, y, z].
+        If use_time=False -> query is arc-length s.
+        If use_time=True  -> query is timestamp t (requires time column).
+        """
+        if use_time:
+            if self.t is None:
+                raise RuntimeError("This path has no time column.")
+            return np.array([
+                float(self.x_of_t(query)),
+                float(self.y_of_t(query)),
+                float(self.z_of_t(query))
+            ])
+        else:
+            return np.array([
+                float(self.x_of_s(query)),
+                float(self.y_of_s(query)),
+                float(self.z_of_s(query))
+            ])
 
     def project(self, point_xyz: np.ndarray):
         """
@@ -148,11 +186,18 @@ class PathHandler(NodeFinder):
         t = np.dot(P - A, AB) / denom
         return (0.0 < t) and (t < 1.0)
 
-    def waypoints(self, position: np.ndarray, offsets: list[float], yaw: float, return_global = False):
+    def waypoints(self, position: np.ndarray, offsets: list[float], yaw: float, use_time: bool = False, return_global = False):
         dist_travelled, *_ = self.project(position)
-        wp = []
-        for offset in offsets:
-            wp += [self.pose(dist_travelled + 2 + offset)[:-1]]
+        if not use_time:
+            wp = []
+            for offset in offsets:
+                wp += [self.pose(dist_travelled + 2 + offset)]
+        else: 
+            current_time = self.t_of_s(dist_travelled)
+            wp = []
+            for offset in offsets:
+                wp += [self.pose(current_time + offset, True)]
+                
         wp = np.asarray(wp)
         if not return_global:
             return self._ego_transform(wp, yaw, position)
@@ -175,12 +220,10 @@ class PathHandler(NodeFinder):
         return local_pts[:, :2] if len(local_pts) > 1 else local_pts[0, :2]
 
 class TurnClassify:
-    def __init__(self, world, threshold: float):
-        self.thresh = threshold
-        self.first_filter = deque(maxlen = 150)
-        self.second_filter = deque(maxlen = 150)
+    def __init__(self, world, threshold_deg: float = 45):
+        self.thresh_deg = threshold_deg
         self.signal = None
-        self.world = world
+        self.world  = world
         pass
 
     @staticmethod
@@ -265,7 +308,7 @@ class TurnClassify:
         return yaw
 
 
-    def turning_type(self, enable: bool, junction, disable: bool, waypoints: np.ndarray, thresh_deg = 45):
+    def turning_type(self, enable: bool, junction, disable: bool, waypoints: np.ndarray, debug = False):
         """
         Classify the vehicle's maneuver through a junction as straight, left, or right
         based on the heading change between the closest entry and exit waypoints.
@@ -321,8 +364,9 @@ class TurnClassify:
             possible_pairs = self._find_entry_clusters(wp_pairs, waypoints)                    
             choosen_pairs  = self._find_exit(possible_pairs, waypoints)
 
-            self.world.debug.draw_point(choosen_pairs[0].transform.location, size = 0.18, color = carla.Color(0, 0, 255), life_time = 1.5 * (1 / 70))
-            self.world.debug.draw_point(choosen_pairs[1].transform.location, size = 0.18, color = carla.Color(0, 0, 255), life_time = 1.5 * (1 / 70))
+            if debug:
+                self.world.debug.draw_point(choosen_pairs[0].transform.location, size = 0.18, color = carla.Color(0, 0, 255), life_time = 1.5 * (1 / 70))
+                self.world.debug.draw_point(choosen_pairs[1].transform.location, size = 0.18, color = carla.Color(0, 0, 255), life_time = 1.5 * (1 / 70))
             
             entry_heading  = self.waypoint_heading(choosen_pairs[0])
             exit_heading   = self.waypoint_heading(choosen_pairs[1])
@@ -330,7 +374,7 @@ class TurnClassify:
             delta = np.arctan2(np.sin(exit_heading - entry_heading),
                        np.cos(exit_heading - entry_heading))
             
-            if abs(delta) < np.radians(thresh_deg):
+            if abs(delta) < np.radians(self.thresh_deg):
                 self.signal = 0
             elif delta < 0:
                 self.signal = 1
