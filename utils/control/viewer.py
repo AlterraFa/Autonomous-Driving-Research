@@ -134,7 +134,7 @@ class CarlaViewer:
         for camera_name in self.camera_keys:
             self.sensors_list[camera_name].change_view(**getattr(CameraView, view_name).value)
     
-    def draw_hud(self):
+    def draw_hud(self, filter_ctrl = False):
         snapshot = self.world.get_snapshot()
         current_platform_time = snapshot.timestamp.platform_timestamp  # server wall clock
         if self.last_platform_time is not None:
@@ -173,7 +173,7 @@ class CarlaViewer:
                                     velocity = self.velocity, heading = heading,
                                     accel = accel, gyro = gyro, enu = enu, geo = geo, runtime = runtime)
         
-        self.hud.update_control(**self.virt_vehicle.get_ctrl(), regulate_speed = self.controller.regulate_speed)
+        self.hud.update_control(**self.virt_vehicle.get_ctrl(filter_ctrl), regulate_speed = self.controller.regulate_speed)
         
     @staticmethod
     def to_location(loc):
@@ -199,14 +199,16 @@ class CarlaViewer:
         self.virt_vehicle.set_autopilot(self.controller.autopilot) # First init for autopilot
         
         self.prev_loc = self.vehicle.get_transform().location
-
+        
+        actuation_filter = False
         if save_logging != None:
             trajectory_buff = TrajectoryBuffer(min_dt_s = .2)
         elif replay_logging != None:
+            actuation_filter = True
             waypoints_storage = np.load(replay_logging[0])
             path_handling  = PathHandler(waypoints_storage); 
             if data_collect_dir is not None:
-                data_collector = CarlaDatasetCollector(save_dir = data_collect_dir, save_interval = 15)
+                data_collector = CarlaDatasetCollector(save_dir = data_collect_dir, save_interval = 20)
             # For debugging
             # path_handling.position_idx = 60
             # path_handling.position_idx = 250
@@ -226,7 +228,7 @@ class CarlaViewer:
         try:
             while self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
                 self.step_world()
-                self.draw_hud()
+                self.draw_hud(actuation_filter)
 
                 frame = self.choosen_sensor.extract_data()
                 if frame is not None:
