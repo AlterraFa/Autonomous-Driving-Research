@@ -19,9 +19,9 @@ from utils.sensor_spawner import (
     CarlaLabel as Clabel
 )
 
-from control.world import World
-from control.vehicle_control import Vehicle, wait_for_actor_by_role
-from control.viewer import CarlaViewer
+from utils.control.world import World
+from utils.control.vehicle_control import Vehicle, wait_for_actor_by_role
+from utils.control.viewer import CarlaViewer
 
 def get_recording_duration(log_path: str) -> float:
     """

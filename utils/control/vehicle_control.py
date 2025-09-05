@@ -5,9 +5,30 @@ import time
 import math
 
 from traceback import print_exc
+from scipy.signal import butter, lfilter, lfilter_zi
+
+class OnlineLowPassFilter:
+    def __init__(self, cutoff, fs, order=2, x0=0.0):
+        nyq = 0.5 * fs
+        normal_cutoff = cutoff / nyq
+        self.b, self.a = butter(order, normal_cutoff, btype="low", analog=False)
+        self.zi = lfilter_zi(self.b, self.a) * x0
+
+    def step(self, x):
+        y, self.zi = lfilter(self.b, self.a, [x], zi=self.zi)
+        return y[0]
+
+class EMAFilter:
+    def __init__(self, alpha=0.1, x0=0.0):
+        self.alpha = alpha
+        self.y = x0
+
+    def step(self, x):
+        self.y = self.alpha * x + (1 - self.alpha) * self.y
+        return self.y
 
 class Vehicle:
-    def __init__(self, vehicle: carla.Vehicle, world: carla.World):
+    def __init__(self, vehicle: carla.Vehicle, world: carla.World, fps = 70):
         self.vehicle = vehicle
         self.world = world
         self.map = self.world.get_map()
@@ -25,6 +46,8 @@ class Vehicle:
 
         self.decay = 0.2
         
+        self.throttle_filter = OnlineLowPassFilter(2.0, fps, 2)
+        self.brake_filter    = OnlineLowPassFilter(2.0, fps, 2)
 
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -64,7 +87,7 @@ class Vehicle:
 
         return np.sqrt(vel_vec.x ** 2 + vel_vec.y ** 2 + vel_vec.z ** 2) * 3.6
     
-    def get_ctrl(self):
+    def get_ctrl(self, filter = False):
         control = self.vehicle.get_control()
 
         throttle   = control.throttle
@@ -74,6 +97,10 @@ class Vehicle:
         handbrake  = control.hand_brake
         manual     = control.manual_gear_shift
         gear       = control.gear
+
+        if filter:
+            throttle   = self.throttle_filter.step(throttle)
+            brake      = self.brake_filter.step(brake)
 
         return {
             "throttle": throttle,
@@ -125,10 +152,38 @@ class Vehicle:
             self.hand_brake = hand_brake
 
 
-        if regulate_speed and self.get_velocity(False) >= self.vehicle.get_speed_limit() and brake_delta == 0:
-            self.throttle = .3
-            self.brake = .2
-        
+        if regulate_speed:
+            limit = self.vehicle.get_speed_limit()
+            current_v = self.get_velocity(False)
+
+            error = limit - current_v  
+
+            Kp = 0.1
+            Ki = 0.05
+            Kd = 0.05
+
+            dt = self.world.get_settings().fixed_delta_seconds or 0.05
+
+            if not hasattr(self, "error_sum"):
+                self.error_sum = 0.0
+            if not hasattr(self, "last_error"):
+                self.last_error = error
+
+            self.error_sum += error * dt
+            self.error_sum = max(min(self.error_sum, 10.0), -10.0)
+
+            d_error = (error - self.last_error) / dt
+            self.last_error = error
+
+            u = Kp * error + Ki * self.error_sum + Kd * d_error
+
+            if u >= 0:
+                self.throttle = max(0.0, min(1.0, u))
+                self.brake = 0.0
+            else:
+                self.throttle = 0.0
+                self.brake = max(0.0, min(1.0, -u))
+
         
         if self._autopilot:
             self.throttle = 0

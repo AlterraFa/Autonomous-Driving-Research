@@ -73,7 +73,8 @@ def main(args):
 
     duration = get_recording_duration(path_2_recording)
     client.show_recorder_file_info(path_2_recording, False)
-    client.replay_file(path_2_recording, 2, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
+    start = 1.2; stop = 2
+    client.replay_file(path_2_recording, start, duration - start - stop, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
     # client.replay_file(path_2_recording, 50, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
     # client.replay_file(path_2_recording, 170, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
     # client.replay_file(path_2_recording, 240, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
