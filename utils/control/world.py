@@ -10,7 +10,7 @@ from rich import print
 import configparser
 
 config = configparser.ConfigParser()
-config.read(parent + "/config/config.ini")
+config.read(parent + "/../config/config.ini")
 excluded_junctions = ast.literal_eval(config.get("TrafficManager", "excluded_junctions"))
 
 class World:

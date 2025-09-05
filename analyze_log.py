@@ -18,9 +18,9 @@ from utils.sensor_spawner import (
     CarlaLabel as Clabel
 )
 
-from control.world import World
-from control.vehicle_control import Vehicle, wait_for_actor_by_role
-from control.viewer import CarlaViewer
+from utils.control.world import World
+from utils.control.vehicle_control import Vehicle, wait_for_actor_by_role
+from utils.control.viewer import CarlaViewer
 
 def get_recording_duration(log_path: str) -> float:
     """
@@ -48,6 +48,12 @@ def main(args):
     path_2_recording = folder + "/" + args.replay + "/log.log"
     path_2_waypoints = folder + "/" + args.replay + "/trajectory.npy"
 
+    if args.collect_data is None:
+        dataset_dir = None
+    else:
+        dataset_dir = folder + "/" + args.collect_data + "/" + os.path.basename(args.replay) + "_" + "temporal" if args.temporal else "spatial"
+        os.makedirs(dataset_dir, exist_ok = True)
+
     client = carla.Client(args.host, args.port)
     virt_world = World(client, args.traffic_port)
     virt_world.sync = args.sync
@@ -63,10 +69,11 @@ def main(args):
     imu_sensor = IMU(virt_world.world)
     depth_sensor = Depth(virt_world.world, convert_to = partial(Depth.DepthMap.to_log, invert = False, max_depth = 100))
     
+        
 
     duration = get_recording_duration(path_2_recording)
     client.show_recorder_file_info(path_2_recording, False)
-    client.replay_file(path_2_recording, 0, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
+    client.replay_file(path_2_recording, 2, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
     # client.replay_file(path_2_recording, 50, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
     # client.replay_file(path_2_recording, 170, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
     # client.replay_file(path_2_recording, 240, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
@@ -79,7 +86,7 @@ def main(args):
     
     game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
     game_viewer.init_sensor([rgb_sensor, semantic_sensor, gnss_sensor, imu_sensor, depth_sensor])
-    game_viewer.run(replay_logging = [path_2_waypoints, duration], use_temporal_wp = args.temporal, debug = True)
+    game_viewer.run(replay_logging = [path_2_waypoints, duration], use_temporal_wp = args.temporal, data_collect_dir = dataset_dir, debug = args.debug)
 
     client.stop_replayer(True)
     
@@ -131,6 +138,18 @@ if __name__ == "__main__":
         action="store_true",
         help="Use temporal (time-based) waypoint generation instead of spatial."
     )
+    argparser.add_argument(
+        "--debug",
+        action = "store_true",
+        help = "Draw debugging waypoints onto the world"
+    )
+    argparser.add_argument(
+        "--collect-data",
+        type = str,
+        default = None,
+        help = "Data collection directory for DNN training"
+    )
+    
     args = argparser.parse_args()
     args.width, args.height = [int(x) for x in args.res.split('x')]
 

@@ -3,11 +3,11 @@ import numpy as np
 import time
 
 
-from control.world import World
-from control.vehicle_control import Vehicle
-from control.path import PathHandler, TurnClassify
+from utils.control.world import World
+from utils.control.vehicle_control import Vehicle
+from utils.control.path import PathHandler, TurnClassify
 from utils.sensor_spawner import *
-from utils.buffer import TrajectoryBuffer
+from utils.data_collector import TrajectoryBuffer, CarlaDatasetCollector
 from config.enum import JoyControl
 
 from typing import Optional
@@ -159,10 +159,19 @@ class CarlaViewer:
         
         runtime = time.time() - getattr(self, "start_time", time.time())
         
+        self.velocity = self.virt_vehicle.get_velocity(False)
+        if self.velocity < 1e-1:
+            curr     = self.vehicle.get_transform().location
+            distance = curr.distance(self.prev_loc)
+            self.prev_loc = curr
+            
+            dt = self.world.get_snapshot().timestamp.delta_seconds
+            self.velocity = (distance / dt) * 3.72 # Scaled by some factor (close to 3.6 (conversion from m/s to km/h))
+            
         self.hud.update_measurement(server_fps = self.server_fps, client_fps = self.fps, 
-                        vehicle_name = self.vehicle_name, world_name = self.world_name,
-                        velocity = self.virt_vehicle.get_velocity(False), heading = heading,
-                        accel = accel, gyro = gyro, enu = enu, geo = geo, runtime = runtime)
+                                    vehicle_name = self.vehicle_name, world_name = self.world_name,
+                                    velocity = self.velocity, heading = heading,
+                                    accel = accel, gyro = gyro, enu = enu, geo = geo, runtime = runtime)
         
         self.hud.update_control(**self.virt_vehicle.get_ctrl(), regulate_speed = self.controller.regulate_speed)
         
@@ -177,18 +186,27 @@ class CarlaViewer:
         return None
 
     @profile
-    def run(self, save_logging: str = None, use_temporal_wp: bool = False, replay_logging: str = None, debug = False) -> None:
+    def run(self, 
+            save_logging: str = None, 
+            use_temporal_wp: bool = False, 
+            data_collect_dir: str = None, 
+            replay_logging: str = None, 
+            debug = False) -> None:
         if self.display is None:
             self.init_win()
 
         self.last_platform_time = None; self.server_fps = self.fps; self.start_time = time.time()
         self.virt_vehicle.set_autopilot(self.controller.autopilot) # First init for autopilot
+        
+        self.prev_loc = self.vehicle.get_transform().location
 
         if save_logging != None:
             trajectory_buff = TrajectoryBuffer(min_dt_s = .2)
         elif replay_logging != None:
             waypoints_storage = np.load(replay_logging[0])
-            path_handling = PathHandler(waypoints_storage); 
+            path_handling  = PathHandler(waypoints_storage); 
+            if data_collect_dir is not None:
+                data_collector = CarlaDatasetCollector(save_dir = data_collect_dir, save_interval = 15)
             # For debugging
             # path_handling.position_idx = 60
             # path_handling.position_idx = 250
@@ -232,7 +250,7 @@ class CarlaViewer:
                                                     self.controller.has_joystick)
                 
                 if save_logging != None: 
-                    trajectory_buff.add_if_needed(self.enu.to_numpy())
+                    trajectory_buff.add_if_needed(self.vehicle.get_location())
                 elif replay_logging != None:
                     position  = self.enu.to_numpy()
                     ego_waypoints, global_waypoints = path_handling.waypoints(position, offset, self.heading, return_global = True, use_time = use_temporal_wp)
@@ -252,6 +270,17 @@ class CarlaViewer:
                                                                   global_scout)
                     self.hud.update_logging(turn = turn_signal)
                     self.hud.draw_logging(self.display)
+                    
+                    if data_collect_dir is not None:
+                        data_collector.maybe_save(
+                            frame, ego_waypoints, 
+                            {
+                                'steer': self.hud.ctrl['steer'],
+                                'throttle': self.hud.ctrl['throttle'],
+                                'brake': self.hud.ctrl['brake'],
+                                'velocity': self.velocity
+                            }, turn_signal
+                        )
                 
                 pygame.display.flip()
                 if self.clock:
@@ -270,7 +299,7 @@ class CarlaViewer:
             self.virt_vehicle.stop()
             self.close()
             if save_logging != None:
-                trajectory_buff.save(save_logging + "/trajectory_spatial")
+                trajectory_buff.save(save_logging + "/trajectory")
 
     def close(self) -> None:
         

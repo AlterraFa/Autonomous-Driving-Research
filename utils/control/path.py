@@ -32,7 +32,7 @@ class PathHandler(NodeFinder):
     """
     defined_path: 
       (N,3) -> [x, y, z]
-      (N,4) -> [x, y, z, t]   (t = timestamp or cumulative time)
+      (N,4) -> [x, y, z, t]   (t = delta time recording)
     """
     def __init__(self, defined_path: np.ndarray):
         super().__init__(10, defined_path)
@@ -49,6 +49,7 @@ class PathHandler(NodeFinder):
         s       = np.concatenate(([0.0], np.cumsum(seg_len)))
         keep    = np.r_[True, seg_len >= 0]
 
+        # Prevent multiple points with the same distance for interpolation
         eps   = 1e-6
         count = 0
         for i in range(1, len(s)):
@@ -71,8 +72,6 @@ class PathHandler(NodeFinder):
         self.z_of_s = interp1d(self.s, self.path_xyz[:, 2], kind="linear",
                                bounds_error=False, fill_value="extrapolate")
 
-        self.s_min, self.s_max = float(self.s[0]), float(self.s[-1])
-
         # --- interpolation in t if available ---
         if self.has_time:
             self.timer = 0
@@ -88,7 +87,6 @@ class PathHandler(NodeFinder):
             self.t_of_s = interp1d(self.s, self.t, kind = "linear",
                                    bounds_error=False, fill_value="extrapolate")
 
-            self.t_min, self.t_max = float(self.t[0]), float(self.t[-1])
         else:
             self.t = None
             
