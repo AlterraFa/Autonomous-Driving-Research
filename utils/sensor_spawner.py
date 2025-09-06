@@ -206,7 +206,7 @@ class RGB(SensorCameraRgbStub, SensorSpawn):
         
 from .stubs.sensor__other__gnss_stub import SensorOtherGnssStub
 class GNSS(SensorOtherGnssStub, SensorSpawn):
-    
+    """GNSS IS VERY INACURATE COMPARE TO vehicle.get_location()"""
     @dataclass
     class Geodetic:
         lat: float
@@ -261,7 +261,7 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
                 )
             return " | ".join(parts)
     
-    def __init__(self, world: carla.World, origin: tuple = (42.0, 2.0, 2.036)):
+    def __init__(self, world: carla.World):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
         
@@ -272,15 +272,41 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
             "alt": "altitude"
         })
         
-        self.a = 6378137
+        # (42.0, 2.0, 2.036)
+        self.a = 6378137.0
         self.b = 6356752.3142
         self.f = (self.a - self.b) / self.a
         self.e_sq = self.f * (2 - self.f)
-        self.origin = origin
+        self.origin, self.alt_offset = self._calibrate_origin(world)
 
         self._geodetic: Optional[GNSS.Geodetic] = None
         self._ecef: Optional[GNSS.ECEF] = None
         self._enu: Optional[GNSS.ENU] = None
+        
+    def _calibrate_origin(self, world: carla.World):
+        """
+        Places a GNSS sensor at CARLA world origin (0,0,0) and
+        uses it to define ENU origin + altitude correction.
+        """
+        blueprint = world.get_blueprint_library().find("sensor.other.gnss")
+        gnss = world.spawn_actor(blueprint, carla.Transform(carla.Location(0, 0, 2.0)))
+
+        # Wait for one GNSS reading
+        data = None
+        def callback(event): nonlocal data; data = event
+        gnss.listen(callback)
+        world.tick()   # ensure at least one frame
+        gnss.stop()
+        gnss.destroy()
+
+        if data is None:
+            raise RuntimeError("Failed to calibrate GNSS origin.")
+
+        lat0, lon0, alt0 = data.latitude, data.longitude, data.altitude
+        z_carla = world.get_map().get_spawn_points()[0].location.z if world.get_map().get_spawn_points() else 0.0
+
+        alt_offset = alt0 - z_carla
+        return (lat0, lon0, alt0), alt_offset
 
     
     def extract_data(self, return_ecf = False, return_enu = False) -> GNSSData:
@@ -308,25 +334,24 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
 
 
     def geodetic_to_ecef(self, lat, lon, alt):
+        # Apply altitude correction to align CARLA Z with ENU Z
+        alt_corrected = alt - self.alt_offset
+
         lamb = np.radians(lat)
         phi = np.radians(lon)
         s = np.sin(lamb)
         N = self.a / np.sqrt(1 - self.e_sq * s * s)
 
-        sin_lambda = np.sin(lamb)
         cos_lambda = np.cos(lamb)
-        sin_phi = np.sin(phi)
+        sin_lambda = np.sin(lamb)
         cos_phi = np.cos(phi)
+        sin_phi = np.sin(phi)
 
-        x = (alt + N) * cos_lambda * cos_phi
-        y = (alt + N) * cos_lambda * sin_phi
-        z = (alt + (1 - self.e_sq) * N) * sin_lambda
+        x = (N + alt_corrected) * cos_lambda * cos_phi
+        y = (N + alt_corrected) * cos_lambda * sin_phi
+        z = (N * (1 - self.e_sq) + alt_corrected) * sin_lambda
 
-        return {
-            'x': float(x),
-            'y': float(y),
-            'z': float(z)
-        }
+        return {"x": float(x), "y": float(y), "z": float(z)}
     
     def ecef_to_enu(self, x, y, z):
         lamb = np.radians(self.origin[0])
