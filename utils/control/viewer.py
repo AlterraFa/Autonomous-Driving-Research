@@ -8,32 +8,28 @@ from utils.control.vehicle_control import Vehicle
 from utils.control.path import PathHandler, TurnClassify
 from utils.sensor_spawner import *
 from utils.data_collector import TrajectoryBuffer, CarlaDatasetCollector
-from config.enum import JoyControl, JOYBINDS, KEYBINDS
+from config.enum import (
+    JoyControl, 
+    CameraView,
+    JOYBINDS, 
+    KEYBINDS, 
+)
 from utils.messages.message_handler import (
     MessagingSenders,
     MessagingSubscribers 
 )
 
 from typing import Optional
-from enum import Enum
 from rich import print
 from typing import Union, Dict
 from traceback import print_exc
         
-class CameraView(Enum):
-    FIRST_PERSON = {
-        "x": 0.0, "y": 0.0, "z": 2,    # position
-        "roll": 0.0, "pitch": 0.0, "yaw": 0.0
-    }
-    THIRD_PERSON = {
-        "x": -6.0, "y": 0.0, "z": 3.0,   # behind & above
-        "roll": 0.0, "pitch": -10.0, "yaw": 0.0
-    }
 
 
-class ReplayHandler(MessagingSubscribers):
+class ReplayHandler(MessagingSubscribers, MessagingSenders):
     def __init__(self, replay_file: str, world, data_collect_dir: str = None, use_temporal: bool = False, debug: bool = False):
         MessagingSubscribers.__init__(self)
+        MessagingSenders.__init__(self)
         
         waypoints_storage = np.load(replay_file)
         self.path_handler = PathHandler(waypoints_storage)
@@ -50,6 +46,9 @@ class ReplayHandler(MessagingSubscribers):
         if data_collect_dir:
             self.data_collector = CarlaDatasetCollector(save_dir=data_collect_dir, save_interval=20)
 
+        self.prev_dist = 0
+        self.addtional_max = 20; self.addition_cnt = 0
+
     def step(self, frame: np.ndarray):
         position = self.sub_enu.receive()
         heading  = self.sub_heading.receive()
@@ -61,33 +60,41 @@ class ReplayHandler(MessagingSubscribers):
         _, global_scout = self.path_handler.waypoints(
             position, self.scout_points, heading, return_global=True
         )
+        curr_dist, *_ = self.path_handler.project(position)
 
         if self.debug:
-            for wp in global_wp:
-                self.world.draw_single_waypoint(wp, 1.5 * (1 / server_fps))
-            for wp in global_scout:
-                self.world.draw_single_waypoint(wp, 1.5 * (1 / server_fps), color=(255, 0, 0), size=0.1)
+            self.world.draw_waypoints(global_wp, 1.5 * (1 / server_fps), size = .1)
+            self.world.draw_waypoints(global_scout, 1.5 * (1 / server_fps), color=(255, 0, 0), size=.2)
 
         is_at_junction, junction = self.world.get_waypoint_junction(global_scout[14])
         not_exit_junction, _ = self.world.get_waypoint_junction(global_scout[10])
         is_exit_junction = not not_exit_junction
         turn_signal = self.turn_classifier.turning_type(is_at_junction, junction, is_exit_junction, global_scout)
+        self.send_turn_signal.send(turn_signal)
 
+        # Only save when it moves (Prevent saving all the time when stopping at red light or stop sign)
         if self.data_collector:
-            steer    = self.sub_steer.receive()
-            throttle = self.sub_throttle.receive()
-            brake    = self.sub_brake.receive()
-            velocity = self.sub_velocity.receive()
-            self.data_collector.maybe_save(
-                frame, ego_wp,
-                {
-                    "steer": steer,
-                    "throttle": throttle,
-                    "brake": brake,
-                    "velocity": velocity,
-                },
-                turn_signal,
-            )
+            if self.addition_cnt < self.addtional_max:
+                steer    = self.sub_steer.receive()
+                throttle = self.sub_throttle.receive()
+                brake    = self.sub_brake.receive()
+                velocity = self.sub_velocity.receive()
+                saved = self.data_collector.maybe_save(
+                    frame, ego_wp,
+                    {
+                        "steer": steer,
+                        "throttle": throttle,
+                        "brake": brake,
+                        "velocity": velocity,
+                    },
+                    turn_signal,
+                )
+                if saved:
+                    if curr_dist - self.prev_dist < 1e-2:
+                        self.addition_cnt += 1
+            if curr_dist - self.prev_dist > 1e-2:
+                self.addition_cnt = 0
+            self.prev_dist = curr_dist
 
 class CarlaViewer(MessagingSenders, MessagingSubscribers):
     def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, sync: bool = False, fps: int = 70):
@@ -228,7 +235,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.enu = enu
 
         client_runtime = time.time() - self.client_start
-        server_runtime = snapshot.timestamp.platform_timestamp - self.server_start
+        server_runtime = snapshot.timestamp.elapsed_seconds - self.server_start
 
         # Velocity fallback
         self.velocity = self.virt_vehicle.get_velocity(False)
@@ -258,7 +265,6 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.send_manual.send(self.ctrl['manual'])
         self.send_gear.send(self.ctrl['gear'])
         
-    @profile
     def run(self, 
             save_logging: str = None, 
             use_temporal_wp: bool = False, 
@@ -280,7 +286,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
             self.last_platform_time = None; 
             self.server_fps = self.fps; 
             self.client_start = time.time()
-            self.server_start = self.world.get_snapshot().timestamp.platform_timestamp
+            self.server_start = self.world.get_snapshot().timestamp.elapsed_seconds
             while self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
                 self.step_world()
                 self.data_bus(replay_logging != None)
@@ -306,8 +312,16 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                                                     self.controller.regulate_speed,
                                                     self.controller.has_joystick)
                     
-                if logger: logger.update(self.enu.to_numpy())
-                if replayer: replayer.step(frame)
+                if logger: 
+                    vehicle_loc = self.vehicle.get_location()
+                    logger.update([vehicle_loc.x, vehicle_loc.y, vehicle_loc.z])
+                if replayer: 
+                    replayer.step(frame)
+                    self.hud.draw_logging(self.display)
+
+                if replay_logging is not None and replay_logging[1] <= self.sub_server_runtime.receive():
+                    print("[yellow][WARNING][/]: Reached replay limit. Goodbye")
+                    break
 
                 pygame.display.flip()
                 if self.clock:

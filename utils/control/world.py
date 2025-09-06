@@ -48,10 +48,10 @@ class World:
             print(f"[red][ERROR][/]: Failed to reset world -> {e}")
         print("[green][INFO]: World reset to async[/]")
 
-    def draw_waypoints(self, waypoints, duration: float = 1, color: tuple = (0, 255, 0)):
+    def draw_waypoints(self, waypoints, duration: float = 1, color: tuple = (0, 255, 0), size = 0.1):
         for point in waypoints:
             point_loc = carla.Location(x = float(point[0]), y = float(point[1]), z = float(point[2]))
-            self.world.debug.draw_point(point_loc, size = 0.2, color = carla.Color(*color), life_time = duration)
+            self.world.debug.draw_point(point_loc, size = size, color = carla.Color(*color), life_time = duration)
     
     def draw_single_waypoint(self, waypoint, duration: float = 1, color: tuple = (0, 255, 0), size = .18):
         point_loc = carla.Location(x = float(waypoint[0]), y = float(waypoint[1]), z = float(waypoint[2]))

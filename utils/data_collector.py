@@ -94,7 +94,7 @@ class CarlaDatasetCollector:
         """
         self.frame_count += 1
         if self.frame_count % self.save_interval != 0:
-            return  # skip this frame
+            return  False
 
         img_name = f"{self.sample_idx:06d}.png"
         img_path = self.img_dir / img_name
@@ -111,6 +111,7 @@ class CarlaDatasetCollector:
 
         print(f"[cyan][INFO][/] Saved sample {self.sample_idx} → {img_path}")
         self.sample_idx += 1
+        return True
         
 class AsyncSaver:
     def __init__(self):
