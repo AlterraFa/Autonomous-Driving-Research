@@ -9,6 +9,13 @@ from utils.control.path import PathHandler, TurnClassify
 from utils.sensor_spawner import *
 from utils.data_collector import TrajectoryBuffer, CarlaDatasetCollector
 from config.enum import JoyControl, JOYBINDS, KEYBINDS
+from utils.messages.all_messages import *
+from utils.messages.message_handler import (
+    MessageSubscriber as Subscriber,
+    MessageSender as Sender,
+    MessagingSenders,
+    MessagingSubscribers 
+)
 
 from typing import Optional
 from enum import Enum
@@ -16,7 +23,20 @@ from rich import print
 from typing import Union, Dict
 from traceback import print_exc
 
+class GlobalState:
+    def __init__(self):
+        self.data = {}
 
+    def update(self, **kwargs):
+        for k, v in kwargs.items():
+            self.data[k] = v
+
+    def __getitem__(self, key):
+        return self.data.get(key, None)
+
+    def __setitem__(self, key, value):
+        self.data[key] = value
+        
 class CameraView(Enum):
     FIRST_PERSON = {
         "x": 0.0, "y": 0.0, "z": 2,    # position
@@ -27,8 +47,67 @@ class CameraView(Enum):
         "roll": 0.0, "pitch": -10.0, "yaw": 0.0
     }
 
-class CarlaViewer:
+class TrajectoryLogger:
+    def __init__(self, save_dir: str, min_dt: float = 0.2):
+        self.buffer = TrajectoryBuffer(min_dt_s=min_dt)
+        self.save_dir = save_dir
+
+    def update(self, vehicle):
+        self.buffer.add_if_needed(vehicle.get_location())
+
+    def finalize(self):
+        self.buffer.save(self.save_dir + "/trajectory")
+
+class ReplayHandler:
+    def __init__(self, replay_file: str, world, data_collect_dir: str = None, debug: bool = False):
+        
+        waypoints_storage = np.load(replay_file)
+        self.path_handler = PathHandler(waypoints_storage)
+        self.debug = debug
+        self.world = world
+        self.scout_points = [i for i in range(-18, 33, 2)]
+        self.offset = [3, 5, 7, 8, 9]   # or temporal version
+        self.turn_classifier = TurnClassify(world=world, threshold_deg=15)
+
+        self.data_collector = None
+        if data_collect_dir:
+            self.data_collector = CarlaDatasetCollector(save_dir=data_collect_dir, save_interval=20)
+
+    def step(self, frame, position, heading, server_fps, ctrl):
+        ego_wp, global_wp = self.path_handler.waypoints(
+            position, self.offset, heading, return_global=True
+        )
+        _, global_scout = self.path_handler.waypoints(
+            position, self.scout_points, heading, return_global=True
+        )
+
+        if self.debug:
+            for wp in global_wp:
+                self.world.draw_single_waypoint(wp, 1.5 * (1 / server_fps))
+            for wp in global_scout:
+                self.world.draw_single_waypoint(wp, 1.5 * (1 / server_fps), color=(255, 0, 0), size=0.1)
+
+        is_at_junction, junction = self.world.get_waypoint_junction(global_scout[14])
+        not_exit_junction, _ = self.world.get_waypoint_junction(global_scout[10])
+        is_exit_junction = not not_exit_junction
+        turn_signal = self.turn_classifier.turning_type(is_at_junction, junction, is_exit_junction, global_scout)
+
+        if self.data_collector:
+            self.data_collector.maybe_save(
+                frame, ego_wp,
+                {
+                    "steer": ctrl["steer"],
+                    "throttle": ctrl["throttle"],
+                    "brake": ctrl["brake"],
+                    "velocity": measurement["velocity"],
+                },
+                turn_signal,
+            )
+
+class CarlaViewer(MessagingSenders):
     def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, sync: bool = False, fps: int = 70):
+        MessagingSenders.__init__(self)
+
         self.virt_world = world
         self.world = world.world
         self.width = width
@@ -49,7 +128,6 @@ class CarlaViewer:
         self.rgb_sensor = None  
         self.sensors_list: Dict[str, Union[RGB, Depth, SemanticSegmentation, GNSS, IMU, LidarRaycast]] = {}
         self.camera_keys = []
-
         
         self.controller = Controller()
         self.hud = HUD("jetbrainsmononerdfontpropo", fontSize = 12)
@@ -82,11 +160,6 @@ class CarlaViewer:
         self.choosen_sensor = self.sensors_list[cam_name]
 
         print(f"[blue][INFO][/] Switched to camera: {self.choosen_sensor.literal_name}")
-            
-    def add_sensor(self, sensor):
-        """Add individual sensor"""
-    
-            
 
     def init_win(self, title: str = "CARLA Camera") -> None:
         pygame.init()
@@ -135,7 +208,8 @@ class CarlaViewer:
         for camera_name in self.camera_keys:
             self.sensors_list[camera_name].change_view(**getattr(CameraView, view_name).value)
     
-    def draw_hud(self, filter_ctrl = False):
+    @profile
+    def draw_hud(self, filter_ctrl=False):
         snapshot = self.world.get_snapshot()
         current_platform_time = snapshot.timestamp.platform_timestamp  # server wall clock
         if self.last_platform_time is not None:
@@ -143,42 +217,62 @@ class CarlaViewer:
             self.server_fps = 1.0 / dt_real if dt_real > 0 else 0
         self.last_platform_time = current_platform_time
 
-        accel = self.sensors_list['imu'].extract_data().Acceleration
-        try: heading = self.sensors_list['imu'].extract_data().Compass * 180 / np.pi
-        except: heading = "N/A"
-        try: accel = self.sensors_list['imu'].extract_data().Acceleration
-        except: accel = "N/A"
-        try: gyro = self.sensors_list['imu'].extract_data().Gyroscope
-        except: gyro = "N/A"
-        try: enu = self.sensors_list['gnss'].extract_data(return_ecf = True, return_enu = True).ENU
-        except: enu = "N/A"
-        try: geo = self.sensors_list['gnss'].extract_data(return_ecf = True, return_enu = True).Geodetic
-        except: geo = "N/A"
-        
-        self.heading = np.radians(heading)
-        self.enu     = enu
-        
+        # Extract sensor data with safe fallback
+        try:
+            heading = self.sensors_list['imu'].extract_data().Compass * 180 / np.pi
+        except:
+            heading = "N/A"
+        try:
+            accel = self.sensors_list['imu'].extract_data().Acceleration
+        except:
+            accel = "N/A"
+        try:
+            gyro = self.sensors_list['imu'].extract_data().Gyroscope
+        except:
+            gyro = "N/A"
+        try:
+            enu = self.sensors_list['gnss'].extract_data(return_ecf=True, return_enu=True).ENU
+        except:
+            enu = "N/A"
+        try:
+            geo = self.sensors_list['gnss'].extract_data(return_ecf=True, return_enu=True).Geodetic
+        except:
+            geo = "N/A"
+
+        self.heading = np.radians(heading) if isinstance(heading, (int, float)) else heading
+        self.enu = enu
+
         client_runtime = time.time() - self.client_start
-        server_runtime = snapshot.timestamp.platform_timestamp - self.server_start 
-        
-        # In carla replay, it does not record velocity => manual calc is needed
+        server_runtime = snapshot.timestamp.platform_timestamp - self.server_start
+
+        # Velocity fallback
         self.velocity = self.virt_vehicle.get_velocity(False)
-        if self.velocity < 1e-1:
-            curr     = self.vehicle.get_transform().location
-            distance = curr.distance(self.prev_loc)
-            self.prev_loc = curr
-            
-            dt = self.world.get_snapshot().timestamp.delta_seconds
-            self.velocity = (distance / dt) * 3.6 # Scaled by some factor (close to 3.6 (conversion from m/s to km/h))
-            
-        self.hud.update_measurement(server_fps = self.server_fps, client_fps = self.clock.get_fps(), 
-                                    vehicle_name = self.vehicle_name, world_name = self.world_name,
-                                    velocity = self.velocity, heading = heading,
-                                    accel = accel, gyro = gyro, enu = enu, geo = geo, 
-                                    client_runtime = client_runtime, 
-                                    server_runtime = server_runtime)
+
+        #####################################
+        # 🚀 Publish to subscribers
+        #####################################
+        self.send_server_fps.send(self.server_fps)
+        self.send_client_fps.send(self.clock.get_fps())
+        self.send_vehicle_name.send(self.vehicle_name)
+        self.send_world_name.send(self.world_name)
+        self.send_velocity.send(self.velocity)
+        self.send_heading.send(self.heading)
+        self.send_accel.send(accel)
+        self.send_gyro.send(gyro)
+        self.send_enu.send(enu.to_numpy())
+        self.send_geo.send(geo.to_numpy())
+        self.send_client_runtime.send(client_runtime)
+        self.send_server_runtime.send(server_runtime)
+
+
+        # self.hud.update_measurement(server_fps = self.server_fps, client_fps = self.clock.get_fps(), 
+        #                             vehicle_name = self.vehicle_name, world_name = self.world_name,
+        #                             velocity = self.velocity, heading = heading,
+        #                             accel = accel, gyro = gyro, enu = enu, geo = geo, 
+        #                             client_runtime = client_runtime, 
+        #                             server_runtime = server_runtime)
         
-        self.hud.update_control(**self.virt_vehicle.get_ctrl(filter_ctrl), regulate_speed = self.controller.regulate_speed)
+        # self.hud.update_control(**self.virt_vehicle.get_ctrl(filter_ctrl), regulate_speed = self.controller.regulate_speed)
         
     @staticmethod
     def to_location(loc):
@@ -261,7 +355,7 @@ class CarlaViewer:
                                                     self.controller.has_joystick)
                 
                 if save_logging != None: 
-                    trajectory_buff.add_if_needed(self.vehicle.get_location())
+                    trajectory_buff.add_if_needed(self.enu.to_numpy())
                 elif replay_logging != None:
                     position  = self.enu.to_numpy()
                     ego_waypoints, global_waypoints = path_handling.waypoints(position, offset, self.heading, return_global = True, use_time = use_temporal_wp)
@@ -279,7 +373,7 @@ class CarlaViewer:
                     turn_signal    = turn_classifier.turning_type(is_at_junction, junction, 
                                                                   is_exit_junction, 
                                                                   global_scout)
-                    self.hud.update_logging(turn = turn_signal)
+                    # self.hud.update_logging(turn = turn_signal)
                     self.hud.draw_logging(self.display)
                     
                     if data_collect_dir is not None:
@@ -480,67 +574,24 @@ class Controller:
             self.steer_ctrl = self._curve(left_x) * 0.5
             self.throt_ctrl = rt
             self.brake_ctrl = lt
-        
-class HUD:
-    def __init__(self, fontName="Arial", fontSize=24):
-        pygame.font.init()
-        self.font = pygame.font.SysFont(fontName, fontSize, bold = True)
-        self.height = 20
-        
-        self.measurement = {
-            "server_fps": 0,
-            "client_fps": 0,
-            "vehicle_name": "",
-            "world_name": "",
-            "velocity": 0,
-            "heading": 0,
-            "accel": "N/A",
-            "gyro": "N/A",
-            "enu": "N/A",
-            "geo": "N/A",
-            "client_runtime": 0,
-            "server_runtime": 0,
-        }
-        
-        self.ctrl = {
-            "throttle": 0.0,
-            "steer": 0.0,
-            "brake": 0.0,
-            "reverse": False,
-            "handbrake": False,
-            "manual": False,
-            "gear": 0,
-            'autopilot': False,
-            'regulate_speed': False
-        }
-    
-        self.logging = {
-            "turn": -1
-        }
-        
-    def update_measurement(self, **kwargs):
-        for key in self.measurement:
-            if key in kwargs:
-                self.measurement[key] = kwargs[key]
 
-    def update_control(self, **kwargs):
-        for key in self.ctrl:
-            if key in kwargs:
-                self.ctrl[key] = kwargs[key]
-                
-    def update_logging(self, **kwargs):
-        for key in self.logging:
-            if key in kwargs:
-                self.logging[key] = kwargs[key]
         
+class HUD(MessagingSubscribers):
+    def __init__(self, fontName="Arial", fontSize=24):
+        super().__init__()  # init all subscribers
+        pygame.font.init()
+        self.font = pygame.font.SysFont(fontName, fontSize, bold=True)
+        self.height = 20
+
     @staticmethod
     def heading_to_cardinal(deg: float) -> str:
         directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+        if not isinstance(deg, (int, float)):
+            return ""
         idx = int((deg + 22.5) % 360 // 45)
-        return directions[idx] if isinstance(deg, Union[float, int]) else ""
+        return directions[idx]
 
     def _time_to_str(self, t: float) -> str:
-        """Convert seconds float into HH:MM:SS.mmm string."""
         hours   = int(t // 3600)
         minutes = int((t % 3600) // 60)
         seconds = int(t % 60)
@@ -548,9 +599,13 @@ class HUD:
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
 
     def _render_line(self, surface, label: str, value: str, line_idx: int, x: int = 10, y: int = 10, spacing: int = 15):
-        """Helper for rendering a single line with label and value."""
         text = self.font.render(f"{label:<{spacing}}{value:>{self.max_string}}", True, (255, 255, 255))
         surface.blit(text, (x, y + self.height * line_idx))
+
+    def _read(self, sub, default="N/A"):
+        """Helper to read latest subscriber value or fallback."""
+        val = sub.receive()
+        return val if val is not None else default
 
     def draw_measurement(self, surface: pygame.Surface):
         # Transparent overlay
@@ -558,109 +613,117 @@ class HUD:
         pygame.draw.rect(overlay, (0, 0, 0, 100), overlay.get_rect())
         surface.blit(overlay, (0, 0))
 
-        # Shortcuts
-        m = self.measurement
-
-        # Format values
-        accel = m["accel"]
-        gyro  = m["gyro"]
-        geo   = m["geo"]
-        enu   = m["enu"]
+        # Read values directly from subscribers
+        server_fps = self._read(self.sub_server_fps, 0)
+        client_fps = self._read(self.sub_client_fps, 0)
+        vehicle_name = self._read(self.sub_vehicle_name, "")
+        world_name   = self._read(self.sub_world_name, "")
+        velocity     = self._read(self.sub_velocity, 0.0)
+        heading      = self._read(self.sub_heading, 0.0)
+        accel        = self._read(self.sub_accel, "N/A")
+        gyro         = self._read(self.sub_gyro, "N/A")
+        enu          = self._read(self.sub_enu, "N/A")
+        geo          = self._read(self.sub_geo, "N/A")
+        client_runtime = self._read(self.sub_client_runtime, 0.0)
+        server_runtime = self._read(self.sub_server_runtime, 0.0)
 
         accel_str = accel if isinstance(accel, str) else f"( {accel[0]: 6.2f}, {accel[1]: 6.2f}, {accel[2]: 6.2f} )"
         gyro_str  = gyro  if isinstance(gyro, str)  else f"( {gyro[0]: 6.2f}, {gyro[1]: 6.2f}, {gyro[2]: 6.2f} )"
-        geo_str   = geo   if isinstance(geo, str)   else f"( {geo.lat: 6.6f}, {geo.lon: 6.6f} )"
+        geo_str   = geo   if isinstance(geo, str)   else f"( {geo[0]: 6.6f}, {geo[1]: 6.6f} )"
 
-        client_time_str = self._time_to_str(m["client_runtime"])
-        server_time_str = self._time_to_str(m["server_runtime"])
+        client_time_str = self._time_to_str(client_runtime)
+        server_time_str = self._time_to_str(server_runtime)
 
         if isinstance(enu, str):
             h_str, loc_str = "N/A", "N/A"
         else:
-            h_str   = f"{enu.up: 6.2f} m"
-            loc_str = f"( {enu.east: 6.2f}, {enu.north: 6.2f} )"
+            h_str   = f"{enu[0]: 6.2f} m"
+            loc_str = f"( {enu[1]: 6.2f}, {enu[2]: 6.2f} )"
 
-        # Collect all strings (label, value, line index)
+        # Collect lines
         value_lines = [
-            ("Server side:",   f"{int(m['server_fps'])} FPS", 0),
-            ("Client side:",   f"{int(m['client_fps'])} FPS", 1),
-            ("Client runtime:", f"{client_time_str} s",       2),
-            ("Server runtime:", f"{server_time_str} s",       3),
-            ("Vehicle name:",   m["vehicle_name"],            5),
-            ("World name:",     m["world_name"],              6),
-            ("Velocity:",       f"{m['velocity']:.2f} (km/h)",8),
-            ("Heading:",        f"{m['heading']:.1f}° {self.heading_to_cardinal(m['heading'])}", 9),
-            ("Acceleration:",   accel_str,                   10),
-            ("Gyroscope:",      gyro_str,                    11),
-            ("Location:",       loc_str,                     12),
-            ("Geodetic:",       geo_str,                     13),
-            ("Height:",         h_str,                       14),
+            ("Server side:",   f"{int(server_fps)} FPS", 0),
+            ("Client side:",   f"{int(client_fps)} FPS", 1),
+            ("Client runtime:", f"{client_time_str} s", 2),
+            ("Server runtime:", f"{server_time_str} s", 3),
+            ("Vehicle name:",   vehicle_name, 5),
+            ("World name:",     world_name,   6),
+            ("Velocity:",       f"{velocity:.2f} (km/h)", 8),
+            ("Heading:",        f"{heading:.1f}° {self.heading_to_cardinal(heading)}", 9),
+            ("Acceleration:",   accel_str, 10),
+            ("Gyroscope:",      gyro_str, 11),
+            ("Location:",       loc_str, 12),
+            ("Geodetic:",       geo_str, 13),
+            ("Height:",         h_str, 14),
         ]
 
-
-        # For alignment
+        # Alignment
         self.max_string = max(max(len(v) for _, v, _ in value_lines), 15)
 
-        # Render all lines
         for label, value, idx in value_lines:
             self._render_line(surface, label, value, idx)
-        
+
     def draw_controls(self, surface, x=10, y=330):
         line_h = 20
-        bar_w, bar_h = 150, 10   # bar size
-        bar_x = x + 100          # where bars start (shifted right of labels)
+        bar_w, bar_h = 150, 10
+        bar_x = x + 100
 
         white = (255, 255, 255)
         green = (0, 200, 0)
         red   = (200, 0, 0)
 
-        # ---- Throttle bar ----
+        # Read controls directly
+        throttle = self._read(self.sub_throttle, 0.0)
+        steer    = self._read(self.sub_steer, 0.0)
+        brake    = self._read(self.sub_brake, 0.0)
+        reverse  = self._read(self.sub_reverse, False)
+        handbrake= self._read(self.sub_handbrake, False)
+        manual   = self._read(self.sub_manual, False)
+        gear     = self._read(self.sub_gear, 0)
+        autopilot= self._read(self.sub_autopilot, False)
+        regulate = self._read(self.sub_regulate_speed, False)
+
+        # Bars
         surface.blit(self.font.render("Throttle:", True, white), (x, y))
-        pygame.draw.rect(surface, white, (bar_x, y+5, bar_w, bar_h), 1)  # outline
-        pygame.draw.rect(surface, green, (bar_x, y+5, min(int(bar_w * self.ctrl['throttle']), bar_w), bar_h))
+        pygame.draw.rect(surface, white, (bar_x, y+5, bar_w, bar_h), 1)
+        pygame.draw.rect(surface, green, (bar_x, y+5, int(bar_w * min(throttle,1.0)), bar_h))
 
-        # ---- Steer bar (centered at 0) ----
         surface.blit(self.font.render("Steer:", True, white), (x, y+line_h))
-        pygame.draw.rect(surface, white, (bar_x, y+line_h+5, bar_w, bar_h), 1)  # outline
-        steer_val = self.ctrl['steer']  # -1 .. +1
-        if steer_val >= 0:
-            # fill right side
+        pygame.draw.rect(surface, white, (bar_x, y+line_h+5, bar_w, bar_h), 1)
+        if steer >= 0:
             pygame.draw.rect(surface, green, (bar_x + bar_w//2, y+line_h+5,
-                                            min(int((bar_w//2) * steer_val), (bar_w//2)), bar_h))
+                                              int((bar_w//2) * min(steer,1.0)), bar_h))
         else:
-            # fill left side
-            pygame.draw.rect(surface, green, (bar_x + bar_w//2 + int((bar_w//2)*steer_val), y+line_h+5,
-                                            max(int(-(bar_w//2) * steer_val), -(bar_w//2)), bar_h))
+            pygame.draw.rect(surface, green, (bar_x + bar_w//2 + int((bar_w//2)*steer), y+line_h+5,
+                                              int(-(bar_w//2) * steer), bar_h))
 
-        # ---- Brake bar ----
         surface.blit(self.font.render("Brake:", True, white), (x, y+2*line_h))
-        pygame.draw.rect(surface, white, (bar_x, y+2*line_h+5, bar_w, bar_h), 1)  # outline
-        pygame.draw.rect(surface, red, (bar_x, y+2*line_h+5, min(int(bar_w * self.ctrl['brake']), bar_w), bar_h))
+        pygame.draw.rect(surface, white, (bar_x, y+2*line_h+5, bar_w, bar_h), 1)
+        pygame.draw.rect(surface, red, (bar_x, y+2*line_h+5, int(bar_w * min(brake,1.0)), bar_h))
 
-        # ---- Others as text ----
+        # Others as text
         spacing = 33
-        surface.blit(self.font.render(f"{'Throttle:':<{spacing}} {'■' if self.ctrl['reverse'] else '□'}", True, white), (x, y+3*line_h))
-        surface.blit(self.font.render(f"{'Hand brake:':<{spacing}} {'■' if self.ctrl['handbrake'] else '□'}", True, white), (x, y+4*line_h))
-        surface.blit(self.font.render(f"{'Manual:':<{spacing}} {'■' if self.ctrl['manual'] else '□'}", True, white), (x, y+5*line_h))
-        surface.blit(self.font.render(f"{'Gear:':<{spacing}} {self.ctrl['gear']}", True, white), (x, y+6*line_h))
-        surface.blit(self.font.render(f"{'Autopilot:':<{spacing}} {'■' if self.ctrl['autopilot'] else '□'}", True, (255,255,255)), (x, y+7*line_h))
-        surface.blit(self.font.render(f"{'Regulate speed:':<{spacing}} {'■' if self.ctrl['regulate_speed'] else '□'}", True, (255,255,255)), (x, y+8*line_h))
+        surface.blit(self.font.render(f"{'Throttle:':<{spacing}} {'■' if reverse else '□'}", True, white), (x, y+3*line_h))
+        surface.blit(self.font.render(f"{'Hand brake:':<{spacing}} {'■' if handbrake else '□'}", True, white), (x, y+4*line_h))
+        surface.blit(self.font.render(f"{'Manual:':<{spacing}} {'■' if manual else '□'}", True, white), (x, y+5*line_h))
+        surface.blit(self.font.render(f"{'Gear:':<{spacing}} {gear}", True, white), (x, y+6*line_h))
+        surface.blit(self.font.render(f"{'Autopilot:':<{spacing}} {'■' if autopilot else '□'}", True, white), (x, y+7*line_h))
+        surface.blit(self.font.render(f"{'Regulate speed:':<{spacing}} {'■' if regulate else '□'}", True, white), (x, y+8*line_h))
 
-    def draw_logging(self, surface, x = 10, y = 510):
-        line_h = 20
-        
-        if self.logging['turn'] == -1:
+    def draw_logging(self, surface, x=10, y=510):
+        turn = self._read(self.sub_turn_signal, -1)
+        if turn == -1:
             direction_str = "Keep lane"
-        elif self.logging['turn'] == 0:
+        elif turn == 0:
             direction_str = "Go straight"
-        elif self.logging['turn'] == 1:
+        elif turn == 1:
             direction_str = "Turn left"
-        elif self.logging['turn'] == 2:
+        elif turn == 2:
             direction_str = "Turn right"
         else:
             direction_str = "N/A"
 
+        line_h = 20
         spacing = 15
-
-        directionText = self.font.render(f"{'Turn signal:':<{spacing}}{f'{direction_str}':>{self.max_string}}", True, (255, 255, 255))
-        surface.blit(directionText, (x, y + 1 * line_h)) 
+        text = self.font.render(f"{'Turn signal:':<{spacing}}{direction_str:>{self.max_string}}", True, (255, 255, 255))
+        surface.blit(text, (x, y + 1 * line_h))
