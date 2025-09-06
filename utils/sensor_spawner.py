@@ -272,12 +272,11 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
             "alt": "altitude"
         })
         
-        # (42.0, 2.0, 2.036)
         self.a = 6378137.0
         self.b = 6356752.3142
         self.f = (self.a - self.b) / self.a
         self.e_sq = self.f * (2 - self.f)
-        self.origin, self.alt_offset = self._calibrate_origin(world)
+        self.origin, self.alt_offset = (42.0, 2.0, 2.036), 0
 
         self._geodetic: Optional[GNSS.Geodetic] = None
         self._ecef: Optional[GNSS.ECEF] = None

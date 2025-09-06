@@ -80,6 +80,7 @@ class MessagingSubscribers:
         self.sub_geo            = MessageSubscriber(Geo)
         self.sub_client_runtime = MessageSubscriber(ClientRuntime)
         self.sub_server_runtime = MessageSubscriber(ServerRuntime)
+        self.sub_location       = MessageSubscriber(Location)
 
         # Control
         self.sub_throttle       = MessageSubscriber(Throttle)
@@ -115,6 +116,7 @@ class MessagingSenders:
         self.send_geo            = MessageSender(Geo)
         self.send_client_runtime = MessageSender(ClientRuntime)
         self.send_server_runtime = MessageSender(ServerRuntime)
+        self.send_location       = MessageSender(Location)
 
         # Control
         self.send_throttle       = MessageSender(Throttle)

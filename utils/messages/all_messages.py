@@ -94,6 +94,13 @@ class ServerRuntime(Enum):
     msgType = (float, int)
     default = 0.0
 
+class Location(Enum):
+    Queue = "General"
+    Owner = "HUD"
+    msgID = 13
+    msgType = (list, np.ndarray, torch.Tensor)
+    default = staticmethod(lambda: np.zeros(3, dtype=float))
+
 
 #################################### Control ####################################
 class Throttle(Enum):
