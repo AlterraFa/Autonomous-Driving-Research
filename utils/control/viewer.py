@@ -253,6 +253,8 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.send_geo.send(geo.to_numpy())
         self.send_client_runtime.send(client_runtime)
         self.send_server_runtime.send(server_runtime)
+        vehicle_loc = self.vehicle.get_location()
+        self.send_location.send(np.array([vehicle_loc.x, vehicle_loc.y, vehicle_loc.z]))
 
         self.ctrl = self.virt_vehicle.get_ctrl(filter_ctrl)
         self.send_autopilot.send(self.ctrl['autopilot'])
@@ -313,8 +315,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                                                     self.controller.has_joystick)
                     
                 if logger: 
-                    vehicle_loc = self.vehicle.get_location()
-                    logger.update([vehicle_loc.x, vehicle_loc.y, vehicle_loc.z])
+                    logger.update(self.sub_location.receive())
                 if replayer: 
                     replayer.step(frame)
                     self.hud.draw_logging(self.display)
