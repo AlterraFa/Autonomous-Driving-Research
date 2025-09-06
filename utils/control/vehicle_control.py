@@ -63,6 +63,8 @@ class Vehicle:
         self.location_thread.start()
         self.threads = [self.tl_thread, self.ts_thread, self.junction_thread, self.waypoint_thread, self.location_thread]
         
+        self.prev_loc = self.vehicle.get_transform().location
+        
         
     def stop(self):
         self._stop.set()
@@ -85,7 +87,16 @@ class Vehicle:
         if return_vec:
             return np.array([vel_vec.x, vel_vec.y, vel_vec.z]) * 3.6
 
-        return np.sqrt(vel_vec.x ** 2 + vel_vec.y ** 2 + vel_vec.z ** 2) * 3.6
+        speed = np.sqrt(vel_vec.x ** 2 + vel_vec.y ** 2 + vel_vec.z ** 2) * 3.6
+        if speed < 1e-1:
+            curr     = self.vehicle.get_transform().location
+            distance = curr.distance(self.prev_loc)
+            self.prev_loc = curr
+            
+            dt = self.world.get_snapshot().timestamp.delta_seconds
+            speed = (distance / dt) * 3.6 # Scaled by some factor (close to 3.6 (conversion from m/s to km/h))
+        return speed
+    
     
     def get_ctrl(self, filter = False):
         control = self.vehicle.get_control()

@@ -23,7 +23,7 @@ class TrajectoryBuffer:
 
     def add_if_needed(self, loc):
         t = time.time()
-        p = [float(loc.x), float(loc.y), float(loc.z)]
+        p = loc
         if self.last is not None:
             if (t - self.last_t) < self.min_dt:
                 return
