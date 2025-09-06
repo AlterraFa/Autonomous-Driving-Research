@@ -324,38 +324,6 @@ class CarlaViewer(MessagingSenders):
                     
                 if logger: logger.update(self.enu.to_numpy())
                 if replayer: replayer.step(frame, self.enu.to_numpy(), self.heading, self.server_fps, self.dnn_data)
-                # if save_logging != None: 
-                #     trajectory_buff.add_if_needed(self.enu.to_numpy())
-                # elif replay_logging != None:
-                #     position  = self.enu.to_numpy()
-                #     ego_waypoints, global_waypoints = path_handling.waypoints(position, offset, self.heading, return_global = True, use_time = use_temporal_wp)
-                #     _, global_scout                 = path_handling.waypoints(position, scout_points, self.heading, return_global = True)
-                #     if debug:
-                #         for waypoint in global_waypoints:
-                #             self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps))
-                #         for waypoint in global_scout:
-                #             self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps), color = (255, 0, 0), size = 0.1)
-                    
-                    
-                #     is_at_junction, junction = self.virt_world.get_waypoint_junction(global_scout[14])
-                #     not_exit_junction, _     = self.virt_world.get_waypoint_junction(global_scout[10])
-                #     is_exit_junction         = not not_exit_junction
-                #     turn_signal    = turn_classifier.turning_type(is_at_junction, junction, 
-                #                                                   is_exit_junction, 
-                #                                                   global_scout)
-                #     # self.hud.update_logging(turn = turn_signal)
-                #     self.hud.draw_logging(self.display)
-                    
-                #     if data_collect_dir is not None:
-                #         data_collector.maybe_save(
-                #             frame, ego_waypoints, 
-                #             {
-                #                 'steer': self.hud.ctrl['steer'],
-                #                 'throttle': self.hud.ctrl['throttle'],
-                #                 'brake': self.hud.ctrl['brake'],
-                #                 'velocity': self.velocity
-                #             }, turn_signal
-                #         )
                 
                 pygame.display.flip()
                 if self.clock:
@@ -375,8 +343,6 @@ class CarlaViewer(MessagingSenders):
             self.close()
             if logger:
                 logger.finalize()
-            # if save_logging != None:
-            #     trajectory_buff.save(save_logging + "/trajectory")
 
     def close(self) -> None:
         
