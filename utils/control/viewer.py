@@ -22,20 +22,6 @@ from enum import Enum
 from rich import print
 from typing import Union, Dict
 from traceback import print_exc
-
-class GlobalState:
-    def __init__(self):
-        self.data = {}
-
-    def update(self, **kwargs):
-        for k, v in kwargs.items():
-            self.data[k] = v
-
-    def __getitem__(self, key):
-        return self.data.get(key, None)
-
-    def __setitem__(self, key, value):
-        self.data[key] = value
         
 class CameraView(Enum):
     FIRST_PERSON = {
@@ -47,35 +33,28 @@ class CameraView(Enum):
         "roll": 0.0, "pitch": -10.0, "yaw": 0.0
     }
 
-class TrajectoryLogger:
-    def __init__(self, save_dir: str, min_dt: float = 0.2):
-        self.buffer = TrajectoryBuffer(min_dt_s=min_dt)
-        self.save_dir = save_dir
-
-    def update(self, vehicle):
-        self.buffer.add_if_needed(vehicle.get_location())
-
-    def finalize(self):
-        self.buffer.save(self.save_dir + "/trajectory")
 
 class ReplayHandler:
-    def __init__(self, replay_file: str, world, data_collect_dir: str = None, debug: bool = False):
+    def __init__(self, replay_file: str, world, data_collect_dir: str = None, use_temporal: bool = False, debug: bool = False):
         
         waypoints_storage = np.load(replay_file)
         self.path_handler = PathHandler(waypoints_storage)
         self.debug = debug
         self.world = world
+        self.use_temporal = use_temporal
         self.scout_points = [i for i in range(-18, 33, 2)]
-        self.offset = [3, 5, 7, 8, 9]   # or temporal version
+        if not self.use_temporal:
+            self.offset   = [3, 5, 7, 8, 9]
+        else:
+            self.offset   = [.2, .4, .6, .8, 1.0]
         self.turn_classifier = TurnClassify(world=world, threshold_deg=15)
-
         self.data_collector = None
         if data_collect_dir:
             self.data_collector = CarlaDatasetCollector(save_dir=data_collect_dir, save_interval=20)
 
-    def step(self, frame, position, heading, server_fps, ctrl):
+    def step(self, frame: np.ndarray, position: np.ndarray, heading: float, server_fps: float, data: dict):
         ego_wp, global_wp = self.path_handler.waypoints(
-            position, self.offset, heading, return_global=True
+            position, self.offset, heading, return_global=True, use_time = self.use_temporal
         )
         _, global_scout = self.path_handler.waypoints(
             position, self.scout_points, heading, return_global=True
@@ -96,10 +75,10 @@ class ReplayHandler:
             self.data_collector.maybe_save(
                 frame, ego_wp,
                 {
-                    "steer": ctrl["steer"],
-                    "throttle": ctrl["throttle"],
-                    "brake": ctrl["brake"],
-                    "velocity": measurement["velocity"],
+                    "steer": data["steer"],
+                    "throttle": data["throttle"],
+                    "brake": data["brake"],
+                    "velocity": data["velocity"],
                 },
                 turn_signal,
             )
@@ -128,6 +107,12 @@ class CarlaViewer(MessagingSenders):
         self.rgb_sensor = None  
         self.sensors_list: Dict[str, Union[RGB, Depth, SemanticSegmentation, GNSS, IMU, LidarRaycast]] = {}
         self.camera_keys = []
+        self.dnn_data = {
+            "steer": 0,
+            "throttle": 0,
+            "brake": 0,
+            "velocity": 0,
+        }
         
         self.controller = Controller()
         self.hud = HUD("jetbrainsmononerdfontpropo", fontSize = 12)
@@ -209,7 +194,7 @@ class CarlaViewer(MessagingSenders):
             self.sensors_list[camera_name].change_view(**getattr(CameraView, view_name).value)
     
     @profile
-    def draw_hud(self, filter_ctrl=False):
+    def data_bus(self, filter_ctrl=False):
         snapshot = self.world.get_snapshot()
         current_platform_time = snapshot.timestamp.platform_timestamp  # server wall clock
         if self.last_platform_time is not None:
@@ -248,31 +233,36 @@ class CarlaViewer(MessagingSenders):
         # Velocity fallback
         self.velocity = self.virt_vehicle.get_velocity(False)
 
-        #####################################
-        # 🚀 Publish to subscribers
-        #####################################
+        #  Publish to subscribers
         self.send_server_fps.send(self.server_fps)
         self.send_client_fps.send(self.clock.get_fps())
         self.send_vehicle_name.send(self.vehicle_name)
         self.send_world_name.send(self.world_name)
         self.send_velocity.send(self.velocity)
-        self.send_heading.send(self.heading)
+        self.send_heading.send(np.degrees(self.heading))
         self.send_accel.send(accel)
         self.send_gyro.send(gyro)
         self.send_enu.send(enu.to_numpy())
         self.send_geo.send(geo.to_numpy())
         self.send_client_runtime.send(client_runtime)
         self.send_server_runtime.send(server_runtime)
-
-
-        # self.hud.update_measurement(server_fps = self.server_fps, client_fps = self.clock.get_fps(), 
-        #                             vehicle_name = self.vehicle_name, world_name = self.world_name,
-        #                             velocity = self.velocity, heading = heading,
-        #                             accel = accel, gyro = gyro, enu = enu, geo = geo, 
-        #                             client_runtime = client_runtime, 
-        #                             server_runtime = server_runtime)
         
-        # self.hud.update_control(**self.virt_vehicle.get_ctrl(filter_ctrl), regulate_speed = self.controller.regulate_speed)
+        self.ctrl = self.virt_vehicle.get_ctrl(filter_ctrl)
+        self.send_autopilot.send(self.ctrl['autopilot'])
+        self.send_regulate_speed.send(self.ctrl['regulate_speed'])
+        self.send_throttle.send(self.ctrl['throttle'])
+        self.send_steer.send(self.ctrl['steer'])
+        self.send_brake.send(self.ctrl['brake'])
+        self.send_reverse.send(self.ctrl['reverse'])
+        self.send_handbrake.send(self.ctrl['handbrake'])
+        self.send_manual.send(self.ctrl['manual'])
+        self.send_gear.send(self.ctrl['gear'])
+        
+        self.dnn_data["steer"]    = self.ctrl['steer']
+        self.dnn_data["throttle"] = self.ctrl['throttle']
+        self.dnn_data['brake']    = self.ctrl['brake']
+        self.dnn_data['velocity'] = self.velocity
+
         
     @staticmethod
     def to_location(loc):
@@ -298,30 +288,8 @@ class CarlaViewer(MessagingSenders):
         self.prev_loc = self.vehicle.get_transform().location
 
         
-        actuation_filter = False
-        if save_logging != None:
-            trajectory_buff = TrajectoryBuffer(min_dt_s = .2)
-        elif replay_logging != None:
-            actuation_filter = True
-            waypoints_storage = np.load(replay_logging[0])
-            path_handling  = PathHandler(waypoints_storage); 
-            if data_collect_dir is not None:
-                data_collector = CarlaDatasetCollector(save_dir = data_collect_dir, save_interval = 20)
-            # For debugging
-            # path_handling.position_idx = 60
-            # path_handling.position_idx = 250
-            # path_handling.position_idx = 300
-            # path_handling.position_idx = 760
-            # path_handling.position_idx = 1150
-            # path_handling.position_idx = 2260
-            # path_handling.position_idx = 3980
-
-            scout_points = [i for i in range(-18, 33, 2)]
-            if not use_temporal_wp:
-                offset          = [3, 5, 7, 8, 9]
-            else:
-                offset          = [.2, .4, .6, .8, 1.0]
-            turn_classifier = TurnClassify(world = self.world, threshold_deg = 15)
+        logger   = TrajectoryBuffer(save_logging, min_dt_s = .2) if save_logging else None
+        replayer = ReplayHandler(replay_logging[0], self.virt_world, data_collect_dir, use_temporal_wp, debug) if replay_logging else None
 
         
         try:
@@ -331,7 +299,7 @@ class CarlaViewer(MessagingSenders):
             self.server_start = self.world.get_snapshot().timestamp.platform_timestamp
             while self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
                 self.step_world()
-                self.draw_hud(actuation_filter)
+                self.data_bus(replay_logging != None)
 
                 frame = self.choosen_sensor.extract_data()
                 if frame is not None:
@@ -353,39 +321,41 @@ class CarlaViewer(MessagingSenders):
                                                     self.controller.hand_brake,
                                                     self.controller.regulate_speed,
                                                     self.controller.has_joystick)
-                
-                if save_logging != None: 
-                    trajectory_buff.add_if_needed(self.enu.to_numpy())
-                elif replay_logging != None:
-                    position  = self.enu.to_numpy()
-                    ego_waypoints, global_waypoints = path_handling.waypoints(position, offset, self.heading, return_global = True, use_time = use_temporal_wp)
-                    _, global_scout                 = path_handling.waypoints(position, scout_points, self.heading, return_global = True)
-                    if debug:
-                        for waypoint in global_waypoints:
-                            self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps))
-                        for waypoint in global_scout:
-                            self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps), color = (255, 0, 0), size = 0.1)
+                    
+                if logger: logger.update(self.enu.to_numpy())
+                if replayer: replayer.step(frame, self.enu.to_numpy(), self.heading, self.server_fps, self.dnn_data)
+                # if save_logging != None: 
+                #     trajectory_buff.add_if_needed(self.enu.to_numpy())
+                # elif replay_logging != None:
+                #     position  = self.enu.to_numpy()
+                #     ego_waypoints, global_waypoints = path_handling.waypoints(position, offset, self.heading, return_global = True, use_time = use_temporal_wp)
+                #     _, global_scout                 = path_handling.waypoints(position, scout_points, self.heading, return_global = True)
+                #     if debug:
+                #         for waypoint in global_waypoints:
+                #             self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps))
+                #         for waypoint in global_scout:
+                #             self.virt_world.draw_single_waypoint(waypoint, 1.5 * (1 / self.server_fps), color = (255, 0, 0), size = 0.1)
                     
                     
-                    is_at_junction, junction = self.virt_world.get_waypoint_junction(global_scout[14])
-                    not_exit_junction, _     = self.virt_world.get_waypoint_junction(global_scout[10])
-                    is_exit_junction         = not not_exit_junction
-                    turn_signal    = turn_classifier.turning_type(is_at_junction, junction, 
-                                                                  is_exit_junction, 
-                                                                  global_scout)
-                    # self.hud.update_logging(turn = turn_signal)
-                    self.hud.draw_logging(self.display)
+                #     is_at_junction, junction = self.virt_world.get_waypoint_junction(global_scout[14])
+                #     not_exit_junction, _     = self.virt_world.get_waypoint_junction(global_scout[10])
+                #     is_exit_junction         = not not_exit_junction
+                #     turn_signal    = turn_classifier.turning_type(is_at_junction, junction, 
+                #                                                   is_exit_junction, 
+                #                                                   global_scout)
+                #     # self.hud.update_logging(turn = turn_signal)
+                #     self.hud.draw_logging(self.display)
                     
-                    if data_collect_dir is not None:
-                        data_collector.maybe_save(
-                            frame, ego_waypoints, 
-                            {
-                                'steer': self.hud.ctrl['steer'],
-                                'throttle': self.hud.ctrl['throttle'],
-                                'brake': self.hud.ctrl['brake'],
-                                'velocity': self.velocity
-                            }, turn_signal
-                        )
+                #     if data_collect_dir is not None:
+                #         data_collector.maybe_save(
+                #             frame, ego_waypoints, 
+                #             {
+                #                 'steer': self.hud.ctrl['steer'],
+                #                 'throttle': self.hud.ctrl['throttle'],
+                #                 'brake': self.hud.ctrl['brake'],
+                #                 'velocity': self.velocity
+                #             }, turn_signal
+                #         )
                 
                 pygame.display.flip()
                 if self.clock:
@@ -403,8 +373,10 @@ class CarlaViewer(MessagingSenders):
         finally:
             self.virt_vehicle.stop()
             self.close()
-            if save_logging != None:
-                trajectory_buff.save(save_logging + "/trajectory")
+            if logger:
+                logger.finalize()
+            # if save_logging != None:
+            #     trajectory_buff.save(save_logging + "/trajectory")
 
     def close(self) -> None:
         
@@ -575,7 +547,6 @@ class Controller:
             self.throt_ctrl = rt
             self.brake_ctrl = lt
 
-        
 class HUD(MessagingSubscribers):
     def __init__(self, fontName="Arial", fontSize=24):
         super().__init__()  # init all subscribers
@@ -637,8 +608,8 @@ class HUD(MessagingSubscribers):
         if isinstance(enu, str):
             h_str, loc_str = "N/A", "N/A"
         else:
-            h_str   = f"{enu[0]: 6.2f} m"
-            loc_str = f"( {enu[1]: 6.2f}, {enu[2]: 6.2f} )"
+            h_str   = f"{enu[2]: 6.2f} m"
+            loc_str = f"( {enu[0]: 6.2f}, {enu[1]: 6.2f} )"
 
         # Collect lines
         value_lines = [

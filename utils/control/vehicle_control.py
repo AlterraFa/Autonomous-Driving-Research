@@ -41,8 +41,9 @@ class Vehicle:
         self.steer_delta = 0
         self.brake_delta = 0
         
-        self.hand_brake = False
-        self.reverse    = False
+        self.hand_brake     = False
+        self.reverse        = False
+        self.regulate_speed = False
 
         self.decay = 0.2
         
@@ -121,10 +122,12 @@ class Vehicle:
             "handbrake": handbrake,
             "manual": manual,
             "gear": gear,
-            "autopilot": self._autopilot
+            "autopilot": self._autopilot,
+            "regulate_speed": self.regulate_speed
         }
         
     def apply_control(self, throt_delta: float, steer_delta: float, brake_delta: float, reverse: bool, hand_brake: bool, regulate_speed: bool, use_joystick: bool = False):
+        self.regulate_speed = regulate_speed
 
         if use_joystick == False:
             self.throttle += throt_delta

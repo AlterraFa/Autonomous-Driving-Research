@@ -8,22 +8,23 @@ from pathlib import Path
 from typing import Dict, Any
 
 class TrajectoryBuffer:
-    def __init__(self, init_cap = 8192, dist_thresh_m = 0, min_dt_s = 0.05):
+    def __init__(self, save_dir: str, init_cap = 8192, dist_thresh_m = 0, min_dt_s = 0.05):
         self.arr = np.empty((init_cap, 4), dtype=np.float32)
         self.n = 0
         self.last = None
         self.last_t = 0.0
         self.dist_thresh = float(dist_thresh_m)
         self.min_dt = float(min_dt_s)
+        self.save_dir = save_dir
 
     @staticmethod
     def _dist3(a, b):
         dx, dy, dz = a[0]-b[0], a[1]-b[1], a[2]-b[2]
         return (dx*dx + dy*dy + dz*dz) ** 0.5
 
-    def add_if_needed(self, loc):
+    def update(self, loc: np.ndarray) -> None:
         t = time.time()
-        p = loc
+        p = [loc[0], loc[1], loc[2]]
         if self.last is not None:
             if (t - self.last_t) < self.min_dt:
                 return
@@ -39,8 +40,8 @@ class TrajectoryBuffer:
         self.arr[self.n] = p
         self.n += 1
 
-    def save(self, path_no_ext: str):
-        np.save(path_no_ext, self.arr[:self.n])
+    def finalize(self):
+        np.save(self.save_dir + "/trajectory", self.arr[:self.n])
 
 class CarlaDatasetCollector:
     """
