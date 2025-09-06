@@ -1,4 +1,5 @@
 from enum import Enum, IntEnum
+import pygame
 
 class VehicleClass(Enum):
     Cars = [
@@ -117,3 +118,17 @@ class JoyControl:
         RX = 3
         RY = 4
         RT = 5
+        
+KEYBINDS = {
+    pygame.K_BACKQUOTE: "toggle_autopilot",
+    pygame.K_q: "toggle_reverse",
+    pygame.K_SPACE: "toggle_hand_brake",
+    pygame.K_f: "toggle_regulate_speed",
+}
+
+JOYBINDS = {
+    JoyControl.JoyKey.A: "toggle_autopilot",
+    JoyControl.JoyKey.B: "toggle_reverse",
+    JoyControl.JoyKey.LB: "toggle_hand_brake",
+    JoyControl.JoyKey.RB: "toggle_regulate_speed",
+}
