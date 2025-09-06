@@ -100,6 +100,15 @@ class CarlaLabel(IntEnum):
     Bridge        = 26
     RailTrack     = 27
     GuardRail     = 28
+class CameraView(Enum):
+    FIRST_PERSON = {
+        "x": 0.0, "y": 0.0, "z": 2,    # position
+        "roll": 0.0, "pitch": 0.0, "yaw": 0.0
+    }
+    THIRD_PERSON = {
+        "x": -6.0, "y": 0.0, "z": 3.0,   # behind & above
+        "roll": 0.0, "pitch": -10.0, "yaw": 0.0
+    }
 class JoyControl:
 
     class JoyKey(IntEnum):

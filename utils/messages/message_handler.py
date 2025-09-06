@@ -42,7 +42,13 @@ class MessageSubscriber:
     def receive(self, return_payload = False):
         msg = MessageBroker.get(self._message.Owner.value, self._message.msgID.value)
         if not msg:
-            return None
+            default_msg = getattr(self._message, "default", None)
+
+            if default_msg is None:
+                return None
+            if callable(default_msg):
+                return default_msg()
+            return default_msg
 
         expected_types = self._message.msgType.value
         if not isinstance(msg["msgValue"], expected_types):
