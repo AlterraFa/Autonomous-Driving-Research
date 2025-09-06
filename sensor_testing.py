@@ -59,7 +59,7 @@ if __name__ == "__main__":
     rgb_sensor = RGB(world)
     rgb_sensor.set_attribute(name = "image_size_x", value = 800)
     rgb_sensor.set_attribute(name = "image_size_y", value = 600)
-    rgb_sensor.spawn(attach_to = None, z = 2, yaw = 0)
+    rgb_sensor.spawn(attach_to = vehicle, z = 2, yaw = 0)
     
     lidar_sensor = LidarRaycast(world)
     lidar_sensor.set_attribute("dropoff_general_rate", 0.1)
@@ -98,7 +98,6 @@ if __name__ == "__main__":
             depth_data     = depth_sensor.extract_data()
             lidar_data     = lidar_sensor.extract_data()
             lidar_sensor.visualize
-            print(geo_location)
             
             cv2.imshow("Sensor stack", np.hstack([semantic_image, rgb_image]))
             

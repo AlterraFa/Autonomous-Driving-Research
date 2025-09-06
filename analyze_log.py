@@ -51,7 +51,7 @@ def main(args):
     if args.collect_data is None:
         dataset_dir = None
     else:
-        dataset_dir = folder + "/" + args.collect_data + "/" + os.path.basename(args.replay) + "_" + "temporal" if args.temporal else "spatial"
+        dataset_dir = folder + "/" + args.collect_data + "/" + os.path.basename(args.replay) + "_" + ("temporal" if args.temporal else "spatial")
         os.makedirs(dataset_dir, exist_ok = True)
 
     client = carla.Client(args.host, args.port)

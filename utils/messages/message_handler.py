@@ -5,6 +5,7 @@ import queue
 
 from multiprocessing import Pipe, Queue
 from typing import Literal
+from rich import print
 
 from utils.messages.all_messages import *
 
@@ -68,7 +69,7 @@ class MessageSubscriber:
             self.subscribe()
 
         if self._deliveryMode not in ("fifo", "lastonly"):
-            print(f"[WARN] Wrong delivery mode '{deliveryMode}', expected 'fifo' or 'lastonly'. Using FIFO.")
+            print(f"[yellow][WARN][/]: Wrong delivery mode '{deliveryMode}', expected 'fifo' or 'lastonly'. Using FIFO.")
             self._deliveryMode = "fifo"
 
     def receive(self, block=False):
@@ -90,7 +91,7 @@ class MessageSubscriber:
         expected_types = self._message.msgType.value
         if not isinstance(msg["msgValue"], expected_types):
             print(
-                f"[WARN] Type mismatch for {self._message}: "
+                f"[yellow][WARN][/]: Type mismatch for {self._message}: "
                 f"got {type(msg['msgValue']).__name__}, "
                 f"expected one of {[t.__name__ for t in expected_types]}"
             )
