@@ -9,10 +9,7 @@ from utils.control.path import PathHandler, TurnClassify
 from utils.sensor_spawner import *
 from utils.data_collector import TrajectoryBuffer, CarlaDatasetCollector
 from config.enum import JoyControl, JOYBINDS, KEYBINDS
-from utils.messages.all_messages import *
 from utils.messages.message_handler import (
-    MessageSubscriber as Subscriber,
-    MessageSender as Sender,
     MessagingSenders,
     MessagingSubscribers 
 )
@@ -34,8 +31,9 @@ class CameraView(Enum):
     }
 
 
-class ReplayHandler:
+class ReplayHandler(MessagingSubscribers):
     def __init__(self, replay_file: str, world, data_collect_dir: str = None, use_temporal: bool = False, debug: bool = False):
+        MessagingSubscribers.__init__(self)
         
         waypoints_storage = np.load(replay_file)
         self.path_handler = PathHandler(waypoints_storage)
@@ -52,7 +50,11 @@ class ReplayHandler:
         if data_collect_dir:
             self.data_collector = CarlaDatasetCollector(save_dir=data_collect_dir, save_interval=20)
 
-    def step(self, frame: np.ndarray, position: np.ndarray, heading: float, server_fps: float, data: dict):
+    def step(self, frame: np.ndarray):
+        position = self.sub_enu.receive()
+        heading  = self.sub_heading.receive()
+        server_fps = self.sub_server_fps.receive()
+        
         ego_wp, global_wp = self.path_handler.waypoints(
             position, self.offset, heading, return_global=True, use_time = self.use_temporal
         )
@@ -72,20 +74,25 @@ class ReplayHandler:
         turn_signal = self.turn_classifier.turning_type(is_at_junction, junction, is_exit_junction, global_scout)
 
         if self.data_collector:
+            steer    = self.sub_steer.receive()
+            throttle = self.sub_throttle.receive()
+            brake    = self.sub_brake.receive()
+            velocity = self.sub_velocity.receive()
             self.data_collector.maybe_save(
                 frame, ego_wp,
                 {
-                    "steer": data["steer"],
-                    "throttle": data["throttle"],
-                    "brake": data["brake"],
-                    "velocity": data["velocity"],
+                    "steer": steer,
+                    "throttle": throttle,
+                    "brake": brake,
+                    "velocity": velocity,
                 },
                 turn_signal,
             )
 
-class CarlaViewer(MessagingSenders):
+class CarlaViewer(MessagingSenders, MessagingSubscribers):
     def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, sync: bool = False, fps: int = 70):
         MessagingSenders.__init__(self)
+        MessagingSubscribers.__init__(self)
 
         self.virt_world = world
         self.world = world.world
@@ -107,12 +114,6 @@ class CarlaViewer(MessagingSenders):
         self.rgb_sensor = None  
         self.sensors_list: Dict[str, Union[RGB, Depth, SemanticSegmentation, GNSS, IMU, LidarRaycast]] = {}
         self.camera_keys = []
-        self.dnn_data = {
-            "steer": 0,
-            "throttle": 0,
-            "brake": 0,
-            "velocity": 0,
-        }
         
         self.controller = Controller()
         self.hud = HUD("jetbrainsmononerdfontpropo", fontSize = 12)
@@ -193,7 +194,6 @@ class CarlaViewer(MessagingSenders):
         for camera_name in self.camera_keys:
             self.sensors_list[camera_name].change_view(**getattr(CameraView, view_name).value)
     
-    @profile
     def data_bus(self, filter_ctrl=False):
         snapshot = self.world.get_snapshot()
         current_platform_time = snapshot.timestamp.platform_timestamp  # server wall clock
@@ -246,7 +246,7 @@ class CarlaViewer(MessagingSenders):
         self.send_geo.send(geo.to_numpy())
         self.send_client_runtime.send(client_runtime)
         self.send_server_runtime.send(server_runtime)
-        
+
         self.ctrl = self.virt_vehicle.get_ctrl(filter_ctrl)
         self.send_autopilot.send(self.ctrl['autopilot'])
         self.send_regulate_speed.send(self.ctrl['regulate_speed'])
@@ -258,22 +258,6 @@ class CarlaViewer(MessagingSenders):
         self.send_manual.send(self.ctrl['manual'])
         self.send_gear.send(self.ctrl['gear'])
         
-        self.dnn_data["steer"]    = self.ctrl['steer']
-        self.dnn_data["throttle"] = self.ctrl['throttle']
-        self.dnn_data['brake']    = self.ctrl['brake']
-        self.dnn_data['velocity'] = self.velocity
-
-        
-    @staticmethod
-    def to_location(loc):
-        if isinstance(loc, carla.Waypoint):
-            return loc.transform.location
-        if isinstance(loc, carla.Transform):
-            return loc.location
-        if isinstance(loc, carla.Location):
-            return loc
-        return None
-
     @profile
     def run(self, 
             save_logging: str = None, 
@@ -323,8 +307,8 @@ class CarlaViewer(MessagingSenders):
                                                     self.controller.has_joystick)
                     
                 if logger: logger.update(self.enu.to_numpy())
-                if replayer: replayer.step(frame, self.enu.to_numpy(), self.heading, self.server_fps, self.dnn_data)
-                
+                if replayer: replayer.step(frame)
+
                 pygame.display.flip()
                 if self.clock:
                     self.clock.tick(self.fps)

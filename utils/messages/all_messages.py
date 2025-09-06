@@ -144,28 +144,3 @@ class TurnSignal(Enum):
     Owner = "HUD"
     msgID = 40
     msgType = (int,)   # -1, 0, 1, 2
-
-#################################### CarlaViewer Specific ####################################
-class ImuData(Enum):
-    Queue = "General"
-    Owner = "CarlaViewer"
-    msgID = 50
-    msgType = (list, np.ndarray, torch.Tensor)   # imu vector or tensor
-
-class CurrentSpeed(Enum):
-    Queue = "General"
-    Owner = "CarlaViewer"
-    msgID = 51
-    msgType = (int, float, np.ndarray, torch.Tensor)
-
-class CurrentSteer(Enum):
-    Queue = "General"
-    Owner = "CarlaViewer"
-    msgID = 52
-    msgType = (int, float, np.ndarray, torch.Tensor)
-
-class Location(Enum):
-    Queue = "General"
-    Owner = "CarlaViewer"
-    msgID = 53
-    msgType = (list, np.ndarray, torch.Tensor, dict)   # position in ENU or dict with {x,y,z}
