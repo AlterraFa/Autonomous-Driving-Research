@@ -7,7 +7,7 @@ from utils.control.world import World
 from utils.control.vehicle_control import Vehicle
 from utils.control.path import PathHandler, TurnClassify
 from utils.sensor_spawner import *
-from utils.data_collector import TrajectoryBuffer, CarlaDatasetCollector
+from utils.data_processor import TrajectoryBuffer, CarlaDatasetCollector
 from config.enum import (
     JoyControl, 
     CameraView,
