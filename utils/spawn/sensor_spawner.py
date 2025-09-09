@@ -3,8 +3,8 @@ import numpy as np
 import json
 import cv2
 
-from .lidar_visualization import LIDARVisualizer
-from .callback import Extractor
+from utils.lidar_visualization import LIDARVisualizer
+from utils.callback import Extractor
 
 from config.enum import CarlaLabel
 from typing import Optional
@@ -76,7 +76,7 @@ class SensorSpawn(object):
         sensor_name = ' '.join(temp + [string[1].capitalize()])
         return sensor_name
         
-from .stubs.sensor__lidar__ray_cast_stub import SensorLidarRayCastStub
+from utils.stubs.sensor__lidar__ray_cast_stub import SensorLidarRayCastStub
 class LidarRaycast(SensorLidarRayCastStub, SensorSpawn, LIDARVisualizer):
     def __init__(self, world, vis_range = 50, vis_window = (800, 600)):
         super().__init__()
@@ -104,7 +104,7 @@ class LidarRaycast(SensorLidarRayCastStub, SensorSpawn, LIDARVisualizer):
     def visualize(self) -> None:
         self.display(self.pcd, self.intense)
 
-from .stubs.sensor__camera__semantic_segmentation_stub import SensorCameraSemanticSegmentationStub
+from utils.stubs.sensor__camera__semantic_segmentation_stub import SensorCameraSemanticSegmentationStub
 class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
     
     class SemanticData(np.ndarray):
@@ -145,7 +145,7 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
 
-        palette_autopath = Path(__file__).resolve().parent / "../config/palette.json"
+        palette_autopath = Path(__file__).resolve().parent / "../../config/palette.json"
         with palette_autopath.open("r")  as f:
             palette = json.load(f)
         self.palette = {int(k): tuple(v) for k, v in palette.items()}
@@ -183,7 +183,7 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
         return labels
 
 
-from .stubs.sensor__camera__rgb_stub import SensorCameraRgbStub
+from utils.stubs.sensor__camera__rgb_stub import SensorCameraRgbStub
 class RGB(SensorCameraRgbStub, SensorSpawn):
     def __init__(self, world: carla.World):
         super().__init__()
@@ -204,7 +204,7 @@ class RGB(SensorCameraRgbStub, SensorSpawn):
         return np.frombuffer(carla_image.raw_data, dtype = np.uint8).reshape(carla_image.height, carla_image.width, 4)
 
         
-from .stubs.sensor__other__gnss_stub import SensorOtherGnssStub
+from utils.stubs.sensor__other__gnss_stub import SensorOtherGnssStub
 class GNSS(SensorOtherGnssStub, SensorSpawn):
     """GNSS IS VERY INACURATE COMPARE TO vehicle.get_location()"""
     @dataclass
@@ -386,7 +386,7 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
         
         return self.ecef_to_enu(**ecf)
     
-from .stubs.sensor__other__imu_stub import SensorOtherImuStub
+from utils.stubs.sensor__other__imu_stub import SensorOtherImuStub
 class IMU(SensorOtherImuStub, SensorSpawn):
     
     class IMUData(Mapping):
@@ -447,7 +447,7 @@ class IMU(SensorOtherImuStub, SensorSpawn):
         
         return IMU.IMUData(*[None] * 3)
     
-from .stubs.sensor__camera__depth_stub import SensorCameraDepthStub
+from utils.stubs.sensor__camera__depth_stub import SensorCameraDepthStub
 class Depth(SensorCameraDepthStub, SensorSpawn):
     class DepthMap(np.ndarray):
         __array_priority__ = 1000
@@ -548,7 +548,7 @@ class Depth(SensorCameraDepthStub, SensorSpawn):
         depth_norm = (r + g * 256.0 + b * 65536.0) / (256 ** 3 - 1)
         return depth_norm * 1000.0
     
-from .stubs.sensor__camera__instance_segmentation_stub import SensorCameraInstanceSegmentationStub
+from utils.stubs.sensor__camera__instance_segmentation_stub import SensorCameraInstanceSegmentationStub
 class InstanceSegmentation(SensorCameraInstanceSegmentationStub, SensorSpawn):
     def __init__(self, world: carla.World, sat = 0.65):
         super().__init__()

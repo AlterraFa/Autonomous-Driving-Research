@@ -98,6 +98,21 @@ class Vehicle:
             speed = (distance / dt) * 3.6 # Scaled by some factor (close to 3.6 (conversion from m/s to km/h))
         return speed
     
+    def global_transform(self, points: np.ndarray, rotation: float):
+
+        x, y, z = self.location.x, self.location.y, self.location.z
+        c, s = np.cos(rotation), np.sin(rotation)
+
+        T = np.array([
+            [ c, -s, x],
+            [ s,  c, y],
+            [ 0,  0, 1]
+        ])
+
+        pts = np.atleast_2d(points)
+        pts = np.hstack([pts, np.ones((pts.shape[0], 1))])
+        local_pts = (T @ pts.T).T
+        return local_pts if len(local_pts) > 1 else local_pts[0]
     
     def get_ctrl(self, filter = False):
         control = self.vehicle.get_control()
@@ -126,7 +141,7 @@ class Vehicle:
             "regulate_speed": self.regulate_speed
         }
         
-    def apply_control(self, throt_delta: float, steer_delta: float, brake_delta: float, reverse: bool, hand_brake: bool, regulate_speed: bool, use_joystick: bool = False):
+    def apply_control(self, throt_delta: float, steer_delta: float, brake_delta: float, reverse: bool, hand_brake: bool, regulate_speed: bool, use_joystick: bool = False, using_model = False):
         self.regulate_speed = regulate_speed
 
         if use_joystick == False:
@@ -197,6 +212,10 @@ class Vehicle:
             else:
                 self.throttle = 0.0
                 self.brake = max(0.0, min(1.0, -u))
+                
+                
+        if using_model:
+            self.steer = steer_delta
 
         
         if self._autopilot:

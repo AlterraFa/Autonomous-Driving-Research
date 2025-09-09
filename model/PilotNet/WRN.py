@@ -36,7 +36,6 @@ class ResnetBlock(nn.Module):
         else:
             out = self.LeakyReLU1(self.bn1(x))
 
-        
         out = self.LeakyReLU2(self.bn2(self.conv1(out if self.InIsOut else x)))
         if self.dropout > 0:
             out = F.dropout(out, self.dropout, training = self.training)

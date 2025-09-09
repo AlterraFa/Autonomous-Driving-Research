@@ -1,12 +1,15 @@
 import pygame
 import numpy as np
 import time
+import torch
+import concurrent.futures
+import cv2
 
 
 from utils.control.world import World
 from utils.control.vehicle_control import Vehicle
-from utils.control.path import PathHandler, TurnClassify
-from utils.sensor_spawner import *
+from utils.control.path import ReplayHandler
+from utils.spawn.sensor_spawner import *
 from utils.data_processor import TrajectoryBuffer, CarlaDatasetCollector
 from config.enum import (
     JoyControl, 
@@ -26,75 +29,6 @@ from traceback import print_exc
         
 
 
-class ReplayHandler(MessagingSubscribers, MessagingSenders):
-    def __init__(self, replay_file: str, world, data_collect_dir: str = None, use_temporal: bool = False, debug: bool = False):
-        MessagingSubscribers.__init__(self)
-        MessagingSenders.__init__(self)
-        
-        waypoints_storage = np.load(replay_file)
-        self.path_handler = PathHandler(waypoints_storage)
-        self.debug = debug
-        self.world = world
-        self.use_temporal = use_temporal
-        self.scout_points = [i for i in range(-18, 33, 2)]
-        if not self.use_temporal:
-            self.offset   = [3, 5, 7, 8, 9]
-        else:
-            self.offset   = [.2, .4, .6, .8, 1.0]
-        self.turn_classifier = TurnClassify(world=world, threshold_deg=15)
-        self.data_collector = None
-        if data_collect_dir:
-            self.data_collector = CarlaDatasetCollector(save_dir=data_collect_dir, save_interval=20)
-
-        self.prev_dist = 0
-        self.addtional_max = 20; self.addition_cnt = 0
-
-    def step(self, frame: np.ndarray):
-        position = self.sub_enu.receive()
-        heading  = self.sub_heading.receive()
-        server_fps = self.sub_server_fps.receive()
-        
-        ego_wp, global_wp = self.path_handler.waypoints(
-            position, self.offset, heading, return_global=True, use_time = self.use_temporal
-        )
-        _, global_scout = self.path_handler.waypoints(
-            position, self.scout_points, heading, return_global=True
-        )
-        curr_dist, *_ = self.path_handler.project(position)
-
-        if self.debug:
-            self.world.draw_waypoints(global_wp, 1.5 * (1 / server_fps), size = .1)
-            self.world.draw_waypoints(global_scout, 1.5 * (1 / server_fps), color=(255, 0, 0), size=.2)
-
-        is_at_junction, junction = self.world.get_waypoint_junction(global_scout[14])
-        not_exit_junction, _ = self.world.get_waypoint_junction(global_scout[10])
-        is_exit_junction = not not_exit_junction
-        turn_signal = self.turn_classifier.turning_type(is_at_junction, junction, is_exit_junction, global_scout)
-        self.send_turn_signal.send(turn_signal)
-
-        # Only save when it moves (Prevent saving all the time when stopping at red light or stop sign)
-        if self.data_collector:
-            if self.addition_cnt < self.addtional_max:
-                steer    = self.sub_steer.receive()
-                throttle = self.sub_throttle.receive()
-                brake    = self.sub_brake.receive()
-                velocity = self.sub_velocity.receive()
-                saved = self.data_collector.maybe_save(
-                    frame, ego_wp,
-                    {
-                        "steer": steer,
-                        "throttle": throttle,
-                        "brake": brake,
-                        "velocity": velocity,
-                    },
-                    turn_signal,
-                )
-                if saved:
-                    if curr_dist - self.prev_dist < 1e-2:
-                        self.addition_cnt += 1
-            if curr_dist - self.prev_dist > 1e-2:
-                self.addition_cnt = 0
-            self.prev_dist = curr_dist
 
 class CarlaViewer(MessagingSenders, MessagingSubscribers):
     def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, sync: bool = False, fps: int = 70):
@@ -124,6 +58,9 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         
         self.controller = Controller()
         self.hud = HUD("jetbrainsmononerdfontpropo", fontSize = 12)
+
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self.future   = None
         
     def init_sensor(self, sensors: list):
         """Lazy initialize sensors"""
@@ -188,7 +125,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         raise ValueError(f"Unsupported frame shape: {frame.shape}")
 
     def draw_frame(self, frame: np.ndarray) -> None:
-        surface = self.to_surface(frame)
+        surface = self.to_surface(frame.copy())
         self.display.blit(surface, (0, 0))
 
     def step_world(self) -> None:
@@ -268,6 +205,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.send_gear.send(self.ctrl['gear'])
         
     def run(self, 
+            model = None,
             save_logging: str = None, 
             use_temporal_wp: bool = False, 
             data_collect_dir: str = None, 
@@ -294,8 +232,11 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                 self.data_bus(replay_logging != None)
 
                 frame = self.choosen_sensor.extract_data()
+                H, W, _ = frame.shape
+
+
                 if frame is not None:
-                    self.draw_frame(frame)
+                    self.draw_frame(frame.copy())
                     self.hud.draw_measurement(self.display)
                     self.hud.draw_controls(self.display)
                     
@@ -305,7 +246,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                 if self.controller.camera_changed:
                     self.switch_camera(self.controller.camera_step)
                 self.virt_vehicle.set_autopilot(self.controller.autopilot)
-                if self.controller.autopilot == False:
+                if self.controller.autopilot == False and model is None:
                     self.virt_vehicle.apply_control(self.controller.throt_ctrl, 
                                                     self.controller.steer_ctrl, 
                                                     self.controller.brake_ctrl,
@@ -319,6 +260,43 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                 if replayer: 
                     replayer.step(frame)
                     self.hud.draw_logging(self.display)
+                if model:
+
+                    H, W, _  = frame.shape
+                    x_top_left = 480; x_top_right = W - x_top_left
+                    x_bot_left = 380; x_bot_right = W - x_bot_left
+                    y_hor      = 390; y_bot         = 720
+                    src_points = np.float32([[x_top_left, y_hor],
+                                            [x_top_right, y_hor],
+                                            [x_bot_right, y_bot],
+                                            [x_bot_left, y_bot]])
+                    width = 209; height = 150
+                    dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
+
+                    M = cv2.getPerspectiveTransform(src_points, dst_points)
+                    inp = cv2.warpPerspective(frame[:, :, :3], M, (width, height))
+                    cv2.imshow("test",inp)
+                    cv2.waitKey(1)
+                    inp = torch.tensor(np.ascontiguousarray(inp), dtype = torch.float).permute(2, 0, 1).unsqueeze(0) / 255.0
+                    inp = inp.to(next(model.parameters()).device)
+                    def infer(m, x):
+                        with torch.no_grad():
+                            return m(x, -1).detach().cpu().numpy()
+                    steer = infer(model, inp)[0][0]
+                    
+                    
+                    self.virt_vehicle.apply_control(self.controller.throt_ctrl, 
+                                                    float(steer),
+                                                    self.controller.brake_ctrl,
+                                                    self.controller.reverse,
+                                                    self.controller.hand_brake,
+                                                    self.controller.regulate_speed,
+                                                    using_model = True)
+                    # local_wp = infer(model, inp)[0]
+                    # local_wp[:, 1] = -local_wp[:, 1]
+                    # global_wp = self.virt_vehicle.global_transform(local_wp, np.radians(self.sub_heading.receive()))
+                    # # self.virt_world.draw_waypoints(global_wp, duration = 1 * (1 / self.server_fps))
+                
 
                 if replay_logging is not None and replay_logging[1] <= self.sub_server_runtime.receive():
                     print("[yellow][WARNING][/]: Reached replay limit. Goodbye")

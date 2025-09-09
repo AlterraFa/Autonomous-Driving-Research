@@ -1,8 +1,10 @@
 import cv2
 import time
+import torch
 import numpy as np
 import threading, queue
 
+from torch.utils.data import random_split
 from rich import print
 from pathlib import Path
 from typing import Dict, Any
@@ -112,6 +114,82 @@ class CarlaDatasetCollector:
         print(f"[cyan][INFO][/] Saved sample {self.sample_idx} → {img_path}")
         self.sample_idx += 1
         return True
+    
+class CarlaDatasetLoader:
+    def __init__(self, dataset_dir: str, downsize_ratio = 1, load_size: int = -1, shuffle = True):
+        self.dataset_dir = Path(dataset_dir)
+        self.img_dir     = self.dataset_dir / "images"
+        self.meta_dir    = self.dataset_dir / "metadata"
+        
+        if not self.img_dir.exists() or not self.meta_dir.exists():
+            raise FileNotFoundError(f"Dataset directories not found: expected 'images/' and 'metadata/'.")
+        
+        self.samples_dir = [f_name for f_name in self.meta_dir.glob("*.npy")]
+        self.samples_dir = np.array(self.samples_dir)
+        num_samples      = len(self.samples_dir)
+        if load_size != -1 and load_size != len(self.samples_dir):
+            if shuffle:
+                rand_idx = np.random.randint(0, len(self.samples_dir), load_size)
+                self.samples_dir = self.samples_dir[rand_idx]
+            else: 
+                self.samples_dir = self.samples_dir[np.arange(0, load_size, 1)]
+
+        print(f"[green][INFO][/]: Found {num_samples} samples in {self.dataset_dir}. Using {len(self.samples_dir)} samples")
+
+        self.loader = AsyncLoader()
+        self.downsize_ratio = downsize_ratio
+
+    def __len__(self):
+        return len(self.samples_dir)
+
+    def _get_samples(self, idx):
+        if idx < 0 or idx >= self.__len__():
+            raise IndexError(f"Index out of range")
+
+        meta_file = Path(self.samples_dir[idx])
+        meta      = np.load(meta_file, allow_pickle = True).item()
+
+        img_file  = self.dataset_dir / meta["img_file"]
+        self.loader.load(cv2.imread, str(img_file))
+        image     = self.loader.get_result(True)[:, :, ::-1]
+        if self.downsize_ratio != 1:
+            H, W, _   = image.shape
+            image = cv2.resize(image, (W // self.downsize_ratio, H // self.downsize_ratio))
+
+        return {
+            "image": image,
+            "ego_waypoints": np.array(meta["ego_waypoints"], dtype=np.float32),
+            "control": meta["control"],
+            "turn_signal": meta["turn_signal"],
+            "timestamp": meta["timestamp"],
+        }
+
+    
+    def __getitem__(self, idx):
+        return self._get_samples(idx)
+
+    CONTROL_KEYS = ["steer", "throttle", "brake", "velocity"]
+
+    @classmethod
+    def collate_fn(cls, batch):
+        images   = torch.stack([torch.from_numpy(np.ascontiguousarray(data["image"])) for data in batch]).permute(0, 3, 1, 2) / 255.0
+        wp       = torch.stack([torch.from_numpy(data["ego_waypoints"]) for data in batch])
+        controls = torch.tensor([
+            [data['control'][key] for key in cls.CONTROL_KEYS] for data in batch
+        ], dtype = torch.float32)
+        turn_signals = torch.tensor([data['turn_signal'] for data in batch], dtype = torch.long)
+        
+        return images, wp, controls, turn_signals
+
+    def split(self, train = 0.9, val = 0.1):
+        
+        n_total = self.__len__()
+        n_train = int(n_total * train)
+        n_val   = int(n_total * val)
+        n_test  = n_total - n_train - n_val
+
+        return random_split(self, [n_train, n_val, n_test])
+        
         
 class AsyncSaver:
     def __init__(self):
@@ -130,6 +208,42 @@ class AsyncSaver:
 
     def save(self, func, *args):
         self.q.put((func, args))
+
+    def stop(self):
+        self.running = False
+        self.worker.join()
+
+class AsyncLoader:
+    def __init__(self):
+        self.q = queue.Queue()         # tasks
+        self.results = queue.Queue()   # results
+        self.running = True
+        self.worker = threading.Thread(target=self._worker, daemon=True)
+        self.worker.start()
+
+    def _worker(self):
+        while self.running:
+            try:
+                func, args, kwargs = self.q.get(timeout=1)
+                result = func(*args, **kwargs)
+                self.results.put(result)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                self.results.put(e)
+
+    def load(self, func, *args, **kwargs):
+        """Enqueue a function call. Returns immediately."""
+        self.q.put((func, args, kwargs))
+
+    def get_result(self, block=True, timeout=None):
+        """
+        Retrieve the next available result.
+        If no result is ready:
+          - block=True waits until available (or timeout).
+          - block=False returns immediately (or raises queue.Empty).
+        """
+        return self.results.get(block=block, timeout=timeout)
 
     def stop(self):
         self.running = False

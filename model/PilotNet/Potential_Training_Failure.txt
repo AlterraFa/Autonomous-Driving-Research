@@ -1,0 +1,8 @@
+- Saving is corrupted or wrong in ReplayHandler
+- Ego waypoint location is wrong for temporal
+- RGB (Pygame) or BGR (Opencv) format mismatch
+- Overal arch of PilotNet is wrong
+- Filter ruins control input for Dynamic Version
+- Forgetting to use ROI region (x)
+- Waypoint output using linear layer is wrong
+- Wrong l1, l2 loss

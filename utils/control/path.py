@@ -1,6 +1,8 @@
 import numpy as np
 import carla
 from scipy.interpolate import interp1d
+from utils.messages.message_handler import MessagingSenders, MessagingSubscribers
+from utils.data_processor import CarlaDatasetCollector
 
 def wrap_to_pi(theta):
     return (theta + np.pi) % (2 * np.pi) - np.pi
@@ -382,3 +384,73 @@ class TurnClassify:
             self.signal = -1
 
         return self.signal
+
+class ReplayHandler(MessagingSubscribers, MessagingSenders):
+    def __init__(self, replay_file: str, world, data_collect_dir: str = None, use_temporal: bool = False, debug: bool = False):
+        MessagingSubscribers.__init__(self)
+        MessagingSenders.__init__(self)
+        
+        waypoints_storage = np.load(replay_file)
+        self.path_handler = PathHandler(waypoints_storage)
+        self.debug = debug
+        self.world = world
+        self.use_temporal = use_temporal
+        self.scout_points = [i for i in range(-18, 33, 2)]
+        if not self.use_temporal:
+            self.offset   = [1, 3, 5, 7, 9]
+        else:
+            self.offset   = [.2, .4, .6, .8, 1.0]
+        self.turn_classifier = TurnClassify(world=world, threshold_deg=15)
+        self.data_collector = None
+        if data_collect_dir:
+            self.data_collector = CarlaDatasetCollector(save_dir=data_collect_dir, save_interval=20)
+
+        self.prev_dist = 0
+        self.addtional_max = 20; self.addition_cnt = 0
+
+    def step(self, frame: np.ndarray):
+        position   = self.sub_enu.receive()
+        heading    = np.radians(self.sub_heading.receive())
+        server_fps = self.sub_server_fps.receive()
+        
+        ego_wp, global_wp = self.path_handler.waypoints(
+            position, self.offset, heading, return_global=True, use_time = self.use_temporal
+        )
+        _, global_scout = self.path_handler.waypoints(
+            position, self.scout_points, heading, return_global=True
+        )
+        curr_dist, *_ = self.path_handler.project(position)
+
+        if self.debug:
+            self.world.draw_waypoints(global_wp, 1.5 * (1 / server_fps), size = .1)
+            self.world.draw_waypoints(global_scout, 1.5 * (1 / server_fps), color=(255, 0, 0), size=.2)
+
+        is_at_junction, junction = self.world.get_waypoint_junction(global_scout[14])
+        not_exit_junction, _ = self.world.get_waypoint_junction(global_scout[10])
+        is_exit_junction = not not_exit_junction
+        turn_signal = self.turn_classifier.turning_type(is_at_junction, junction, is_exit_junction, global_scout)
+        self.send_turn_signal.send(turn_signal)
+
+        # Only save when it moves (Prevent saving all the time when stopping at red light or stop sign)
+        if self.data_collector:
+            if self.addition_cnt < self.addtional_max:
+                steer    = self.sub_steer.receive()
+                throttle = self.sub_throttle.receive()
+                brake    = self.sub_brake.receive()
+                velocity = self.sub_velocity.receive()
+                saved = self.data_collector.maybe_save(
+                    frame, ego_wp,
+                    {
+                        "steer": steer,
+                        "throttle": throttle,
+                        "brake": brake,
+                        "velocity": velocity,
+                    },
+                    turn_signal,
+                )
+                if saved:
+                    if curr_dist - self.prev_dist < 1e-2:
+                        self.addition_cnt += 1
+            if curr_dist - self.prev_dist > 1e-2:
+                self.addition_cnt = 0
+            self.prev_dist = curr_dist
