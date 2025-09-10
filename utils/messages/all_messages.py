@@ -197,6 +197,13 @@ class ModelBrake(Enum):
     msgID = 43
     msgType = (float, )
     default = None
+    
+class ModelAutopilot(Enum):
+    Queue = "General"
+    Owner = "Model"
+    msgID = 44
+    msgType = (bool, )
+    default = False
 
 #################################### Logging ####################################
 class ThrottleLog(Enum):

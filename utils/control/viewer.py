@@ -194,6 +194,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.send_location.send(np.array([vehicle_loc.x, vehicle_loc.y, vehicle_loc.z]))
 
         self.ctrl = self.virt_vehicle.get_ctrl(filter_ctrl)
+        self.send_model_autopilot_logging.send(self.ctrl['model_autopilot'])
         self.send_autopilot_logging.send(self.ctrl['autopilot'])
         self.send_regulate_speed_logging.send(self.ctrl['regulate_speed'])
         self.send_throttle_logging.send(self.ctrl['throttle'])
@@ -246,6 +247,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                 if self.controller.camera_changed:
                     self.switch_camera(self.controller.camera_step)
                 self.virt_vehicle.set_autopilot(self.controller.autopilot)
+                self.virt_vehicle.set_model_autopilot(self.controller.model_autopilot)
                 if self.controller.autopilot == False:
                     self.virt_vehicle.apply_control(self.controller.regulate_speed,
                                                     self.controller.has_joystick, 
@@ -603,6 +605,7 @@ class HUD(MessagingSubscribers):
         manual   = self._read(self.sub_manual_logging, False)
         gear     = self._read(self.sub_gear_logging, 0)
         autopilot= self._read(self.sub_autopilot_logging, False)
+        model_autopilot = self._read(self.sub_model_autopilot_logging, False)
         regulate = self._read(self.sub_regulate_speed_logging, False)
 
         # Bars
@@ -630,7 +633,8 @@ class HUD(MessagingSubscribers):
         surface.blit(self.font.render(f"{'Manual:':<{spacing}} {'■' if manual else '□'}", True, white), (x, y+5*line_h))
         surface.blit(self.font.render(f"{'Gear:':<{spacing}} {gear}", True, white), (x, y+6*line_h))
         surface.blit(self.font.render(f"{'Autopilot:':<{spacing}} {'■' if autopilot else '□'}", True, white), (x, y+7*line_h))
-        surface.blit(self.font.render(f"{'Regulate speed:':<{spacing}} {'■' if regulate else '□'}", True, white), (x, y+8*line_h))
+        surface.blit(self.font.render(f"{'Model autopilot:':<{spacing}} {'■' if model_autopilot else '□'}", True, white), (x, y+8*line_h))
+        surface.blit(self.font.render(f"{'Regulate speed:':<{spacing}} {'■' if regulate else '□'}", True, white), (x, y+9*line_h))
 
     def draw_logging(self, surface, x=10, y=510):
         turn = self._read(self.sub_turn_signal, -1)

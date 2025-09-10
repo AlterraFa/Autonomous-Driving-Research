@@ -30,7 +30,7 @@ class Vehicle(MessagingSubscribers):
         self._model_autopilot = False
         self.set_autopilot(self._autopilot)
         self.set_model_autopilot(self._model_autopilot)
-        
+
         self.throttle = 0
         self.steer = 0
         self.brake = 0
@@ -122,6 +122,7 @@ class Vehicle(MessagingSubscribers):
             "manual": manual,
             "gear": gear,
             "autopilot": self._autopilot,
+            "model_autopilot": self._model_autopilot,
             "regulate_speed": self.regulate_speed
         }
     
