@@ -41,7 +41,7 @@ class SensorSpawn(object):
         
         self.actor = self.world.spawn_actor(self.sensor_bp, transform, attach_to = attach_to)
         self.actor.listen(self.callback.put)
-        print(f"[green][INFO][/]: Sensor [bold]{self.literal_name}[/bold] spawned successfully. Listening to it")
+        print(f"[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: Sensor [bold]{self.literal_name}[/bold] spawned successfully. Listening to it")
     
     def change_view(self, **kwargs):
         loc = carla.Location(
@@ -64,7 +64,7 @@ class SensorSpawn(object):
         if hasattr(self, "actor"):
             self.actor.stop()
             self.actor.destroy()
-            print(f"[green][INFO][/]: Sensor [bold]{self.literal_name}[/bold] stopped and destroyed")
+            print(f"[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: Sensor [bold]{self.literal_name}[/bold] stopped and destroyed")
     
     @staticmethod
     def __literal_name__(name: str):

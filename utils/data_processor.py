@@ -111,7 +111,7 @@ class CarlaDatasetCollector:
         }
         np.save(self.meta_dir / f"{self.sample_idx:06d}.npy", meta, allow_pickle=True)
 
-        print(f"[cyan][INFO][/] Saved sample {self.sample_idx} → {img_path}")
+        print(f"[cyan][INFO[/] [purple]({self.__class__.__name__})[/]]: Saved sample {self.sample_idx} → {img_path}")
         self.sample_idx += 1
         return True
     
@@ -134,7 +134,7 @@ class CarlaDatasetLoader:
             else: 
                 self.samples_dir = self.samples_dir[np.arange(0, load_size, 1)]
 
-        print(f"[green][INFO][/]: Found {num_samples} samples in {self.dataset_dir}. Using {len(self.samples_dir)} samples")
+        print(f"[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: Found {num_samples} samples in {self.dataset_dir}. Using {len(self.samples_dir)} samples")
 
         self.loader = AsyncLoader()
         self.downsize_ratio = downsize_ratio

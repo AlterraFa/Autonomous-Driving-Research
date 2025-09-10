@@ -3,6 +3,7 @@ import carla
 from scipy.interpolate import interp1d
 from utils.messages.message_handler import MessagingSenders, MessagingSubscribers
 from utils.data_processor import CarlaDatasetCollector
+from utils.coordinate_transform import global_2_local
 
 def wrap_to_pi(theta):
     return (theta + np.pi) % (2 * np.pi) - np.pi
@@ -200,25 +201,10 @@ class PathHandler(NodeFinder):
                 
         wp = np.asarray(wp)
         if not return_global:
-            return self._ego_transform(wp, yaw, position)
+            return global_2_local(position, wp, yaw)
         else:
-            return self._ego_transform(wp, yaw, position), wp
+            return global_2_local(position, wp, yaw), wp
         
-    def _ego_transform(self, point: np.ndarray, rot: float, trans: np.ndarray):
-        x, y, z = trans
-        c, s = np.cos(rot), np.sin(rot)
-
-        T = np.array([
-            [ c,  s, -x*c - y*s],
-            [ s, -c, -x*s + y*c],
-            [ 0,  0,        1 ]
-        ])
-
-        pts = np.atleast_2d(point)
-        pts = np.hstack([pts[:, :2], np.ones((pts.shape[0], 1))])
-        local_pts = (T @ pts.T).T
-        return local_pts[:, :2] if len(local_pts) > 1 else local_pts[0, :2]
-
 class TurnClassify:
     def __init__(self, world, threshold_deg: float = 45):
         self.thresh_deg = threshold_deg
