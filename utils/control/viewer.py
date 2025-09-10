@@ -194,15 +194,15 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.send_location.send(np.array([vehicle_loc.x, vehicle_loc.y, vehicle_loc.z]))
 
         self.ctrl = self.virt_vehicle.get_ctrl(filter_ctrl)
-        self.send_autopilot.send(self.ctrl['autopilot'])
-        self.send_regulate_speed.send(self.ctrl['regulate_speed'])
-        self.send_throttle.send(self.ctrl['throttle'])
-        self.send_steer.send(self.ctrl['steer'])
-        self.send_brake.send(self.ctrl['brake'])
-        self.send_reverse.send(self.ctrl['reverse'])
-        self.send_handbrake.send(self.ctrl['handbrake'])
-        self.send_manual.send(self.ctrl['manual'])
-        self.send_gear.send(self.ctrl['gear'])
+        self.send_autopilot_logging.send(self.ctrl['autopilot'])
+        self.send_regulate_speed_logging.send(self.ctrl['regulate_speed'])
+        self.send_throttle_logging.send(self.ctrl['throttle'])
+        self.send_steer_logging.send(self.ctrl['steer'])
+        self.send_brake_logging.send(self.ctrl['brake'])
+        self.send_reverse_logging.send(self.ctrl['reverse'])
+        self.send_handbrake_logging.send(self.ctrl['handbrake'])
+        self.send_manual_logging.send(self.ctrl['manual'])
+        self.send_gear_logging.send(self.ctrl['gear'])
         
     def run(self, 
             model = None,
@@ -246,21 +246,17 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                 if self.controller.camera_changed:
                     self.switch_camera(self.controller.camera_step)
                 self.virt_vehicle.set_autopilot(self.controller.autopilot)
-                if self.controller.autopilot == False and model is None:
-                    self.virt_vehicle.apply_control(self.controller.throt_ctrl, 
-                                                    self.controller.steer_ctrl, 
-                                                    self.controller.brake_ctrl,
-                                                    self.controller.reverse,
-                                                    self.controller.hand_brake,
-                                                    self.controller.regulate_speed,
-                                                    self.controller.has_joystick)
+                if self.controller.autopilot == False:
+                    self.virt_vehicle.apply_control(self.controller.regulate_speed,
+                                                    self.controller.has_joystick, 
+                                                    self.controller.model_autopilot)
                     
                 if logger: 
                     logger.update(self.sub_location.receive())
                 if replayer: 
                     replayer.step(frame)
                     self.hud.draw_logging(self.display)
-                if model:
+                if model and self.controller.model_autopilot:
 
                     H, W, _  = frame.shape
                     x_top_left = 480; x_top_right = W - x_top_left
@@ -275,23 +271,14 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
 
                     M = cv2.getPerspectiveTransform(src_points, dst_points)
                     inp = cv2.warpPerspective(frame[:, :, :3], M, (width, height))
-                    cv2.imshow("test",inp)
-                    cv2.waitKey(1)
                     inp = torch.tensor(np.ascontiguousarray(inp), dtype = torch.float).permute(2, 0, 1).unsqueeze(0) / 255.0
                     inp = inp.to(next(model.parameters()).device)
                     def infer(m, x):
                         with torch.no_grad():
                             return m(x, -1).detach().cpu().numpy()
-                    steer = infer(model, inp)[0][0]
+                    steer = float(infer(model, inp)[0][0])
+                    self.send_model_steer.send(steer)
                     
-                    
-                    self.virt_vehicle.apply_control(self.controller.throt_ctrl, 
-                                                    float(steer),
-                                                    self.controller.brake_ctrl,
-                                                    self.controller.reverse,
-                                                    self.controller.hand_brake,
-                                                    self.controller.regulate_speed,
-                                                    using_model = True)
                     # local_wp = infer(model, inp)[0]
                     # local_wp[:, 1] = -local_wp[:, 1]
                     # global_wp = self.virt_vehicle.global_transform(local_wp, np.radians(self.sub_heading.receive()))
@@ -336,8 +323,9 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         except Exception as e:
             print(f"[red][ERROR]: Pygame quit failed: {e}[/]")
         
-class Controller:
+class Controller(MessagingSenders):
     def __init__(self):
+        MessagingSenders.__init__(self)
         pygame.joystick.init()
 
         self.has_joystick = pygame.joystick.get_count() > 0
@@ -365,7 +353,7 @@ class Controller:
         self.camera_step = 1; self.camera_changed = False
         self.prev_keys_view = pygame.key.get_pressed()
         
-        self.autopilot = False
+        self.autopilot = False; self.model_autopilot = False
         self.throt_ctrl = 0; self.steer_ctrl = 0; self.brake_ctrl = 0
         self.reverse = False
         self.hand_brake = False
@@ -440,6 +428,18 @@ class Controller:
             f"[i][{'green' if self.autopilot else 'red'}]"
             f"{'Engaged' if self.autopilot else 'Disengaged'}[/i][/]")
 
+        if self.autopilot == True:
+            self.model_autopilot = False
+
+    def toggle_model_autopilot(self):
+        self.model_autopilot = not self.model_autopilot
+        print(f"[yellow][WARNING][/]: Model inference toggled → "
+            f"[i][{'green' if self.model_autopilot else 'red'}]"
+            f"{'Engaged' if self.model_autopilot else 'Disengaged'}[/i][/]")
+        
+        if self.model_autopilot == True:
+            self.autopilot = False
+
     def toggle_reverse(self):
         self.reverse = not self.reverse
         print(f"[blue][INFO][/]: Reverse {'ON' if self.reverse else 'OFF'}")
@@ -489,6 +489,14 @@ class Controller:
             self.steer_ctrl = self._curve(left_x) * 0.5
             self.throt_ctrl = rt
             self.brake_ctrl = lt
+            
+            
+        self.send_throttle.send(self.throt_ctrl)
+        self.send_steer.send(self.steer_ctrl)
+        self.send_brake.send(self.brake_ctrl)
+        self.send_reverse.send(self.reverse)
+        self.send_handbrake.send(self.hand_brake)
+        self.send_regulate_speed.send(self.regulate_speed)
 
 class HUD(MessagingSubscribers):
     def __init__(self, fontName="Arial", fontSize=24):
@@ -587,15 +595,15 @@ class HUD(MessagingSubscribers):
         red   = (200, 0, 0)
 
         # Read controls directly
-        throttle = self._read(self.sub_throttle, 0.0)
-        steer    = self._read(self.sub_steer, 0.0)
-        brake    = self._read(self.sub_brake, 0.0)
-        reverse  = self._read(self.sub_reverse, False)
-        handbrake= self._read(self.sub_handbrake, False)
-        manual   = self._read(self.sub_manual, False)
-        gear     = self._read(self.sub_gear, 0)
-        autopilot= self._read(self.sub_autopilot, False)
-        regulate = self._read(self.sub_regulate_speed, False)
+        throttle = self._read(self.sub_throttle_logging, 0.0)
+        steer    = self._read(self.sub_steer_logging, 0.0)
+        brake    = self._read(self.sub_brake_logging, 0.0)
+        reverse  = self._read(self.sub_reverse_logging, False)
+        handbrake= self._read(self.sub_handbrake_logging, False)
+        manual   = self._read(self.sub_manual_logging, False)
+        gear     = self._read(self.sub_gear_logging, 0)
+        autopilot= self._read(self.sub_autopilot_logging, False)
+        regulate = self._read(self.sub_regulate_speed_logging, False)
 
         # Bars
         surface.blit(self.font.render("Throttle:", True, white), (x, y))

@@ -129,7 +129,8 @@ class JoyControl:
         RT = 5
         
 KEYBINDS = {
-    pygame.K_BACKQUOTE: "toggle_autopilot",
+    pygame.K_1: "toggle_autopilot",
+    pygame.K_2: "toggle_model_autopilot",
     pygame.K_q: "toggle_reverse",
     pygame.K_SPACE: "toggle_hand_brake",
     pygame.K_f: "toggle_regulate_speed",
@@ -137,6 +138,7 @@ KEYBINDS = {
 
 JOYBINDS = {
     JoyControl.JoyKey.A: "toggle_autopilot",
+    JoyControl.JoyKey.X: "toggle_model_autopilot",
     JoyControl.JoyKey.B: "toggle_reverse",
     JoyControl.JoyKey.LB: "toggle_hand_brake",
     JoyControl.JoyKey.RB: "toggle_regulate_speed",

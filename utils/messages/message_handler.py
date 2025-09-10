@@ -43,11 +43,13 @@ class MessageSubscriber:
         msg = MessageBroker.get(self._message.Owner.value, self._message.msgID.value)
         if not msg:
             default_msg = getattr(self._message, "default", None)
-
-            if default_msg is None:
-                return None
+            
             if callable(default_msg):
                 return default_msg()
+            if isinstance(default_msg, Enum):
+                default_msg = default_msg.value
+            if default_msg is None:
+                return None
             return default_msg
 
         expected_types = self._message.msgType.value
@@ -93,8 +95,22 @@ class MessagingSubscribers:
         self.sub_autopilot      = MessageSubscriber(Autopilot)
         self.sub_regulate_speed = MessageSubscriber(RegulateSpeed)
 
+        # Model
+        self.sub_model_steer    = MessageSubscriber(ModelSteer)
+        self.sub_model_throttle = MessageSubscriber(ModelThrottle)
+        self.sub_model_brake    = MessageSubscriber(ModelBrake)
+
         # Logging
-        self.sub_turn_signal    = MessageSubscriber(TurnSignal)
+        self.sub_throttle_logging       = MessageSubscriber(ThrottleLog)
+        self.sub_steer_logging          = MessageSubscriber(SteerLog)
+        self.sub_brake_logging          = MessageSubscriber(BrakeLog)
+        self.sub_reverse_logging        = MessageSubscriber(ReverseLog)
+        self.sub_handbrake_logging      = MessageSubscriber(HandbrakeLog)
+        self.sub_manual_logging         = MessageSubscriber(ManualLog)
+        self.sub_gear_logging           = MessageSubscriber(GearLog)
+        self.sub_autopilot_logging      = MessageSubscriber(AutopilotLog)
+        self.sub_regulate_speed_logging = MessageSubscriber(RegulateSpeedLog)
+        self.sub_turn_signal            = MessageSubscriber(TurnSignal)
 
 class MessagingSenders:
     """Convenience wrapper to init all senders."""
@@ -129,5 +145,19 @@ class MessagingSenders:
         self.send_autopilot      = MessageSender(Autopilot)
         self.send_regulate_speed = MessageSender(RegulateSpeed)
 
+        # Model
+        self.send_model_steer    = MessageSender(ModelSteer)
+        self.send_model_throttle = MessageSender(ModelThrottle)
+        self.send_model_brake    = MessageSender(ModelBrake)
+
         # Logging
-        self.send_turn_signal    = MessageSender(TurnSignal)
+        self.send_throttle_logging       = MessageSender(ThrottleLog)
+        self.send_steer_logging          = MessageSender(SteerLog)
+        self.send_brake_logging          = MessageSender(BrakeLog)
+        self.send_reverse_logging        = MessageSender(ReverseLog)
+        self.send_handbrake_logging      = MessageSender(HandbrakeLog)
+        self.send_manual_logging         = MessageSender(ManualLog)
+        self.send_gear_logging           = MessageSender(GearLog)
+        self.send_autopilot_logging      = MessageSender(AutopilotLog)
+        self.send_regulate_speed_logging = MessageSender(RegulateSpeedLog)
+        self.send_turn_signal            = MessageSender(TurnSignal)   # keep old

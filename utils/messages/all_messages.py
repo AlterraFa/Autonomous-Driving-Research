@@ -174,3 +174,90 @@ class TurnSignal(Enum):
     msgID = 40
     msgType = (int,)
     default = -1
+
+#################################### Inference ##################################
+
+class ModelSteer(Enum):
+    Queue = "General"
+    Owner = "Model"
+    msgID = 41
+    msgType = (float, )
+    default = None
+
+class ModelThrottle(Enum):
+    Queue = "General"
+    Owner = "Model"
+    msgID = 42
+    msgType = (float, )
+    default = None
+
+class ModelBrake(Enum):
+    Queue = "General"
+    Owner = "Model"
+    msgID = 43
+    msgType = (float, )
+    default = None
+
+#################################### Logging ####################################
+class ThrottleLog(Enum):
+    Queue = "General"
+    Owner = "HUD"
+    msgID = 50
+    msgType = (float, int, np.ndarray, torch.Tensor)
+    default = 0.0
+
+class SteerLog(Enum):
+    Queue = "General"
+    Owner = "HUD"
+    msgID = 51
+    msgType = (float, int, np.ndarray, torch.Tensor)
+    default = 0.0
+
+class BrakeLog(Enum):
+    Queue = "General"
+    Owner = "HUD"
+    msgID = 52
+    msgType = (float, int)
+    default = 0.0
+
+class ReverseLog(Enum):
+    Queue = "General"
+    Owner = "HUD"
+    msgID = 53
+    msgType = (bool,)
+    default = False
+
+class HandbrakeLog(Enum):
+    Queue = "General"
+    Owner = "HUD"
+    msgID = 54
+    msgType = (bool,)
+    default = False
+
+class ManualLog(Enum):
+    Queue = "General"
+    Owner = "HUD"
+    msgID = 55
+    msgType = (bool,)
+    default = False
+
+class GearLog(Enum):
+    Queue = "General"
+    Owner = "HUD"
+    msgID = 56
+    msgType = (int,)
+    default = 0
+
+class AutopilotLog(Enum):
+    Queue = "General"
+    Owner = "HUD"
+    msgID = 57
+    msgType = (bool,)
+    default = False
+
+class RegulateSpeedLog(Enum):
+    Queue = "General"
+    Owner = "HUD"
+    msgID = 58
+    msgType = (bool,)
+    default = False
