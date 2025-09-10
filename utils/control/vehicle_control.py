@@ -30,6 +30,7 @@ class Vehicle(MessagingSubscribers):
         self._model_autopilot = False
         self.set_autopilot(self._autopilot)
         self.set_model_autopilot(self._model_autopilot)
+        
         self.throttle = 0
         self.steer = 0
         self.brake = 0
@@ -96,22 +97,6 @@ class Vehicle(MessagingSubscribers):
             dt = self.world.get_snapshot().timestamp.delta_seconds
             speed = (distance / dt) * 3.6 # Scaled by some factor (close to 3.6 (conversion from m/s to km/h))
         return speed
-    
-    def global_transform(self, points: np.ndarray, rotation: float):
-
-        x, y, z = self.location.x, self.location.y, self.location.z
-        c, s = np.cos(rotation), np.sin(rotation)
-
-        T = np.array([
-            [ c, -s, x],
-            [ s,  c, y],
-            [ 0,  0, 1]
-        ])
-
-        pts = np.atleast_2d(points)
-        pts = np.hstack([pts, np.ones((pts.shape[0], 1))])
-        local_pts = (T @ pts.T).T
-        return local_pts if len(local_pts) > 1 else local_pts[0]
     
     def get_ctrl(self, filter = False):
         control = self.vehicle.get_control()

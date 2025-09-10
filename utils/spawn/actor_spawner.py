@@ -39,11 +39,11 @@ class Spawn:
 
     def spawn_mass_vehicle(self, size: int, transform: carla.Transform = None, autopilot = True, exclude: list[VehicleClass] = None):
         if size < 0:
-            print(f"[red][ERROR][/]: Number of spawning vehicles must be a positive integer")
+            print(f"[[red]ERROR[/] [purple]({self.__class__.__name__})[/]]: Number of spawning vehicles must be a positive integer")
             exit(12)
         if transform is not None:
             if size != len(transform):
-                print(f"[red][ERROR][/]: Number of spawning location must equal to spawning vehicles")
+                print(f"[[red]ERROR[/] [purple]({self.__class__.__name__})[/]]: Number of spawning location must equal to spawning vehicles")
                 exit(12)
         
         vehicle_bp = self.blueprints.filter("*vehicle*")
@@ -60,10 +60,10 @@ class Spawn:
                 vehicle.set_autopilot(autopilot)
                 self.vehicles += [vehicle]
             else:
-                print(f"[red][ERROR][/]: A random vehicle has not spawned successfully. Skipping.")
+                print(f"[[red]ERROR[/] [purple]({self.__class__.__name__})[/]]: A random vehicle has not spawned successfully. Skipping.")
         
         self.world.tick()
-        print(f"[green][INFO][/]: Spawned mass successfully. {self.get_size} vehicles in environment")
+        print(f"[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: Spawned mass successfully. {self.get_size} vehicles in environment")
         
         
     def spawn_single_vehicle(self, bp_id: Vehicle_BP = None, name: str = "ego", transform: carla.Transform = None, random_offset: float = 0, autopilot = True, exclude: Vehicle_BP = None):
@@ -77,10 +77,10 @@ class Spawn:
                     vehicle_bp = self.blueprints.find(vehicle_name)
                     break
                 except: 
-                    print(f"[red][ERROR][/]: Did not find {vehicle_name}. Retrying ...")
+                    print(f"[[red]ERROR[/] [purple]({self.__class__.__name__})[/]]: Did not find {vehicle_name}. Retrying ...")
                     continue
         else:
-            print("[green][INFO][/]: A specific blueprint was choosen, skipping exclude")
+            print("[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: A specific blueprint was choosen, skipping exclude")
             vehicle_bp = self.blueprints.find(bp_id)
             
         vehicle_bp.set_attribute("role_name", name)  
@@ -91,23 +91,23 @@ class Spawn:
             random_yaw = random.uniform(-random_offset, random_offset)
             spawn_pts.rotation.yaw += random_yaw
             if random_offset != 0: 
-                print(f"[yellow][WARNING][/]: Random yaw selected: {random_yaw:.2f} degree.")
+                print(f"[[yellow]WARNING[/] [purple]({self.__class__.__name__})[/]]: Random yaw selected: {random_yaw:.2f} degree.")
             
             self.single_vehicle = self.world.try_spawn_actor(vehicle_bp, transform if transform is not None else spawn_pts)
 
             if self.single_vehicle is not None: break
-            else: print(f"[red][ERROR][/]: Did not find a suitable spawn point for controlling vehicle. Retrying ...")
+            else: print(f"[[red]ERROR[/] [purple]({self.__class__.__name__})[/]]: Did not find a suitable spawn point for controlling vehicle. Retrying ...")
 
         self.single_vehicle.set_autopilot(autopilot)
         self.vehicles += [self.single_vehicle]
 
         self.world.tick()
-        print(f"[green][INFO][/]: Spawned single successfully. Name: {str(vehicle_bp.id)}. {self.get_size} vehicles in environment")
+        print(f"[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: Spawned single successfully. Name: {str(vehicle_bp.id)}. {self.get_size} vehicles in environment")
         
     def destroy_all_vehicles(self):
         for vehicle in self.get_vehicles:
             vehicle.destroy()
-        print("[green][INFO][/]: Destroyed all vehicles")
+        print(f"[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: Destroyed all vehicles")
 
     @property
     def get_size(self):

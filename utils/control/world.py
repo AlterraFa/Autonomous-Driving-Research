@@ -37,7 +37,7 @@ class World:
         self.tm.set_synchronous_mode(self.sync)
 
     def factory_reset(self):
-        print("[yellow][WARNING][/]: Reseting world to factory")
+        print(f"[[yellow]WARNING[/] [purple]({self.__class__.__name__})[/]]: Reseting world to factory")
         self.sync = False
         self.settings.synchronous_mode = self.sync
         self.settings.fixed_delta_seconds = self.delta if self.sync else None
@@ -45,8 +45,8 @@ class World:
             self.tm.set_synchronous_mode(self.sync)
             self.world.apply_settings(self.settings)
         except Exception as e:
-            print(f"[red][ERROR][/]: Failed to reset world -> {e}")
-        print("[green][INFO]: World reset to async[/]")
+            print(f"[[red]ERROR[/] [purple]({self.__class__.__name__})[/]]: Failed to reset world -> {e}")
+        print(f"[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: World reset to async")
 
     def draw_waypoints(self, waypoints, duration: float = 1, color: tuple = (0, 255, 0), size = 0.1):
         for point in waypoints:
