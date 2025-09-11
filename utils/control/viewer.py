@@ -11,6 +11,7 @@ from utils.control.vehicle_control import Vehicle
 from utils.control.path import ReplayHandler
 from utils.spawn.sensor_spawner import *
 from utils.data_processor import TrajectoryBuffer, CarlaDatasetCollector
+from model.inference import AsyncInference
 from config.enum import (
     JoyControl, 
     CameraView,
@@ -219,10 +220,35 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.prev_loc = self.vehicle.get_transform().location
 
         
-        logger   = TrajectoryBuffer(save_logging, min_dt_s = .2) if save_logging else None
-        replayer = ReplayHandler(replay_logging[0], self.virt_world, data_collect_dir, use_temporal_wp, debug) if replay_logging else None
+        logger    = TrajectoryBuffer(save_logging, min_dt_s = .2) if save_logging else None
+        replayer  = ReplayHandler(replay_logging[0], self.virt_world, data_collect_dir, use_temporal_wp, debug) if replay_logging else None
+        inference = AsyncInference(model) if model is not None else None
 
-        
+        H, W, _    = 720, 1280, 3
+        x_top_left = 280; x_top_right = W - x_top_left
+        x_bot_left = 180; x_bot_right = W - x_bot_left
+        y_hor      = 390; y_bot         = 720
+        src_points = np.float32([[x_top_left, y_hor],
+                                [x_top_right, y_hor],
+                                [x_bot_right, y_bot],
+                                [x_bot_left, y_bot]])
+        width = 250; height = 150
+        dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
+
+        M = cv2.getPerspectiveTransform(src_points, dst_points)
+        # H, W, _    = 720, 1280, 3
+        # x_top_left = 480; x_top_right = W - x_top_left
+        # x_bot_left = 380; x_bot_right = W - x_bot_left
+        # y_hor      = 390; y_bot         = 720
+        # src_points = np.float32([[x_top_left, y_hor],
+        #                         [x_top_right, y_hor],
+        #                         [x_bot_right, y_bot],
+        #                         [x_bot_left, y_bot]])
+        # width = 209; height = 150
+        # dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
+
+        # M = cv2.getPerspectiveTransform(src_points, dst_points)
+        frame_id = 0
         try:
             self.last_platform_time = None; 
             self.server_fps = self.fps; 
@@ -240,6 +266,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                     self.draw_frame(frame.copy())
                     self.hud.draw_measurement(self.display)
                     self.hud.draw_controls(self.display)
+                    self.hud.draw_logging(self.display)
                     
                     
                 if self.controller.view_changed:
@@ -257,29 +284,19 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                     logger.update(self.sub_location.receive())
                 if replayer: 
                     replayer.step(frame)
-                    self.hud.draw_logging(self.display)
                 if model and self.controller.model_autopilot:
-
-                    H, W, _  = frame.shape
-                    x_top_left = 480; x_top_right = W - x_top_left
-                    x_bot_left = 380; x_bot_right = W - x_bot_left
-                    y_hor      = 390; y_bot         = 720
-                    src_points = np.float32([[x_top_left, y_hor],
-                                            [x_top_right, y_hor],
-                                            [x_bot_right, y_bot],
-                                            [x_bot_left, y_bot]])
-                    width = 209; height = 150
-                    dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
-
-                    M = cv2.getPerspectiveTransform(src_points, dst_points)
-                    inp = cv2.warpPerspective(frame[:, :, :3], M, (width, height))
-                    inp = torch.tensor(np.ascontiguousarray(inp), dtype = torch.float).permute(2, 0, 1).unsqueeze(0) / 255.0
-                    inp = inp.to(next(model.parameters()).device)
-                    def infer(m, x):
-                        with torch.no_grad():
-                            return m(x, -1).detach().cpu().numpy()
-                    steer = float(infer(model, inp)[0][0])
-                    self.send_model_steer.send(steer)
+                    
+                    
+                    if frame_id % 1 == 0:
+                        inp = cv2.warpPerspective(frame[:, :, :3], M, (width, height))
+                        cv2.imshow("Test", inp)
+                        cv2.waitKey(1)
+                        turn_signal = self.sub_turn_signal.receive()
+                        inference.put(inp, turn_signal)
+                        steer = inference.get()
+                        if steer is not None:
+                            self.send_model_steer.send(float(steer))
+                    frame_id += 1
                     
                     # local_wp = infer(model, inp)[0]
                     # local_wp[:, 1] = -local_wp[:, 1]
@@ -474,24 +491,34 @@ class Controller(MessagingSenders):
         # Keyboard continuous controls
         keys = pygame.key.get_pressed()
         steer_inc = 5e-4 * server_time * 1000
-        self.throt_ctrl = 0.01 if keys[pygame.K_w] else 0
-        self.brake_ctrl = 0.2 if keys[pygame.K_s] else 0
-        self.steer_ctrl = (-steer_inc if keys[pygame.K_a] else
-                            steer_inc if keys[pygame.K_d] else 0)
+        if not self.model_autopilot:
+            self.throt_ctrl = 0.01 if keys[pygame.K_w] else 0
+            self.brake_ctrl = 0.2 if keys[pygame.K_s] else 0
+            self.steer_ctrl = (-steer_inc if keys[pygame.K_a] else
+                                steer_inc if keys[pygame.K_d] else 0)
 
-        # Joystick continuous controls
-        if self.has_joystick:
-            left_x = self._apply_deadzone(self.joystick.get_axis(JoyControl.JoyStick.LX), self.deadzone_stick)
-            lt = self._trigger_01(self.joystick.get_axis(JoyControl.JoyStick.LT))
-            rt = self._trigger_01(self.joystick.get_axis(JoyControl.JoyStick.RT))
+            # Joystick continuous controls
+            if self.has_joystick:
+                left_x = self._apply_deadzone(self.joystick.get_axis(JoyControl.JoyStick.LX), self.deadzone_stick)
+                lt = self._trigger_01(self.joystick.get_axis(JoyControl.JoyStick.LT))
+                rt = self._trigger_01(self.joystick.get_axis(JoyControl.JoyStick.RT))
 
-            lt = 0.0 if lt < self.deadzone_trigger else lt
-            rt = 0.0 if rt < self.deadzone_trigger else rt
+                lt = 0.0 if lt < self.deadzone_trigger else lt
+                rt = 0.0 if rt < self.deadzone_trigger else rt
 
-            self.steer_ctrl = self._curve(left_x) * 0.5
-            self.throt_ctrl = rt
-            self.brake_ctrl = lt
-            
+                self.steer_ctrl = self._curve(left_x) * 0.5
+                self.throt_ctrl = rt
+                self.brake_ctrl = lt
+
+        if self.model_autopilot:
+            if keys[pygame.K_w]:
+                self.send_turn_signal.send(0)
+            elif keys[pygame.K_a]:
+                self.send_turn_signal.send(1)
+            elif keys[pygame.K_d]:
+                self.send_turn_signal.send(2)
+            else:
+                self.send_turn_signal.send(-1)
             
         self.send_throttle.send(self.throt_ctrl)
         self.send_steer.send(self.steer_ctrl)

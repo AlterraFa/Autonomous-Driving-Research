@@ -420,9 +420,9 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
         # Only save when it moves (Prevent saving all the time when stopping at red light or stop sign)
         if self.data_collector:
             if self.addition_cnt < self.addtional_max:
-                steer    = self.sub_steer.receive()
-                throttle = self.sub_throttle.receive()
-                brake    = self.sub_brake.receive()
+                steer    = self.sub_steer_logging.receive()
+                throttle = self.sub_throttle_logging.receive()
+                brake    = self.sub_brake_logging.receive()
                 velocity = self.sub_velocity.receive()
                 saved = self.data_collector.maybe_save(
                     frame, ego_wp,

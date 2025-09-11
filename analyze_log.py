@@ -5,11 +5,13 @@ sys.path.insert(0, root)
 import carla
 import argparse
 import pygame
+import torch
+import importlib
 from functools import partial
 import re
 
-from utils.spawner import Spawn, VehicleClass as VClass
-from utils.sensor_spawner import (
+from utils.spawn.actor_spawner import Spawn, VehicleClass as VClass
+from utils.spawn.sensor_spawner import (
     SemanticSegmentation as SemSeg, 
     RGB,
     GNSS,
@@ -21,6 +23,44 @@ from utils.sensor_spawner import (
 from utils.control.world import World
 from utils.control.vehicle_control import Vehicle, wait_for_actor_by_role
 from utils.control.viewer import CarlaViewer
+
+def load_model_from_checkpoint(path: str, device: str = "cpu", **model_kwargs):
+    """
+    Load a model checkpoint, automatically inferring class name and module path from filename.
+
+    Args:
+        path (str): Path to checkpoint file (e.g. 'model/PilotNet/best_PilotNetStatic_run1.pt')
+        device (str): Device to load model onto ('cpu' or 'cuda')
+        **model_kwargs: Extra arguments to pass to the model constructor (needed if state_dict only)
+
+    Returns:
+        torch.nn.Module: Loaded model
+    """
+    fname = os.path.basename(path)
+    match = re.search(r"best_(.+?)_run\d+\.pt", fname)
+    if not match:
+        raise ValueError(f"Could not parse class name from filename: {fname}")
+    class_name = match.group(1)
+
+    dir_path = os.path.dirname(os.path.dirname(os.path.dirname(path)))           # "model/PilotNet"
+    module_path = dir_path.replace("/", ".")   # "model.PilotNet"
+    module_path = module_path + ".model"       # append ".model"
+
+    module = importlib.import_module(module_path)
+    cls = getattr(module, class_name)
+
+    try:
+        state_dict = torch.load(path, map_location=device)
+        if isinstance(state_dict, dict):
+            model = cls(**model_kwargs)
+            model.load_state_dict(state_dict)
+            model.to(device).eval()
+            return model
+    except Exception:
+        torch.serialization.add_safe_globals([cls])
+        model = torch.load(path, weights_only=False, map_location=device)
+        model.to(device).eval()
+        return model
 
 def get_recording_duration(log_path: str) -> float:
     """
@@ -42,6 +82,12 @@ def get_recording_duration(log_path: str) -> float:
     
 def main(args):
     pygame.init()
+
+    if args.model_path is not None:
+        model = load_model_from_checkpoint(args.model_path, device = "cuda")
+        model = torch.compile(model).eval().to(next(model.parameters()).device)
+    else:
+        model = None
 
     script_path = os.path.abspath(__file__)
     folder = os.path.dirname(script_path)
@@ -73,8 +119,9 @@ def main(args):
 
     duration = get_recording_duration(path_2_recording)
     client.show_recorder_file_info(path_2_recording, False)
-    start = 1.2; stop = 2
-    client.replay_file(path_2_recording, start, duration - start - stop, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
+    start = 1.2; stop = 4
+    duration -= start + stop
+    client.replay_file(path_2_recording, start, duration, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
     # client.replay_file(path_2_recording, 50, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
     # client.replay_file(path_2_recording, 170, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
     # client.replay_file(path_2_recording, 240, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
@@ -87,7 +134,7 @@ def main(args):
     
     game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
     game_viewer.init_sensor([rgb_sensor, semantic_sensor, gnss_sensor, imu_sensor, depth_sensor])
-    game_viewer.run(replay_logging = [path_2_waypoints, duration], use_temporal_wp = args.temporal, data_collect_dir = dataset_dir, debug = args.debug)
+    game_viewer.run(replay_logging = [path_2_waypoints, duration], use_temporal_wp = args.temporal, data_collect_dir = dataset_dir, debug = args.debug, model = model)
 
     client.stop_replayer(True)
     
@@ -149,6 +196,11 @@ if __name__ == "__main__":
         type = str,
         default = None,
         help = "Data collection directory for DNN training"
+    )
+    argparser.add_argument(
+        "--model-path",
+        type = str,
+        help = "Path to models file as well as its class reference",
     )
     
     args = argparser.parse_args()

@@ -1,3 +1,4 @@
+import os, sys
 import torch
 
 from tqdm.auto import tqdm
@@ -93,8 +94,6 @@ class PilotNetStatic(nn.Module):
             else:
                 return final_out
 
-import cv2
-import numpy as np
 def single_epoch_training_static(model: PilotNetStatic, mode: Literal["steer", "waypoint"], loader: DataLoader, criterion: nn, optimizer: optim, l1 = 0.0, l2 = 0.0):
     model.train()
     device = next(model.parameters()).device
