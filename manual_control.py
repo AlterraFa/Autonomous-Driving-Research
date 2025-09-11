@@ -9,8 +9,8 @@ import datetime
 from functools import partial
 import re
 
-from utils.spawner import Spawn, VehicleClass as VClass
-from utils.sensor_spawner import (
+from utils.spawn.actor_spawner import Spawn, VehicleClass as VClass
+from utils.spawn.sensor_spawner import (
     SemanticSegmentation as SemSeg, 
     RGB,
     GNSS,
@@ -177,6 +177,3 @@ if __name__ == "__main__":
     args.width, args.height = [int(x) for x in args.res.split('x')]
 
     main(args)
-    []
-    [0, 2, 1, 3, 4, 5, 7]
-    [0, 2, 3, 6, 10, 15, 22]

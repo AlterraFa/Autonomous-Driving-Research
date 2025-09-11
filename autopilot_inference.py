@@ -42,7 +42,7 @@ def load_model_from_checkpoint(path: str, device: str = "cpu", **model_kwargs):
         raise ValueError(f"Could not parse class name from filename: {fname}")
     class_name = match.group(1)
 
-    dir_path = os.path.dirname(path)           # "model/PilotNet"
+    dir_path = os.path.dirname(os.path.dirname(os.path.dirname(path)))           # "model/PilotNet"
     module_path = dir_path.replace("/", ".")   # "model.PilotNet"
     module_path = module_path + ".model"       # append ".model"
 
