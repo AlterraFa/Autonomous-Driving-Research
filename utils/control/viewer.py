@@ -224,18 +224,42 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         replayer  = ReplayHandler(replay_logging[0], self.virt_world, data_collect_dir, use_temporal_wp, debug) if replay_logging else None
         inference = AsyncInference(model) if model is not None else None
 
+        # H, W, _    = 720, 1280, 3
+        # x_top_left = 0; x_top_right = W - x_top_left    
+        # x_bot_left = 0; x_bot_right = W - x_bot_left
+        # y_hor      = 390; y_bot         = 720
+        # src_points = np.float32([[x_top_left, y_hor],
+        #                         [x_top_right, y_hor],
+        #                         [x_bot_right, y_bot],
+        #                         [x_bot_left, y_bot]])
+        # width = 300; height = 150
+        # dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
+
+
         H, W, _    = 720, 1280, 3
-        x_top_left = 280; x_top_right = W - x_top_left
-        x_bot_left = 180; x_bot_right = W - x_bot_left
+        x_top_left = 70; x_top_right = W - x_top_left
+        x_bot_left = 20; x_bot_right = W - x_bot_left
         y_hor      = 390; y_bot         = 720
         src_points = np.float32([[x_top_left, y_hor],
                                 [x_top_right, y_hor],
                                 [x_bot_right, y_bot],
                                 [x_bot_left, y_bot]])
-        width = 250; height = 150
+        width = 270; height = 150
         dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
 
-        M = cv2.getPerspectiveTransform(src_points, dst_points)
+
+        # H, W, _    = 720, 1280, 3
+        # x_top_left = 280; x_top_right = W - x_top_left
+        # x_bot_left = 180; x_bot_right = W - x_bot_left
+        # y_hor      = 390; y_bot         = 720
+        # src_points = np.float32([[x_top_left, y_hor],
+        #                         [x_top_right, y_hor],
+        #                         [x_bot_right, y_bot],
+        #                         [x_bot_left, y_bot]])
+        # width = 250; height = 150
+        # dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
+
+
         # H, W, _    = 720, 1280, 3
         # x_top_left = 480; x_top_right = W - x_top_left
         # x_bot_left = 380; x_bot_right = W - x_bot_left
@@ -247,7 +271,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         # width = 209; height = 150
         # dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
 
-        # M = cv2.getPerspectiveTransform(src_points, dst_points)
+        M = cv2.getPerspectiveTransform(src_points, dst_points)
         frame_id = 0
         try:
             self.last_platform_time = None; 
@@ -289,13 +313,15 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                     
                     if frame_id % 1 == 0:
                         inp = cv2.warpPerspective(frame[:, :, :3], M, (width, height))
-                        cv2.imshow("Test", inp)
-                        cv2.waitKey(1)
                         turn_signal = self.sub_turn_signal.receive()
                         inference.put(inp, turn_signal)
                         steer = inference.get()
                         if steer is not None:
                             self.send_model_steer.send(float(steer))
+                        
+                        preview_h, preview_w, _ = inp.shape
+                        inp_surface = self.to_surface(inp[:, :, ::-1])
+                        self.display.blit(inp_surface, (self.width - preview_w - 10, self.height - preview_h - 10))
                     frame_id += 1
                     
                     # local_wp = infer(model, inp)[0]
