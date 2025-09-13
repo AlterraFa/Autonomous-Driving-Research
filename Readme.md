@@ -1,1 +1,1 @@
-![Demo]("./media/model_infer_branch-ezgif.com-video-to-gif-converter.gif")
+![Demo](./media/model_infer_branch-ezgif.com-video-to-gif-converter.gif)
