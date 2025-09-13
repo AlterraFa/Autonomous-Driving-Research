@@ -66,6 +66,7 @@ def load_model_from_checkpoint(path: str, device: str = "cpu", **model_kwargs):
 def main(args):
     pygame.init()
 
+    torch.set_float32_matmul_precision('highest')
     model = load_model_from_checkpoint(args.model_path, device = "cuda")
     model = torch.compile(model).eval().to(next(model.parameters()).device)
 

@@ -54,8 +54,8 @@ if __name__ == "__main__":
     mode  = "steer"
     run   = get_next_run(experiment_name)
 
-    dummy = torch.zeros((1, 3, 250, 150)).to(gpu)
-    model = PilotNetStatic(mode = mode, num_waypoints = 5, num_cmd = 4, droprate = 0.15).to(gpu) 
+    dummy = torch.zeros((1, 3, 300, 150)).to(gpu)
+    model = PilotNetStatic(mode = mode, num_waypoints = 5, num_cmd = 4, droprate = 0.25).to(gpu) 
     model(dummy)  # Initialize dummy layers
 
     log_dir = f"{FILE_DIR}/model/PilotNet/{experiment_name}/run{run}"
@@ -104,7 +104,7 @@ if __name__ == "__main__":
         writer.add_scalar("Loss/Total Validation", val_metrics["Total"],         epoch+1)
         writer.add_scalar("Misc/LearningRate", currentLr,                 epoch+1)
 
-        earlystop(val_metrics['Total'], model)
+        earlystop(val_metrics['Cost'], model)
         if earlystop.early_stop:
             print(f"STOPPED AT EPOCH {epoch}")
             break

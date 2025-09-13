@@ -1,8 +1,12 @@
 - Saving is corrupted or wrong in ReplayHandler
-- Ego waypoint location is wrong for temporal
+- Ego waypoint location is wrong4
 - RGB (Pygame) or BGR (Opencv) format mismatch
 - Overal arch of PilotNet is wrong
 - Filter ruins control input for Dynamic Version
-- Forgetting to use ROI region (x)
+- Forgetting to use ROI region
 - Waypoint output using linear layer is wrong
 - Wrong l1, l2 loss
+
+- The model overfits on paveway visual cues
+- Shaded area has worse performance
+- Will move to another lane if continuously pressing turn signals and if there's drivable lane
