@@ -22,17 +22,80 @@ from utils.messages.message_handler import (
     MessagingSenders,
     MessagingSubscribers 
 )
+from utils.messages.logger import Logger
 
 from typing import Optional
-from rich import print
 from typing import Union, Dict
 from traceback import print_exc
         
 
+def generate_controller_doc(keybinds: dict, joybinds: dict) -> str:
+    """
+    Generate documentation string for Controller based on KEYBINDS and JOYBINDS.
+    """
+    import pygame
+
+    # Map pygame key constants to readable names
+    key_names = {k: pygame.key.name(k).upper() for k in keybinds.keys()}
+
+    doc = []
+    doc.append("Welcome to CARLA Manual Control (Custom Controller).\n")
+    doc.append("Controls can be provided via Keyboard or Joystick.")
+    doc.append("Joystick (if detected) is prioritized automatically.")
+    doc.append("If no joystick is found, keyboard input is used as fallback.\n")
+
+    doc.append("----------------------------------------")
+    doc.append("Keyboard Controls")
+    doc.append("----------------------------------------")
+    for k, func in keybinds.items():
+        doc.append(f"    {key_names[k]:<12} : {func.replace('toggle_', '').replace('_', ' ')}")
+
+    # Always include quit keys
+    doc.append(f"    {'K/ESC':<12} : quit program")
+
+    doc.append("\n----------------------------------------")
+    doc.append("Joystick Controls")
+    doc.append("----------------------------------------")
+    doc.append("Axes:")
+    doc.append("    Left Stick X : steer left / right (with deadzone and curve applied)")
+    doc.append("    RT (Right Trigger) : throttle")
+    doc.append("    LT (Left Trigger)  : brake\n")
+
+    doc.append("Hats (D-pad):")
+    doc.append("    Up           : switch to First Person view")
+    doc.append("    Down         : switch to Third Person view")
+    doc.append("    Left / Right : step camera left / right\n")
+
+    doc.append("Buttons:")
+    for btn, func in joybinds.items():
+        doc.append(f"    Button {btn:<3} : {func.replace('toggle_', '').replace('_', ' ')}")
+
+    doc.append("\n----------------------------------------")
+    doc.append("Modes")
+    doc.append("----------------------------------------")
+    doc.append("    • Autopilot and Model Autopilot are mutually exclusive.")
+    doc.append("      Enabling one disables the other automatically.\n")
+    doc.append("    • Regulate Speed mode maintains a constant velocity until disabled.\n")
+
+    doc.append("----------------------------------------")
+    doc.append("Notes")
+    doc.append("----------------------------------------")
+    doc.append("    • Deadzones:")
+    doc.append("        Stick deadzone   = 0.12")
+    doc.append("        Trigger deadzone = 0.05\n")
+    doc.append("    • Steering curve applied for smoother control:")
+    doc.append("        steer_curve = 3\n")
+    doc.append("    • Keyboard inputs are only active when Model Autopilot is OFF.")
+    doc.append("      In Model Autopilot mode, keys [W/A/D] send turn signal messages.")
+
+    return "\n".join(doc)
+
+Logger().INFO(generate_controller_doc(KEYBINDS, JOYBINDS))
 
 
 class CarlaViewer(MessagingSenders, MessagingSubscribers):
     def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, sync: bool = False, fps: int = 70):
+        self.log = Logger() 
         MessagingSenders.__init__(self)
         MessagingSubscribers.__init__(self)
 
@@ -78,7 +141,8 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
             self.active_cam_idx = 0
             self.choosen_sensor = self.sensors_list[self.camera_keys[self.active_cam_idx]]
             
-            print(f"[[blue]INFO[/] [purple]({self.__class__.__name__})[/]]: Defaulting to {self.choosen_sensor.literal_name}")
+            self.log.INFO(f"Defaulting to {self.choosen_sensor.literal_name}")
+
 
     def switch_camera(self, step=1):
         """Switch between camera sensors"""
@@ -90,7 +154,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         cam_name = self.camera_keys[self.active_cam_idx]
         self.choosen_sensor = self.sensors_list[cam_name]
 
-        print(f"[[blue]INFO][/] Switched to camera: {self.choosen_sensor.literal_name}")
+        self.log.DEBUG(f"Switched to camera - [bold]{self.choosen_sensor.literal_name}[/]")
 
     def init_win(self, title: str = "CARLA Camera") -> None:
         pygame.init()
@@ -224,18 +288,6 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         replayer  = ReplayHandler(replay_logging[0], self.virt_world, data_collect_dir, use_temporal_wp, debug) if replay_logging else None
         inference = AsyncInference(model) if model is not None else None
 
-        # H, W, _    = 720, 1280, 3
-        # x_top_left = 0; x_top_right = W - x_top_left    
-        # x_bot_left = 0; x_bot_right = W - x_bot_left
-        # y_hor      = 390; y_bot         = 720
-        # src_points = np.float32([[x_top_left, y_hor],
-        #                         [x_top_right, y_hor],
-        #                         [x_bot_right, y_bot],
-        #                         [x_bot_left, y_bot]])
-        # width = 300; height = 150
-        # dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
-
-
         H, W, _    = 720, 1280, 3
         x_top_left = 70; x_top_right = W - x_top_left
         x_bot_left = 20; x_bot_right = W - x_bot_left
@@ -246,30 +298,6 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                                 [x_bot_left, y_bot]])
         width = 270; height = 150
         dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
-
-
-        # H, W, _    = 720, 1280, 3
-        # x_top_left = 280; x_top_right = W - x_top_left
-        # x_bot_left = 180; x_bot_right = W - x_bot_left
-        # y_hor      = 390; y_bot         = 720
-        # src_points = np.float32([[x_top_left, y_hor],
-        #                         [x_top_right, y_hor],
-        #                         [x_bot_right, y_bot],
-        #                         [x_bot_left, y_bot]])
-        # width = 250; height = 150
-        # dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
-
-
-        # H, W, _    = 720, 1280, 3
-        # x_top_left = 480; x_top_right = W - x_top_left
-        # x_bot_left = 380; x_bot_right = W - x_bot_left
-        # y_hor      = 390; y_bot         = 720
-        # src_points = np.float32([[x_top_left, y_hor],
-        #                         [x_top_right, y_hor],
-        #                         [x_bot_right, y_bot],
-        #                         [x_bot_left, y_bot]])
-        # width = 209; height = 150
-        # dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
 
         M = cv2.getPerspectiveTransform(src_points, dst_points)
         frame_id = 0
@@ -283,7 +311,10 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                 self.data_bus(replay_logging != None)
 
                 frame = self.choosen_sensor.extract_data()
-                H, W, _ = frame.shape
+                try:
+                    H, W, _ = frame.shape
+                except:
+                    H, W = frame.shape
 
 
                 if frame is not None:
@@ -311,7 +342,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                 if model and self.controller.model_autopilot:
                     
                     
-                    if frame_id % 1 == 0:
+                    if frame_id % 5 == 0:
                         inp = cv2.warpPerspective(frame[:, :, :3], M, (width, height))
                         turn_signal = self.sub_turn_signal.receive()
                         inference.put(inp, turn_signal)
@@ -331,7 +362,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                 
 
                 if replay_logging is not None and replay_logging[1] <= self.sub_server_runtime.receive():
-                    print(f"[[yellow]WARNING[/] [purple]({self.__class__.__name__})[/]]: Reached replay limit. Goodbye")
+                    self.log.INFO("Reached replay limit. Goodbye.")
                     break
 
                 pygame.display.flip()
@@ -341,11 +372,10 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
 
 
         except KeyboardInterrupt:
-            print(f"[[yellow]WARNING from [purple]({self.__class__.__name__})[/]]: Viewer interrupted by user[/]")
+            self.log.WARNING("Viewer interrupted by user")
             self.controller.running = False
         except Exception as e:
-            print(f"[[red]ERROR from [purple]({self.__class__.__name__})[/]]: Viewer error: {e}[/]")
-            print_exc()
+            self.log.ERROR("Viewer error", full_traceback = e)
             self.controller.running = False
         finally:
             self.virt_vehicle.stop()
@@ -355,7 +385,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
 
     def close(self) -> None:
         
-        print(f"[[blue]INFO[/] [purple]({self.__class__.__name__})[/]: Closing CarlaViewer...")
+        self.log.WARNING("Closing CarlaViewer...")
 
         for name, sensor in list(self.sensors_list.items()):
             sensor.destroy()
@@ -364,27 +394,28 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         try:
             if pygame.get_init():
                 pygame.quit()
-                print(f"[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: Pygame closed successfully")
+                self.log.CUSTOM("SUCCESS", "Pygame closed successfully!")
         except Exception as e:
-            print(f"[[red]ERROR[/] [purple]({self.__class__.__name__})[/]]: Pygame quit failed: {e}")
+            self.log.ERROR("Pygame quit failed", full_traceback = e)
         
 class Controller(MessagingSenders):
     def __init__(self):
+        self.log = Logger()
         MessagingSenders.__init__(self)
         pygame.joystick.init()
 
         self.has_joystick = pygame.joystick.get_count() > 0
         if self.has_joystick:
-            print(f"[[blue]INFO[/] [purple]({self.__class__.__name__})[/]]: Joystick detected, prioritized using it")
+            self.log.INFO("Joystick detected, prioritized using it")
             joystick = pygame.joystick.Joystick(0)
             self.joystick = joystick
             self.joystick.init()
-            print(f"[[blue]INFO[/] [purple]({self.__class__.__name__})[/]]: Joystick name:", joystick.get_name())
-            print(f"[[blue]INFO[/] [purple]({self.__class__.__name__})[/]]: Number of axes:", joystick.get_numaxes())
-            print(f"[[blue]INFO[/] [purple]({self.__class__.__name__})[/]]: Number of buttons:", joystick.get_numbuttons())
-            print(f"[[blue]INFO[/] [purple]({self.__class__.__name__})[/]]: Number of hats:", joystick.get_numhats())
+            self.log.DEBUG(f"Joystick name: {joystick.get_name()}")
+            self.log.DEBUG(f"Number of axes: {joystick.get_numaxes()}")
+            self.log.DEBUG(f"Number of buttons: {joystick.get_numbuttons()}")
+            self.log.DEBUG(f"Number of hats: {joystick.get_numhats()}")
         else:
-            print(f"[[yellow]WARNING[/] [purple]({self.__class__.__name__})[/]]: No joystick detected. Falling back to keyboard input")
+            self.log.WARNING("No joystick detected. Falling back to keyboard input")
 
         self.deadzone_stick = 0.12
         self.deadzone_trigger = 0.05
@@ -403,6 +434,7 @@ class Controller(MessagingSenders):
         self.reverse = False
         self.hand_brake = False
         self.regulate_speed = False
+        
         
     def _apply_deadzone(self, x: float, dz: float) -> float:
         if abs(x) < dz:
@@ -439,12 +471,12 @@ class Controller(MessagingSenders):
                 if event.key == pygame.K_UP:
                     self.view_name = "FIRST_PERSON"
                     self.view_changed = True
-                    print(f"[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: View toggled → [i]{'First Person'}[/i]")
+                    self.log.DEBUG(f"View toggled → [i]{'First Person'}[/i]")
 
                 elif event.key == pygame.K_DOWN:
                     self.view_name = "THIRD_PERSON"
                     self.view_changed = True
-                    print(f"[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: View toggled → [i]{'Third Person'}[/i]")
+                    self.log.DEBUG(f"View toggled → [i]{'Third Person'}[/i]")
 
                 elif event.key == pygame.K_RIGHT:
                     self.camera_changed = True
@@ -459,35 +491,39 @@ class Controller(MessagingSenders):
                 hx, hy = event.value
                 if hy == 1:
                     self.view_name = "FIRST_PERSON"; self.view_changed = True
-                    print(f"[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: View toggled → [i]{'First Person'}[/i]")
+                    self.log.DEBUG(f"View toggled → [i]{'First Person'}[/i]")
                 elif hy == -1:
                     self.view_name = "THIRD_PERSON"; self.view_changed = True
-                    print(f"[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: View toggled → [i]{'Third Person'}[/i]")
+                    self.log.DEBUG(f"View toggled → [i]{'Third Person'}[/i]")
                 if hx != 0:
                     self.camera_changed = True
                     self.camera_step = 1 if hx > 0 else -1
     
     def toggle_autopilot(self):
         self.autopilot = not self.autopilot
-        print(f"[[yellow]WARNING[/] [purple]({self.__class__.__name__})[/]]: Autopilot toggled → "
+        self.log.WARNING(
+            f"Autopilot toggled → "
             f"[i][{'green' if self.autopilot else 'red'}]"
-            f"{'Engaged' if self.autopilot else 'Disengaged'}[/i][/]")
+            f"{'Engaged' if self.autopilot else 'Disengaged'}[/i][/]"
+        )
 
         if self.autopilot == True:
             self.model_autopilot = False
 
     def toggle_model_autopilot(self):
         self.model_autopilot = not self.model_autopilot
-        print(f"[[yellow]WARNING[/] [purple]({self.__class__.__name__})[/]]: Model inference toggled → "
+        self.log.WARNING(
+            f"Model inference toggled → "
             f"[i][{'green' if self.model_autopilot else 'red'}]"
-            f"{'Engaged' if self.model_autopilot else 'Disengaged'}[/i][/]")
+            f"{'Engaged' if self.model_autopilot else 'Disengaged'}[/i][/]"
+        )
         
         if self.model_autopilot == True:
             self.autopilot = False
 
     def toggle_reverse(self):
         self.reverse = not self.reverse
-        print(f"[[blue]INFO[/] [purple]({self.__class__.__name__})[/]]: Reverse {'ON' if self.reverse else 'OFF'}")
+        self.log.INFO(f"Reverse [bold][i]{'ON' if self.reverse else 'OFF'}[/][/]")
 
     def toggle_hand_brake(self):
         self.hand_brake = not self.hand_brake

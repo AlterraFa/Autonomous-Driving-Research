@@ -6,8 +6,8 @@ parent = os.path.dirname(folder)
 import ast
 import carla
 import numpy as np
-from rich import print
 import configparser
+from utils.messages.logger import Logger   # <-- import your Logger instead of rich.print
 
 config = configparser.ConfigParser()
 config.read(parent + "/../config/config.ini")
@@ -24,6 +24,8 @@ class World:
         self.sync = False; self.delta = delta
         self.timeout = 1.0; self.disable_render = False
         self.settings: carla.WorldSettings = self.world.get_settings()
+
+        self.log = Logger()   # <-- attach logger to this class
         
     def switch_map(self, name: str):
         self.client.load_world(name)
@@ -35,9 +37,18 @@ class World:
         self.settings.no_rendering_mode = self.disable_render
         self.world.apply_settings(self.settings)
         self.tm.set_synchronous_mode(self.sync)
+        
+        self.log.DEBUG(
+            f"[World] Applied settings:\n"
+            f"    synchronous_mode={self.settings.synchronous_mode}\n"
+            f"    fixed_delta_seconds={self.settings.fixed_delta_seconds}\n"
+            f"    no_rendering_mode={self.settings.no_rendering_mode}\n"
+            f"    timeout={self.timeout}\n"
+            f"    tm_port={self.tm.get_port()}"
+        )
 
     def factory_reset(self):
-        print(f"[[yellow]WARNING[/] [purple]({self.__class__.__name__})[/]]: Reseting world to factory")
+        self.log.DEBUG("Reseting world to factory")
         self.sync = False
         self.settings.synchronous_mode = self.sync
         self.settings.fixed_delta_seconds = self.delta if self.sync else None
@@ -45,8 +56,8 @@ class World:
             self.tm.set_synchronous_mode(self.sync)
             self.world.apply_settings(self.settings)
         except Exception as e:
-            print(f"[[red]ERROR[/] [purple]({self.__class__.__name__})[/]]: Failed to reset world -> {e}")
-        print(f"[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: World reset to async")
+            self.log.ERROR(f"Failed to reset world -> {e}", e)
+        self.log.CUSTOM("SUCCESS", "World reset to [bold]factory default[/]")
 
     def draw_waypoints(self, waypoints, duration: float = 1, color: tuple = (0, 255, 0), size = 0.1):
         for point in waypoints:
@@ -61,7 +72,5 @@ class World:
         wp = self.map.get_waypoint(carla.Location(*location))
         if wp.is_junction:
             junction = wp.get_junction()
-            if junction.id not in excluded_junctions: # Not a 2 way junction
-                return True, junction
-            return False, None
-        return False, None
+            if junction.id not in excluded_junctions:  # Not a 2 way junction
+                return True,

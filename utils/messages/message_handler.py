@@ -1,12 +1,5 @@
 """INSPIRATION TAKEN FROM BFMC ECC"""
-
-import inspect
-import queue
-
-from multiprocessing import Pipe, Queue
-from typing import Literal
-from rich import print
-
+from utils.messages.logger import Logger
 from utils.messages.all_messages import *
 
 class MessageBroker:
@@ -37,6 +30,7 @@ class MessageSender:
         MessageBroker.put(self.message.Queue.value, payload)
 class MessageSubscriber:
     def __init__(self, message):
+        self.log = Logger()
         self._message = message
 
     def receive(self, return_payload = False):
@@ -54,10 +48,11 @@ class MessageSubscriber:
 
         expected_types = self._message.msgType.value
         if not isinstance(msg["msgValue"], expected_types):
-            print(
-                f"[WARN]: Type mismatch for {self._message}: "
+            self.log.WARNING(
+                f"Type mismatch for {self._message}: "
                 f"got {type(msg['msgValue']).__name__}, "
-                f"expected {[t.__name__ for t in expected_types]}"
+                f"expected {[t.__name__ for t in expected_types]}", 
+                once = True
             )
         return msg["msgValue"] if not return_payload else msg
     

@@ -5,11 +5,11 @@ import cv2
 
 from utils.lidar_visualization import LIDARVisualizer
 from utils.callback import Extractor
+from utils.messages.logger import Logger
 
 from config.enum import CarlaLabel
 from typing import Optional
 from pathlib import Path
-from rich import print
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -17,6 +17,7 @@ np.printoptions(5)
     
 class SensorSpawn(object):
     def __init__(self, name, world: carla.World):
+        self.log          = Logger()
         self.name         = name
         self.sensor_bp    = world.get_blueprint_library().find(self.name)
         self.world        = world
@@ -41,7 +42,7 @@ class SensorSpawn(object):
         
         self.actor = self.world.spawn_actor(self.sensor_bp, transform, attach_to = attach_to)
         self.actor.listen(self.callback.put)
-        print(f"[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: Sensor [bold]{self.literal_name}[/bold] spawned successfully. Listening to it")
+        self.log.INFO(f"Sensor [blue][bold]{self.literal_name}[/bold][/] spawned successfully. Listening to it")
     
     def change_view(self, **kwargs):
         loc = carla.Location(
@@ -64,7 +65,7 @@ class SensorSpawn(object):
         if hasattr(self, "actor"):
             self.actor.stop()
             self.actor.destroy()
-            print(f"[[green]INFO[/] [purple]({self.__class__.__name__})[/]]: Sensor [bold]{self.literal_name}[/bold] stopped and destroyed")
+            self.log.INFO(f"Sensor [blue][bold]{self.literal_name}[/bold][/] stopped and destroyed")
     
     @staticmethod
     def __literal_name__(name: str):

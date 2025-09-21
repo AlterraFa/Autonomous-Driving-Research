@@ -4,6 +4,7 @@ from scipy.interpolate import interp1d
 from utils.messages.message_handler import MessagingSenders, MessagingSubscribers
 from utils.data_processor import CarlaDatasetCollector
 from utils.coordinate_transform import global_2_local
+from utils.messages.logger import Logger
 
 def wrap_to_pi(theta):
     return (theta + np.pi) % (2 * np.pi) - np.pi
@@ -38,6 +39,7 @@ class PathHandler(NodeFinder):
       (N,4) -> [x, y, z, t]   (t = delta time recording)
     """
     def __init__(self, defined_path: np.ndarray):
+        self.log = Logger()
         super().__init__(10, defined_path)
 
         assert defined_path.ndim == 2 and defined_path.shape[1] in (3, 4), \
@@ -77,6 +79,8 @@ class PathHandler(NodeFinder):
 
         # --- interpolation in t if available ---
         if self.has_time:
+            self.log.DEBUG("Found time vector. Enabling spatial and temporal mode")
+            
             self.timer = 0
             t_col = defined_path[:, -1].astype(float)[keep]
             self.t = np.cumsum(t_col)
@@ -91,6 +95,8 @@ class PathHandler(NodeFinder):
                                    bounds_error=False, fill_value="extrapolate")
 
         else:
+            self.log.DEBUG("Didn't find time vector. Disabling temporal mode")
+
             self.t = None
             
 
@@ -194,6 +200,9 @@ class PathHandler(NodeFinder):
             for offset in offsets:
                 wp += [self.pose(dist_travelled + 2 + offset)]
         else: 
+            if self.has_time == False:
+                self.log.ERROR(f"Temporal mode was disabled but you enabled `use_time` argument. Exiting...")
+                exit(-1)
             current_time = self.t_of_s(dist_travelled)
             wp = []
             for offset in offsets:
