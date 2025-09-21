@@ -1,7 +1,7 @@
 import carla
 
 client = carla.Client("localhost", 2000)
-client.load_world("BFMC_Road_Building")
+client.load_world("BFMC_Road")
 
 world  = client.get_world()
 

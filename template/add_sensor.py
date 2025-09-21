@@ -79,3 +79,5 @@ if __name__ == "__main__":
         camera.stop()
         camera.destroy()
         print("Camera nuked")
+    settings.synchronous_mode = False
+    settings.fixed_delta_seconds = None
