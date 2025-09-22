@@ -131,9 +131,9 @@ class VENL(nn.Module):
         determ_in  = torch.hstack([out, routed_features])
         determ_out = self.determ_head(self.fusion_projector(determ_in))
         
-        return self._gaussian_parameters(gmm_out), determ_out
+        return self._extract_gparams(gmm_out), determ_out
         
-    def _gaussian_parameters(self, gmm_params: torch.Tensor):
+    def _extract_gparams(self, gmm_params: torch.Tensor):
         if not hasattr(self, "num_waypoints"):
             weights, muy_weights, sigma_weights = torch.chunk(gmm_params, 3, 1) # predetermined 3 parameters correspond to 3 chunks 
 
