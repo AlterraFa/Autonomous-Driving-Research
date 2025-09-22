@@ -127,10 +127,8 @@ def main(args):
     # client.replay_file(path_2_recording, 240, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
     # client.replay_file(path_2_recording, 760, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
 
-    vehicle = wait_for_actor_by_role(virt_world.world, "ego")
-    if vehicle is None:
-        raise RuntimeError("Could not find a vehicle with role_name='ego' in the replay.")
-    controlling_vehicle = Vehicle(vehicle, virt_world.world)
+    spawner.wait_for_actor_by_role("ego")
+    controlling_vehicle = Vehicle(spawner.single_vehicle, virt_world.world)
     
     game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
     game_viewer.init_sensor([rgb_sensor, semantic_sensor, gnss_sensor, imu_sensor, depth_sensor])

@@ -3,8 +3,8 @@ import numpy as np
 import json
 import cv2
 
-from utils.lidar_visualization import LIDARVisualizer
-from utils.callback import Extractor
+from utils.others.lidar_visualization import LIDARVisualizer
+from utils.spawn.callback import Extractor
 from utils.messages.logger import Logger
 
 from config.enum import CarlaLabel
