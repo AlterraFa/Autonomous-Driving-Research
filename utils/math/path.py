@@ -2,8 +2,8 @@ import numpy as np
 import carla
 from scipy.interpolate import interp1d
 from utils.messages.message_handler import MessagingSenders, MessagingSubscribers
-from utils.data_processor import CarlaDatasetCollector
-from utils.coordinate_transform import global_2_local
+from utils.others.data_processor import CarlaDatasetCollector
+from utils.math.coordinate_transform import global_2_local
 from utils.messages.logger import Logger
 
 def wrap_to_pi(theta):
