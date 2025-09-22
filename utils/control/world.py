@@ -39,7 +39,7 @@ class World:
         self.tm.set_synchronous_mode(self.sync)
         
         self.log.DEBUG(
-            f"[World] Applied settings:\n"
+            f"Applied settings:\n"
             f"    synchronous_mode={self.settings.synchronous_mode}\n"
             f"    fixed_delta_seconds={self.settings.fixed_delta_seconds}\n"
             f"    no_rendering_mode={self.settings.no_rendering_mode}\n"

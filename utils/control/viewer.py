@@ -271,7 +271,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.send_gear_logging.send(self.ctrl['gear'])
         
     def run(self, 
-            model = None,
+            model_path = None,
             save_logging: str = None, 
             use_temporal_wp: bool = False, 
             data_collect_dir: str = None, 
@@ -286,7 +286,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         
         logger    = TrajectoryBuffer(save_logging, min_dt_s = .2) if save_logging else None
         replayer  = ReplayHandler(replay_logging[0], self.virt_world, data_collect_dir, use_temporal_wp, debug) if replay_logging else None
-        inference = AsyncInference(model) if model is not None else None
+        inference = AsyncInference.load_model(model_path) if model_path is not None else None
 
         H, W, _    = 720, 1280, 3
         x_top_left = 70; x_top_right = W - x_top_left
@@ -339,10 +339,10 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                     logger.update(self.sub_location.receive())
                 if replayer: 
                     replayer.step(frame)
-                if model and self.controller.model_autopilot:
+                if model_path and self.controller.model_autopilot:
                     
                     
-                    if frame_id % 5 == 0:
+                    if frame_id % 1 == 0:
                         inp = cv2.warpPerspective(frame[:, :, :3], M, (width, height))
                         turn_signal = self.sub_turn_signal.receive()
                         inference.put(inp, turn_signal)
@@ -382,6 +382,8 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
             self.close()
             if logger:
                 logger.finalize()
+            if inference is not None:
+                inference.stop()
 
     def close(self) -> None:
         

@@ -75,7 +75,11 @@ class PilotNetStatic(nn.Module):
         out = self.flatten(out)
         out = self.fc_stem(out)
 
-        if isinstance(branch, int):
+        if torch.onnx.is_in_onnx_export():
+            outputs = [b(out) for b in self.cmd_branch]
+            return torch.stack(outputs, dim=1)  # shape: (B, num_branches, output_dim)
+
+        if not self.training:
             out = self.cmd_branch[branch + 1](out)
             if self.mode == "waypoint":
                 return out.view(-1, self.output_dim // 2, 2)  # (B, num_wp, 2)
@@ -93,6 +97,10 @@ class PilotNetStatic(nn.Module):
                 return final_out.view(-1, self.output_dim // 2, 2)
             else:
                 return final_out
+    
+    @staticmethod
+    def postprocessor(output, data):
+        return output[:, data + 1][0, 0]
 
 def single_epoch_training_static(model: PilotNetStatic, mode: Literal["steer", "waypoint"], loader: DataLoader, criterion: nn, optimizer: optim, l1 = 0.0, l2 = 0.0):
     model.train()
