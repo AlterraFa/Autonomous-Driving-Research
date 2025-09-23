@@ -10,9 +10,13 @@ from model.PilotNet.WRN import BlockStack, ConvNeXt, ResnetBlock
 
 from typing import Literal
 class PilotNetStatic(nn.Module):
-    def __init__(self, mode: Literal["steer", "waypoint"] = "steer", num_waypoints: int = 1, num_cmd: int = 1, droprate = 0.1):
+    def __init__(self, mode: Literal["steer", "waypoint"] = "steer", *input_shape, num_waypoints: int = 1, num_cmd: int = 1, droprate = 0.1):
         super().__init__()
-        
+        self.input_metadata = {}
+        for i, shape in enumerate(input_shape):
+            self.input_metadata.update({f"I{i}": shape})
+            
+
         self.residual1 = BlockStack(ResnetBlock, 3, 48, 2, droprate, 3)
         self.residual2 = BlockStack(ResnetBlock, 48, 72, 2, droprate, 3)
         self.residual3 = BlockStack(ResnetBlock, 72, 96, 2, droprate, 3)

@@ -5,14 +5,13 @@ import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
 
-from rich import print
 from utils.messages.logger import Logger
 if not hasattr(np, "float"): np.float = np.float64
 
 class TensorRTHelper:
     def __init__(self, *args, **kwargs):
         self.log = Logger()
-        self.input_name = "images"
+        self.input_names = []
         self.output_name = "preds"
 
     
@@ -41,8 +40,8 @@ class TensorRTHelper:
             self.output_tensors = [n for n in names if modes[n] == trt.TensorIOMode.OUTPUT]
 
             # keep your preferred names if present
-            if self.input_name not in self.input_tensors and self.input_tensors:
-                self.input_name = self.input_tensors[0]
+            if self.input_names not in self.input_tensors and self.input_tensors:
+                self.input_names = self.input_tensors[0]
             if self.output_name not in self.output_tensors and self.output_tensors:
                 self.output_name = self.output_tensors[0]
             self.log.CUSTOM("SUCCESS", "Binding completed")
@@ -51,7 +50,7 @@ class TensorRTHelper:
         self.log.WARNING(f"Preparing engine bindings. Fall back to TRT legacy version {trt.__version__}")
         self.uses_io_tensors = False
         self.bindings = [None] * self.engine.num_bindings
-        self.input_idx  = self.engine.get_binding_index(self.input_name)
+        self.input_idx  = self.engine.get_binding_index(self.input_names)
         self.output_idx = self.engine.get_binding_index(self.output_name)
         self.log.CUSTOM("SUCCESS", "Binding completed")
 
@@ -72,13 +71,13 @@ class TensorRTHelper:
             if hasattr(self.context, "set_optimization_profile_async"):
                 self.context.set_optimization_profile_async(0, self.stream.handle)
 
-            self.context.set_input_shape(self.input_name, shape)
+            self.context.set_input_shape(self.input_names, shape)
             in_bytes = int(inp.nbytes)
             if self.d_in is None or getattr(self, "_in_bytes", 0) != in_bytes:
                 if self.d_in is not None: self.d_in.free()
                 self.d_in = cuda.mem_alloc(int(in_bytes))
                 self._in_bytes = in_bytes
-            self.context.set_tensor_address(self.input_name, int(self.d_in))
+            self.context.set_tensor_address(self.input_names, int(self.d_in))
 
             out_shapes = {}
             for name in self.output_tensors:
@@ -290,13 +289,12 @@ class ImageTensorRTExport(TensorRTHelper):
         self.engine = None
         self.context = None
 
-        self.input_name = "images"
+        self.input_names = []
         self.output_name = "preds"
         
         self.log = Logger()
 
-    @staticmethod
-    def load_model_from_checkpoint(path: str, device: str = "cpu", **model_kwargs):
+    def load_model_from_checkpoint(self, path: str, device: str = "cpu", **model_kwargs):
         """
         Load a model checkpoint, automatically finding the class recursively 
         in the package path that contains the checkpoint.
@@ -318,33 +316,47 @@ class ImageTensorRTExport(TensorRTHelper):
                 model = cls(**model_kwargs)
                 model.load_state_dict(state_dict)
                 model.to(device).eval()
-                return model
+                if not hasattr(model, "input_metadata"):
+                    self.log.ERROR("The model does not have `input_metadata`")
+                return model, model.input_metadata
         except Exception:
             torch.serialization.add_safe_globals([cls])
             model = torch.load(path, weights_only=False, map_location=device)
             model.to(device).eval()
-            return model
+            if not hasattr(model, "input_metadata"):
+                self.log.ERROR("The model does not have `input_metadata`")
+            return model, model.input_metadata
 
-    def export_onnx(self, net: torch.nn.Module, dummy_inp: tuple, onnx_path="yolo_raw.onnx",
-                    img_size=(640, 640), opset=13, dynamic=True):
-        H, W = img_size
+    def export_onnx(self, net: torch.nn.Module, inp_metadata: dict, onnx_path="model.onnx",
+                    opset=13, dynamic=True):
+
+        # REMEMBER TO CHANGE THE OUTPUT NAME IN THE NEXT UPDATE
 
         dynamic_axes = None
         if dynamic:
-            dynamic_axes = {
-                "images": {0: "batch", 2: "height", 3: "width"},
-                "preds":  {0: "batch", 1: "num_dets"}
-            }
+            dynamic_axes = {}
+            for name, shape in inp_metadata.items():
+                dynamic_axes[name] = {0: "batch"}
+                if len(shape) == 4:  # e.g. (N, C, H, W)
+                    dynamic_axes[name].update({2: "height", 3: "width"})
+            
+            dynamic_axes[self.output_name] = {0: "batch"}
 
+        dummy_inp        = []
+        self.input_names = []
+        for key, value in inp_metadata.items():
+            dummy_inp        += [torch.zeros(value)]
+            self.input_names += [key]
+        
         self.log.INFO("Exporting onnx")
         try:
             torch.onnx.export(
                 net, tuple(dummy_inp), onnx_path,
-                input_names=[self.input_name],
-                output_names=[self.output_name],
-                opset_version=opset,
-                do_constant_folding=True,
-                dynamic_axes=dynamic_axes
+                input_names   = self.input_names,
+                output_names  = [self.output_name],
+                opset_version = opset,
+                do_constant_folding = True,
+                dynamic_axes = dynamic_axes,
             )
         except Exception as e:
             self.log.ERROR("Export failed", exit_code = 13, full_traceback = e)
@@ -352,9 +364,9 @@ class ImageTensorRTExport(TensorRTHelper):
         self.log.CUSTOM("SUCCESS", f"Export complete. Path: {onnx_path}")
         return onnx_path
 
-    def build_engine(self, onnx_path, engine_path="yolo_raw.engine",
-                     fp16=True, workspace_gb=1.0,
-                     min_shape=(1,3,320,320), opt_shape=(1,3,640,640), max_shape=(1,3,960,960)):
+    def build_engine(self, onnx_path, engine_path,
+                     input_metadata, fp16 = True, workspace_gb = 1.0,
+                     min_batch = 1, opt_batch = 1, max_batch = 1):
         
         self.log.INFO("Exporting engine.")
         try:
@@ -380,7 +392,14 @@ class ImageTensorRTExport(TensorRTHelper):
 
             self.log.INFO("Optimizing profile. This might take some time...")
             profile = builder.create_optimization_profile()
-            profile.set_shape(self.input_name, min_shape, opt_shape, max_shape)
+            for name in self.input_names:
+                base_shape = list(input_metadata[name])  # e.g. (1, 3, 150, 270)
+
+                # Copy and replace batch dim
+                min_shape = tuple([min_batch] + base_shape[1:])
+                opt_shape = tuple([opt_batch] + base_shape[1:])
+                max_shape = tuple([max_batch] + base_shape[1:])
+                profile.set_shape(name, min_shape, opt_shape, max_shape)
             config.add_optimization_profile(profile)
 
             engine = None
@@ -418,12 +437,10 @@ class ImageTensorRTExport(TensorRTHelper):
 
     
     def export_and_build(self, weights_path: str = None,
-                         *dummy_inp, 
-                         img_size=(270, 150),
                          opset=13, dynamic=True, fp16=True,
-                         min_shape = (1, 3, 270, 150),
-                         opt_shape = (4, 3, 270, 150), 
-                         max_shape = (8, 3, 270, 150),
+                         min_batch = 1,
+                         opt_batch = 1, 
+                         max_batch = 1,
                          workspace_gb = 1.0, 
                          device = 'cpu'):
         if hasattr(self, "weights_path") == False:
@@ -441,7 +458,62 @@ class ImageTensorRTExport(TensorRTHelper):
         engine_path = base + ".engine"
         
 
-        net = self.load_model_from_checkpoint(weights_path, device = device)
-        self.export_onnx(net, dummy_inp, onnx_path = onnx_path, img_size = img_size, opset = opset, dynamic = dynamic)
-        self.build_engine(onnx_path, engine_path, fp16 = fp16, min_shape = min_shape, opt_shape = opt_shape, max_shape = max_shape, workspace_gb = workspace_gb)
+        net, input_metadata = self.load_model_from_checkpoint(weights_path, device = device)
+        self.export_onnx(net, input_metadata, onnx_path = onnx_path, opset = opset, dynamic = dynamic)
+        self.build_engine(onnx_path, engine_path, fp16 = fp16, input_metadata = input_metadata, min_batch = min_batch, opt_batch = opt_batch, max_batch = max_batch, workspace_gb = workspace_gb)
         return onnx_path, engine_path
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Export a PyTorch model to ONNX and build a TensorRT engine."
+    )
+    
+    parser.add_argument(
+        "--model-path", "-P",
+        required=True,
+        help="Path to the trained PyTorch model checkpoint (.pt file)."
+    )
+    parser.add_argument(
+        "--batch", "-B",
+        default="1.1.1",
+        help="Batch profile in the format 'min.opt.max' (e.g., 1.4.8). "
+             "min=minimum batch size, opt=optimized batch size, max=maximum batch size."
+    )
+    parser.add_argument(
+        "--workspace-gb",
+        default=1.0,
+        type=float,
+        help="Workspace memory limit for TensorRT in GB (default: 1.0)."
+    )
+    parser.add_argument(
+        "--use-fp16", "-fp16",
+        action="store_true",
+        help="Enable FP16 precision if supported by TensorRT."
+    )
+    
+    args = parser.parse_args()
+    
+    # --- Parse batch string ---
+    try:
+        parts = args.batch.split(".")
+        if len(parts) != 3:
+            raise ValueError
+        min_batch, opt_batch, max_batch = map(int, parts)
+    except Exception:
+        raise ValueError(
+            f"Invalid format for --batch '{args.batch}'. "
+            "Expected format: 'min.opt.max' (e.g., 1.4.8)."
+        )
+    
+    # --- Call exporter ---
+    exporter = ImageTensorRTExport()
+    exporter.export_and_build(
+        args.model_path, 
+        min_batch=min_batch,
+        opt_batch=opt_batch,
+        max_batch=max_batch,
+        workspace_gb=args.workspace_gb, 
+        fp16=args.use_fp16
+    )
