@@ -121,6 +121,7 @@ class AsyncInference:
     def _inference_tensorrt(self):
 
         self.ctx.push()
+        self.log.INFO("Started engine inference")
 
         while not self._event.is_set():
             with self._lock:
@@ -161,6 +162,7 @@ class AsyncInference:
             with self._lock:
                 self.output_data = output
         self.ctx.pop()
+        self.log.INFO("Engine inference stopped")
 
     def put(self, inp: tuple, processor_data: tuple):
         with self._lock:
@@ -239,6 +241,7 @@ class AsyncInference:
                 cls.log.DEBUG("Using default postprocessor")
                 cls.processor = cls.default_postprocessor
 
+            # Make a cuda context in main thread but then pop it out in order to push into worker thread
             cls.ctx = cuda.Device(0).make_context()
             cls.engine = ImageTensorRTInference()
             cls.engine.load_engine(path)
