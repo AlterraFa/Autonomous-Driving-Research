@@ -66,9 +66,9 @@ def load_model_from_checkpoint(path: str, device: str = "cpu", **model_kwargs):
 def main(args):
     pygame.init()
 
-    torch.set_float32_matmul_precision('highest')
-    model = load_model_from_checkpoint(args.model_path, device = "cuda")
-    model = torch.compile(model).eval().to(next(model.parameters()).device)
+    # torch.set_float32_matmul_precision('highest')
+    # model = load_model_from_checkpoint(args.model_path, device = "cuda")
+    # model = torch.compile(model).eval().to(next(model.parameters()).device)
 
     client = carla.Client(args.host, args.port)
     virt_world = World(client, args.traffic_port)
@@ -92,7 +92,7 @@ def main(args):
     
     game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
     game_viewer.init_sensor([rgb_sensor, semantic_sensor, gnss_sensor, imu_sensor, depth_sensor])
-    game_viewer.run(model = model)
+    game_viewer.run(model_path = args.model_path)
     
     
 if __name__ == "__main__":
