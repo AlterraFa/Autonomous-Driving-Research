@@ -15,7 +15,8 @@ class PilotNetStatic(nn.Module):
         self.input_metadata = {}
         for i, shape in enumerate(input_shape):
             self.input_metadata.update({f"I{i}": shape})
-            
+
+        self.output_names = [mode] 
 
         self.residual1 = BlockStack(ResnetBlock, 3, 48, 2, droprate, 3)
         self.residual2 = BlockStack(ResnetBlock, 48, 72, 2, droprate, 3)
@@ -67,8 +68,8 @@ class PilotNetStatic(nn.Module):
             )]
         self.cmd_branch = nn.ModuleList(cmd_branch)
         
-    def forward(self, x, branch: int = -1):
-        out = self.residual1(x)
+    def forward(self, I0, branch: int = -1):
+        out = self.residual1(I0)
         out = self.residual2(out)
         out = self.residual3(out)
         out = self.residual4(out)
@@ -90,8 +91,8 @@ class PilotNetStatic(nn.Module):
             else:
                 return out
         else:
-            final_out = torch.zeros((x.size(0), self.output_dim),
-                                    device=x.device, dtype=out.dtype)
+            final_out = torch.zeros((I0.size(0), self.output_dim),
+                                    device=I0.device, dtype=out.dtype)
             for b in torch.unique(branch):
                 idxs = (branch == b).nonzero(as_tuple=True)[0]
                 out_b = self.cmd_branch[int(b) + 1](out[idxs])

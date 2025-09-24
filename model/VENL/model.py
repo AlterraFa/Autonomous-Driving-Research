@@ -65,11 +65,11 @@ class VENL(nn.Module):
         self.feature_downsize = nn.Sequential(
             nn.Linear(24960, 1000),
             nn.ReLU(),
-            nn.Dropout1d(droprate),
+            nn.Dropout(droprate),
 
             nn.Linear(1000, 100),
             nn.ReLU(),
-            nn.Dropout1d(droprate),
+            nn.Dropout(droprate),
         )
 
         self.fusion_projector = nn.Sequential(
@@ -89,21 +89,38 @@ class VENL(nn.Module):
                 init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     init.constant_(m.bias, 0)
+    
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["log"] = None
+        return state
+    
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.log = Logger()
 
     @classmethod
-    def steer(cls, components: int = 3, droprate = 0.1):
+    def steer(cls, camera_shape = (80, 200), map_shape = (50, 50), components: int = 3, droprate = 0.1) -> "VENL":
         self = cls(droprate = droprate)
         self.components = components
         self.log.INFO("Using steer mode")
 
         self.gmm_head = nn.Linear(100, 3 * components) # 3 gaussian parameters * number of modes
         self.determ_head = nn.Linear(100, 1)
-
         self._init_weights()
+        self.input_metadata = {
+            "I0": (1, 3, *camera_shape),
+            "I1": (1, 3, *camera_shape),
+            "I2": (1, 3, *camera_shape),
+            "MU": (1, 1, *map_shape),
+            "MR": (1, 1, *map_shape),
+        }
+        self.output_names = ["steer", "weights", "muy", "sigma"]
+        
         return self
 
     @classmethod
-    def waypoint(cls, num_waypoints = 1, components: int = 3, droprate = 0.1):
+    def waypoint(cls, camera_shape = (80, 200), map_shape = (50, 50), num_waypoints = 1, components: int = 3, droprate = 0.1) -> "VENL":
         self = cls(droprate = droprate)
         self.num_waypoints = num_waypoints
         self.components = components
@@ -112,37 +129,54 @@ class VENL(nn.Module):
         self.gmm_head = nn.Linear(100, components * (1 + num_waypoints * 4)) # 1 weights, num_waypoints * 2 mean, num_waypoints * 2 standard deviation
         self.determ_head = nn.Linear(100, num_waypoints * 2)
         self._init_weights()
+        self.input_metadata = {
+            "I0": (1, 3, *camera_shape),
+            "I1": (1, 3, *camera_shape),
+            "I2": (1, 3, *camera_shape),
+            "MU": (1, 1, *map_shape),
+            "MR": (1, 1, *map_shape),
+        }
+        self.output_names = ["waypoint", "weights", "muy", "sigma"]
+
         return self
 
-    def forward(self, x: list[torch.Tensor], mapU: torch.Tensor, mapR: torch.Tensor) -> torch.Tensor:
-        B, I, C, H, W = x.shape
-        if I != 3: 
-            self.log.ERROR(f"Incorrect amount of RGB image. Received: {I}")
-            exit(-1)
+    def forward(self, I0: torch.Tensor, I1: torch.Tensor, I2: torch.Tensor, MU: torch.Tensor, MR: torch.Tensor) -> torch.Tensor:
+        argcount = self.forward.__code__.co_argcount
+        argnames = self.forward.__code__.co_varnames[: argcount]
+        
+        for name in argnames[1: ]: # skip self
+            tensor = locals()[name]
+            expected_shape = self.input_metadata.get(name)
+            if expected_shape != tuple(tensor.shape):
+                self.log.ERROR(f"Input tensor {name} has shape {tensor.shape}, expected {expected_shape}", exit_code = 12)
 
-        features_cat = [self.multicam_backbone[i](x[:, i]) for i in range(3)]  # features of multicam setup
-        features_cat += [self.unrouted_backbone(mapU)]  # features of unrouted map
+        # features of multicam setup
+        f0 = self.multicam_backbone[0](I0)
+        f1 = self.multicam_backbone[1](I1)
+        f2 = self.multicam_backbone[2](I2)
+        # features of unrouted map
+        fmu = self.unrouted_backbone(MU)
 
         # Concatenation of left, front, right and map features on a single vector
-        features_cat = torch.hstack(features_cat)
+        features_cat = torch.cat([f0, f1, f2, fmu], dim=1) # TENSORRT DOES NOT SUPPORT HSTACK OR VSTACK
 
         out = self.feature_downsize(features_cat)
-        routed_features = self.routed_backbone(mapR)
+        routed_features = self.routed_backbone(MR)
 
         gmm_out = self.gmm_head(out)
-        determ_in = torch.hstack([out, routed_features])
+        determ_in = torch.cat([out, routed_features], dim = 1)
         determ_out = self.determ_head(self.fusion_projector(determ_in))
 
-        return self._extract_gparams(gmm_out), determ_out
+        return determ_out, *self.extract_gparams(gmm_out)
 
 
-    def _extract_gparams(self, gmm_params: torch.Tensor):
+    def extract_gparams(self, gmm_params: torch.Tensor):
         if not hasattr(self, "num_waypoints"):
             # predetermined 3 parameters correspond to 3 chunks 
             weights, muy_weights, sigma_weights = torch.chunk(gmm_params, 3, 1)
             weights = torch.softmax(weights, dim=1) 
-            muy = muy_weights                       
-            sigma = torch.exp(sigma_weights)
+            muy     = muy_weights                       
+            sigma   = torch.exp(sigma_weights)
             return weights, muy, sigma
         else:
             weights, muy_weights, sigma_weights = torch.split(
@@ -155,10 +189,12 @@ class VENL(nn.Module):
                 dim=1
             )
             weights = torch.softmax(weights, dim=1).unsqueeze(-1)
-            muy = muy_weights.view(-1, self.components, self.num_waypoints, 2)
-            sigma = torch.exp(sigma_weights).view(-1, self.components, self.num_waypoints, 2)  # (batch, modes, waypoints, dim)
+            muy     = muy_weights.view(-1, self.components, self.num_waypoints, 2)
+            sigma   = torch.exp(sigma_weights).view(-1, self.components, self.num_waypoints, 2)  # (batch, modes, waypoints, dim)
             return weights, muy, sigma
 
+    def postprocess(self, data):
+        return self.extract_gparams(data)
 
     def gaussian_function(self, sample, parameters: tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
         weights, muy, sigma = parameters
