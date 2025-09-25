@@ -24,9 +24,12 @@ class TensorRTHelper:
         self.input_names = ["img"]
         self.output_names = ["preds"]
 
-        self.d_in  = None
-        self.d_out = None
+        # self.d_in  = None
+        # self.d_out = None
+        self.d_ins  = []
+        self.d_outs = []
 
+        self.d_ins_size = []
     
     @staticmethod
     def _set_workspace(config, builder, gb: float):
@@ -85,12 +88,19 @@ class TensorRTHelper:
                 self.context.set_optimization_profile_async(0, self.stream.handle)
 
             # Allocation for input
-            for name, inp in zip(self.input_names, inp_arr):
+            for idx, (name, inp) in enumerate(zip(self.input_names, inp_arr)):
                 self.context.set_input_shape(name, inp.shape)
                 in_bytes = int(inp.nbytes)
-                d_in = cuda.mem_alloc(int(in_bytes)) # Actual alloc here
-                self.context.set_tensor_address(name, int(d_in))
-                self.d_ins += [d_in]
+                # Allocate if infer first time
+                if idx + 1 > len(self.d_ins):
+                    self.d_ins      += [cuda.mem_alloc(in_bytes)]
+                    self.d_ins_size += [in_bytes]
+
+                elif self.d_ins_size[idx] < in_bytes:
+                    self.d_ins[idx].free()
+                    self.d_ins[idx]      = cuda.mem_alloc(in_bytes)
+                    self.d_ins_size[idx] = in_bytes
+                self.context.set_tensor_address(name, self.d_ins[idx])
 
             # Allocation for output
             out_shapes = {}
@@ -297,10 +307,10 @@ class ImageTensorRTInference(TensorRTHelper):
                 host = np.empty(shp, dtype=self.out_dtypes[name])
                 cuda.memcpy_dtoh(host, self.out_ptrs[name])
                 outs[name] = host
-        else:
-            out = np.empty(next(iter(out_shapes.values())), dtype=self.out_dtype)
-            cuda.memcpy_dtoh(out, self.d_out)
-            outs[self.output_names] = out
+        # else:
+        #     out = np.empty(next(iter(out_shapes.values())), dtype=self.out_dtype)
+        #     cuda.memcpy_dtoh(out, self.d_out)
+        #     outs[self.output_names] = out
         
         for name in self.output_names:
             outs.get(name)
@@ -605,7 +615,8 @@ if __name__ == "__main__":
         # --- PyTorch benchmark ---
         start_torch = time.perf_counter()
         for _ in tqdm(range(args.test_iter), desc=f"PyTorch [{profile_key}]", ncols = 150):
-            exporter.net(**dummy_inputs_metadata)
+            with torch.no_grad():
+                exporter.net(**dummy_inputs_metadata)
         torch.cuda.synchronize()
         end_torch = time.perf_counter()
         torch_time = (end_torch - start_torch) / args.test_iter
@@ -615,6 +626,6 @@ if __name__ == "__main__":
         log.INFO(
             f"[{profile_key}] PyTorch avg: {torch_time*1e3:.3f} ms | "
             f"TensorRT avg: {trt_time*1e3:.3f} ms | "
-            f"Speedup: {speedup:.2f}x"
+            f"Speedup: [bold][cyan]{speedup:.2f}[/][/]x"
         )
         print()
