@@ -105,7 +105,7 @@ class PilotNetStatic(nn.Module):
     
     @staticmethod
     def postprocessor(output, data):
-        return output[:, data + 1][0, 0]
+        return output['steer'][:, data + 1][0, 0]
 
 def single_epoch_training_static(model: PilotNetStatic, mode: Literal["steer", "waypoint"], loader: DataLoader, criterion: nn, optimizer: optim, l1 = 0.0, l2 = 0.0):
     model.train()

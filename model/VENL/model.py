@@ -144,11 +144,12 @@ class VENL(nn.Module):
         argcount = self.forward.__code__.co_argcount
         argnames = self.forward.__code__.co_varnames[: argcount]
         
-        for name in argnames[1: ]: # skip self
-            tensor = locals()[name]
-            expected_shape = self.input_metadata.get(name)
-            if expected_shape != tuple(tensor.shape):
-                self.log.ERROR(f"Input tensor {name} has shape {tensor.shape}, expected {expected_shape}", exit_code = 12)
+        if not torch.onnx.is_in_onnx_export():
+            for name in argnames[1: ]: # skip self
+                tensor = locals()[name]
+                expected_shape = self.input_metadata.get(name)
+                if expected_shape != tuple(tensor.shape):
+                    self.log.ERROR(f"Input tensor {name} has shape {tensor.shape}, expected {expected_shape}", exit_code = 12)
 
         # features of multicam setup
         f0 = self.multicam_backbone[0](I0)
