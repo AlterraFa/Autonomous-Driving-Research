@@ -100,6 +100,7 @@ class AsyncInference:
             if isinstance(inp_img, (torch.Tensor, np.ndarray, cv2.Mat)):
                 inp = torch.from_numpy(np.ascontiguousarray(inp_img)).float()
                 inp = inp.permute(2, 0, 1).unsqueeze(0).to(self.device, non_blocking=True) / 255.0
+                inp = [inp]
             else:
                 inp = []
                 for img in inp_img:
@@ -113,7 +114,7 @@ class AsyncInference:
                 ...
 
             with torch.no_grad():
-                output = self.pytorch(inp, processor_data).detach().cpu().numpy()[0]
+                output = self.pytorch(*inp, processor_data).detach().cpu().numpy()[0]
                     
             with self._lock:
                 self.output_data = output
@@ -138,6 +139,7 @@ class AsyncInference:
                 inp = inp.permute(2, 0, 1).unsqueeze(0) / 255.0
                 inp = inp.detach().cpu().numpy().astype(np.float32)
                 inp = np.ascontiguousarray(inp)
+                inp = [inp]
             else:
                 inp = []
                 for img in inp_img:
@@ -151,7 +153,7 @@ class AsyncInference:
                 ...
                     
             try:
-                raw_output = self.engine.infer(inp)
+                raw_output = self.engine.infer(*inp)
                 # Unwrap using .__func__ is needed
                 output = self.processor.__func__(raw_output, processor_data) # All of the function should have been static method but the first arg is prepend with a self
                 

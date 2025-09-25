@@ -407,7 +407,7 @@ class ImageTensorRTExport(TensorRTHelper):
         return onnx_path
 
     def build_engine(self, onnx_path, engine_path,
-                     fp16 = True, workspace_gb = 1.0,
+                     quantize_type: str = "FP32", workspace_gb = 1.0,
                      min_batch = 1, opt_batch = 1, max_batch = 1):
         
         self.log.INFO("Exporting engine.")
@@ -421,9 +421,14 @@ class ImageTensorRTExport(TensorRTHelper):
             # workspace (version-safe)
             self._set_workspace(config, builder, workspace_gb)
 
-            if fp16 and builder.platform_has_fast_fp16:
-                self.log.INFO("Quantizing to fp16 precision.")
+            if quantize_type.upper() == "FP16" and builder.platform_has_fast_fp16:
                 config.set_flag(trt.BuilderFlag.FP16)
+            elif quantize_type.upper() == "INT8" and builder.platform_has_fast_int8:
+                config.set_flag(trt.BuilderFlag.INT8)
+            elif quantize_type.upper() == "TF32" and getattr(builder, "platform_has_tf32", False):
+                config.set_flag(trt.BuilderFlag.TF32)
+            self.log.INFO(f"Quantizing to {quantize_type.upper()} precision.")
+
 
             with open(onnx_path, "rb") as f:
                 if not parser.parse(f.read()):
@@ -479,7 +484,7 @@ class ImageTensorRTExport(TensorRTHelper):
 
     
     def export_and_build(self, weights_path: str = None,
-                         opset=16, dynamic=True, fp16=True,
+                         opset=16, dynamic=True, quantize_type = "FP32",
                          min_batch = 1,
                          opt_batch = 1, 
                          max_batch = 1,
@@ -502,7 +507,7 @@ class ImageTensorRTExport(TensorRTHelper):
 
         self.load_model_from_checkpoint(weights_path, device = device)
         self.export_onnx(onnx_path = onnx_path, opset = opset, dynamic = dynamic)
-        self.build_engine(onnx_path, engine_path, fp16 = fp16, min_batch = min_batch, opt_batch = opt_batch, max_batch = max_batch, workspace_gb = workspace_gb)
+        self.build_engine(onnx_path, engine_path, quantize_type = quantize_type, min_batch = min_batch, opt_batch = opt_batch, max_batch = max_batch, workspace_gb = workspace_gb)
         return onnx_path, engine_path
 
 if __name__ == "__main__":
@@ -531,9 +536,10 @@ if __name__ == "__main__":
         help="Workspace memory limit for TensorRT in GB (default: 1.0)."
     )
     parser.add_argument(
-        "--use-fp16", "-fp16",
-        action="store_true",
-        help="Enable FP16 precision if supported by TensorRT."
+        "--quantize",
+        default="FP32",
+        type=str,
+        help="Choose precision quantization if supported by TensorRT (FP32, FP16, INT8, TF32)"
     )
     parser.add_argument(
         "--test-iter",
@@ -565,7 +571,7 @@ if __name__ == "__main__":
         opt_batch=opt_batch,
         max_batch=max_batch,
         workspace_gb=args.workspace_gb, 
-        fp16=args.use_fp16,
+        quantize_type=args.quantize,
         device = 'cpu'
     )
     exporter.net = exporter.net.to('cuda')
