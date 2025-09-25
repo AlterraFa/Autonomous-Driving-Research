@@ -9,6 +9,9 @@ from torch.utils.data import DataLoader
 from model.PilotNet.WRN import BlockStack, ConvNeXt, ResnetBlock
 
 from typing import Literal
+from utils.messages.logger import Logger
+
+log = Logger()
 class PilotNetStatic(nn.Module):
     def __init__(self, mode: Literal["steer", "waypoint"] = "steer", *input_shape, num_waypoints: int = 1, num_cmd: int = 1, droprate = 0.1):
         super().__init__()
@@ -104,8 +107,10 @@ class PilotNetStatic(nn.Module):
                 return final_out
     
     @staticmethod
-    def postprocessor(output, data):
-        return output['steer'][:, data + 1][0, 0]
+    def postprocessor(raw_out: dict, data):
+        control_type = list(raw_out.keys())[0]
+        log.INFO(message = f"Using control type: [bold]{control_type}[/]", once = True)
+        return raw_out[control_type][:, data + 1][0, 0]
 
 def single_epoch_training_static(model: PilotNetStatic, mode: Literal["steer", "waypoint"], loader: DataLoader, criterion: nn, optimizer: optim, l1 = 0.0, l2 = 0.0):
     model.train()
