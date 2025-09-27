@@ -221,86 +221,6 @@ class TurnClassify:
         self.world  = world
         pass
 
-    @staticmethod
-    def consecutive_angles(points: np.ndarray, signed: bool = False) -> np.ndarray:
-        pts = points[:, :2]
-        A, B, C = pts[:-2], pts[1:-1], pts[2:]
-        
-        AB = B - A
-        BC = C - B
-        
-        # normalize
-        ABn = AB / np.linalg.norm(AB, axis=1, keepdims=True)
-        BCn = BC / np.linalg.norm(BC, axis=1, keepdims=True)
-        
-        dot = np.sum(ABn * BCn, axis=1)
-        dot = np.clip(dot, -1.0, 1.0)
-        
-        angles = np.arccos(dot)
-        
-        if signed:
-            cross = ABn[:,0]*BCn[:,1] - ABn[:,1]*BCn[:,0]
-            angles *= np.sign(cross)
-        
-        return angles
-    
-    @staticmethod
-    def _find_entry_clusters(wp_pairs, waypoints):
-        
-        best_dist = float("inf")
-        best_entry = None
-        best_loc = None
-        best_exit = None
-
-        for entry_wp, exit_wp in wp_pairs:
-            loc = entry_wp.transform.location
-            entry_xyz = np.array([loc.x, loc.y, loc.z])
-            dists = np.linalg.norm(waypoints - entry_xyz, axis=1)
-            min_d = dists.min()
-            if min_d < best_dist:
-                best_dist = min_d
-                best_entry = entry_wp
-                best_exit = exit_wp
-                best_loc = entry_xyz
-
-        if best_entry is None:
-            return []
-
-        cluster = []
-        for entry_wp, exit_wp in wp_pairs:
-            loc = entry_wp.transform.location
-            loc_xyz = np.array([loc.x, loc.y, loc.z])
-            if np.allclose(loc_xyz, best_loc, atol=1e-6):  # exact same point
-                cluster.append((entry_wp, exit_wp))
-                
-        return cluster
-    
-    @staticmethod
-    def _find_exit(wp_pairs, waypoints):
-        
-        best_dist = float("inf")
-        best_entry = None
-        best_loc = None
-        best_exit = None
-
-        for entry_wp, exit_wp in wp_pairs:
-            loc = exit_wp.transform.location
-            exit_xyz = np.array([loc.x, loc.y, loc.z])
-            dists = np.linalg.norm(waypoints - exit_xyz, axis=1)
-            min_d = dists.min()
-            if min_d < best_dist:
-                best_dist = min_d
-                best_entry = entry_wp
-                best_exit = exit_wp
-                best_loc = exit_xyz
-
-        return best_entry, best_exit
-    
-    @staticmethod
-    def waypoint_heading(wp):
-        fwd = wp.transform.get_forward_vector()
-        yaw = np.arctan2(fwd.y, fwd.x)
-        return yaw
 
 
     def turning_type(self, enable: bool, junction, disable: bool, waypoints: np.ndarray, debug = False):
@@ -356,15 +276,15 @@ class TurnClassify:
         """
         if enable:
             wp_pairs       = junction.get_waypoints(carla.LaneType.Driving)
-            possible_pairs = self._find_entry_clusters(wp_pairs, waypoints)                    
-            choosen_pairs  = self._find_exit(possible_pairs, waypoints)
+            possible_pairs = _find_entry_clusters(wp_pairs, waypoints)                    
+            choosen_pairs  = _find_exit(possible_pairs, waypoints)
 
             if debug:
                 self.world.debug.draw_point(choosen_pairs[0].transform.location, size = 0.18, color = carla.Color(0, 0, 255), life_time = 1.5 * (1 / 70))
                 self.world.debug.draw_point(choosen_pairs[1].transform.location, size = 0.18, color = carla.Color(0, 0, 255), life_time = 1.5 * (1 / 70))
             
-            entry_heading  = self.waypoint_heading(choosen_pairs[0])
-            exit_heading   = self.waypoint_heading(choosen_pairs[1])
+            entry_heading  = waypoint_heading(choosen_pairs[0])
+            exit_heading   = waypoint_heading(choosen_pairs[1])
 
             delta = np.arctan2(np.sin(exit_heading - entry_heading),
                        np.cos(exit_heading - entry_heading))
@@ -390,7 +310,7 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
         self.debug = debug
         self.world = world
         self.use_temporal = use_temporal
-        self.scout_points = [i for i in range(-18, 33, 2)]
+        self.scout_points = [i for i in range(-60, 60, 3)]
         if not self.use_temporal:
             self.offset   = [1, 3, 5, 7, 9]
         else:
@@ -449,3 +369,110 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
             if curr_dist - self.prev_dist > 1e-2:
                 self.addition_cnt = 0
             self.prev_dist = curr_dist
+        return global_scout 
+
+
+
+def consecutive_angles(points: np.ndarray, signed: bool = False) -> np.ndarray:
+    pts = points[:, :2]
+    A, B, C = pts[:-2], pts[1:-1], pts[2:]
+    
+    AB = B - A
+    BC = C - B
+    
+    # normalize
+    ABn = AB / np.linalg.norm(AB, axis=1, keepdims=True)
+    BCn = BC / np.linalg.norm(BC, axis=1, keepdims=True)
+    
+    dot = np.sum(ABn * BCn, axis=1)
+    dot = np.clip(dot, -1.0, 1.0)
+    
+    angles = np.arccos(dot)
+    
+    if signed:
+        cross = ABn[:,0]*BCn[:,1] - ABn[:,1]*BCn[:,0]
+        angles *= np.sign(cross)
+    
+    return angles
+
+def _find_entry_clusters(wp_pairs, waypoints):
+    
+    best_dist = float("inf")
+    best_entry = None
+    best_loc = None
+    best_exit = None
+
+    for entry_wp, exit_wp in wp_pairs:
+        loc = entry_wp.transform.location
+        entry_xyz = np.array([loc.x, loc.y, loc.z])
+        dists = np.linalg.norm(waypoints - entry_xyz, axis=1)
+        min_d = dists.min()
+        if min_d < best_dist:
+            best_dist = min_d
+            best_entry = entry_wp
+            best_exit = exit_wp
+            best_loc = entry_xyz
+
+    if best_entry is None:
+        return []
+
+    cluster = []
+    for entry_wp, exit_wp in wp_pairs:
+        loc = entry_wp.transform.location
+        loc_xyz = np.array([loc.x, loc.y, loc.z])
+        if np.allclose(loc_xyz, best_loc, atol=1e-6):  # exact same point
+            cluster.append((entry_wp, exit_wp))
+            
+    return cluster
+
+def _find_exit(wp_pairs, waypoints):
+    
+    best_dist = float("inf")
+    best_entry = None
+    best_loc = None
+    best_exit = None
+
+    for entry_wp, exit_wp in wp_pairs:
+        loc = exit_wp.transform.location
+        exit_xyz = np.array([loc.x, loc.y, loc.z])
+        dists = np.linalg.norm(waypoints - exit_xyz, axis=1)
+        min_d = dists.min()
+        if min_d < best_dist:
+            best_dist = min_d
+            best_entry = entry_wp
+            best_exit = exit_wp
+            best_loc = exit_xyz
+
+    return best_entry, best_exit
+
+def waypoint_heading(wp):
+    fwd = wp.transform.get_forward_vector()
+    yaw = np.arctan2(fwd.y, fwd.x)
+    return yaw
+
+def waypoints_between(entry_wp, exit_wp, step=1.0):
+    """
+    Returns a list of waypoints between entry and exit inside a junction.
+    
+    entry_wp, exit_wp : carla.Waypoint
+    step : float
+        Distance between waypoints when iterating.
+    """
+    wps = [entry_wp]
+    current_wp = entry_wp
+
+    while current_wp.transform.location.distance(exit_wp.transform.location) > step:
+        next_wps = current_wp.next(step)
+        if not next_wps:
+            break
+        # choose the next waypoint closest to the exit
+        current_wp = min(next_wps, key=lambda wp: wp.transform.location.distance(exit_wp.transform.location))
+        wps.append(current_wp)
+        if current_wp.id == exit_wp.id:
+            break
+
+    # ensure exit is included
+    if wps[-1].id != exit_wp.id:
+        wps.append(exit_wp)
+
+    return wps
