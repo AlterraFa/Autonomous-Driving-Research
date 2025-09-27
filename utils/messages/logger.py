@@ -57,7 +57,7 @@ class Logger(Console):
             return
         information = f"{self.current_timestamp} [color(249)][[/][color(118)]INFO[/]]    [[purple]{self.class_name}[/][color(249)]]:[/] {message}"
         if once:
-            self.__print_once(lambda msg: self.print(information))    
+            self.__print_once(lambda: self.print(information))    
         else: 
             self.print(information)
     

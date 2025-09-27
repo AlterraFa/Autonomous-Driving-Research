@@ -1,7 +1,6 @@
 import pygame
 import numpy as np
 import time
-import torch
 import concurrent.futures
 import cv2
 
@@ -11,6 +10,7 @@ from utils.control.vehicle_control import Vehicle
 from utils.math.path import ReplayHandler
 from utils.spawn.sensor_spawner import *
 from utils.others.data_processor import TrajectoryBuffer
+from utils.math.world_map import Map
 from model.inference import AsyncInference
 from config.enum import (
     JoyControl, 
@@ -122,9 +122,8 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         
         self.controller = Controller()
         self.hud = HUD("jetbrainsmononerdfontpropo", fontSize = 12)
-
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        self.future   = None
+        self.map_processor = Map(self.virt_world, (6, 4), map_offset = (100, 100), scale = 5)
+    
         
     def init_sensor(self, sensors: list):
         """Lazy initialize sensors"""
@@ -322,6 +321,13 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                     self.hud.draw_measurement(self.display)
                     self.hud.draw_controls(self.display)
                     self.hud.draw_logging(self.display)
+
+                    location = self.sub_location.receive()[:2]
+                    heading  = self.sub_heading.receive()
+                    submap   = self.map_processor.retrieve_map(location, heading, range_ = (300, 300), resize_to = (200, 200))
+                    submap_h, submap_w, _ = submap.shape
+                    submap_surface = self.to_surface(submap)
+                    self.display.blit(submap_surface, (self.width - submap_w - 10, 0 + 10))
                     
                     
                 if self.controller.view_changed:
@@ -335,11 +341,13 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                                                     self.controller.has_joystick, 
                                                     self.controller.model_autopilot)
                     
-                if logger: 
+                if logger: # In recording mode
                     logger.update(self.sub_location.receive())
-                if replayer: 
-                    replayer.step(frame)
-                if model_path and self.controller.model_autopilot:
+                if replayer: # in replaying mode
+                    global_scout = replayer.step(frame)
+                    self.map_processor.routed_map(global_scout)
+
+                if model_path and self.controller.model_autopilot: # in inference mode
                     
                     
                     if frame_id % 1 == 0:
@@ -359,6 +367,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                     # local_wp[:, 1] = -local_wp[:, 1]
                     # global_wp = self.virt_vehicle.global_transform(local_wp, np.radians(self.sub_heading.receive()))
                     # # self.virt_world.draw_waypoints(global_wp, duration = 1 * (1 / self.server_fps))
+
                 
 
                 if replay_logging is not None and replay_logging[1] <= self.sub_server_runtime.receive():
@@ -387,6 +396,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
 
     def close(self) -> None:
         
+        print()
         self.log.WARNING("Closing CarlaViewer...")
 
         for name, sensor in list(self.sensors_list.items()):

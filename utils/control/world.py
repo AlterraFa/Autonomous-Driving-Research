@@ -7,7 +7,8 @@ import ast
 import carla
 import numpy as np
 import configparser
-from utils.messages.logger import Logger   # <-- import your Logger instead of rich.print
+from utils.messages.logger import Logger
+from typing import Literal
 
 config = configparser.ConfigParser()
 config.read(parent + "/../config/config.ini")
@@ -73,4 +74,50 @@ class World:
         if wp.is_junction:
             junction = wp.get_junction()
             if junction.id not in excluded_junctions:  # Not a 2 way junction
-                return True,
+                return True, junction
+            return False, None
+        return False, None
+
+    def get_segments_from_points(self, seg_type: Literal["junction", "road"], locations: np.ndarray):
+        """
+        Returns a dictionary of junction_id -> list of waypoints (locations) inside that junction.
+        
+        Parameters
+        ----------
+        locations : np.ndarray, shape (N,3)
+            List of points to check.
+        excluded_junctions : set, optional
+            Junction IDs to ignore.
+
+        Returns
+        -------
+        junction_dict : dict
+            Keys are junction IDs, values are lists of np.ndarray locations inside that junction.
+        """
+        global excluded_junctions
+        if excluded_junctions is None:
+            excluded_junctions = set()
+
+        if seg_type == "junction":
+            junctions = []
+            
+            for loc in locations:
+                wp = self.map.get_waypoint(carla.Location(*loc))
+                if wp.is_junction:
+                    junction = wp.get_junction()
+                    # if junction.id in excluded_junctions:
+                    #     continue
+
+                    junctions.append(junction)
+            
+            return junctions
+        
+        elif seg_type == "road":
+            road_wps = []
+            for loc in locations:
+                wp = self.map.get_waypoint(carla.Location(*loc), project_to_road=True)
+                if not wp.is_junction:
+                    road_wps.append(wp)
+            return road_wps
+        else:
+            raise ValueError(f"Invalid seg_type '{seg_type}', must be 'junction' or 'road'.")

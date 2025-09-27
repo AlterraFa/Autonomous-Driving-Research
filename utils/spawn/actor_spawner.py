@@ -127,7 +127,7 @@ class Spawn:
         self.log.ERROR(f"Could not find actor with role [red][bold]{role_name}[/][/]")
         exit(-1)
         
-    def destroy_all_vehicles(self):
+    def despawn_vehicles(self):
         for vehicle in self.get_vehicles:
             vehicle.destroy()
         self.log.CUSTOM("SUCCESS", f"Destroyed all vehicles")
