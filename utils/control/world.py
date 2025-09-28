@@ -102,7 +102,8 @@ class World:
             junctions = []
             
             for loc in locations:
-                wp = self.map.get_waypoint(carla.Location(*loc))
+                x, y, z = loc
+                wp = self.map.get_waypoint(carla.Location(float(x), float(y), float(z)))
                 if wp.is_junction:
                     junction = wp.get_junction()
                     # if junction.id in excluded_junctions:
