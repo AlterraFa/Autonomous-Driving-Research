@@ -4,7 +4,7 @@ import numpy as np
 
 from utils.control.world import World
 from utils.messages.logger import Logger
-from utils.math.path import _find_entry_clusters, _find_exit, waypoints_between
+from utils.math.path import _find_entry_clusters, _find_exit, waypoints_between, PathHandler
 from scipy.spatial import cKDTree
 
 class Map:
@@ -53,8 +53,23 @@ class Map:
         self._tree = cKDTree(self._wps)
 
         self._render_map()
-    
-    def draw_on_map(self, image, box_color: tuple, waypoints_coordinates):
+        
+    def precompute_waypoints(self, replay_file: str):
+        
+        trajectories = np.load(replay_file)
+        points = self.waypoints_compute(trajectories[:, :3])
+        if len(points) == 0:
+                return points
+
+        diffs = np.diff(points, axis=0)
+        dists = np.linalg.norm(diffs, axis=1)
+
+        # Always keep first point, then keep if distance > tol
+        mask = np.insert(dists > 1e-2, 0, True)
+        self.path_handler = PathHandler(points[mask][:, :3])
+        self.offset_path  = [i for i in range(-100, 100, 2)]
+
+    def draw_map(self, image, box_color: tuple, waypoints_coordinates):
         for cx, cy, _, yaw in waypoints_coordinates:
 
             rect = ((cx + self.offset_x, cy + self.offset_y), (self.width, self.length), yaw)
@@ -65,44 +80,39 @@ class Map:
             cv2.drawContours(image, [box], 
                              0, 
                              box_color, 
-                             cv2.FILLED)
+                             cv2.FILLED,
+                             lineType = cv2.LINE_AA)
         return image
 
     def draw_waypoints_lines(self, image, waypoints, color=(0, 0, 255), line_thickness=2):
         for i in range(len(waypoints)-1):
-            x1, y1 = int(waypoints[i][0] + self.offset_x), int(waypoints[i][1] + self.offset_y)
-            x2, y2 = int(waypoints[i+1][0] + self.offset_x), int(waypoints[i+1][1] + self.offset_y)
-            cv2.line(image, (x1, y1), (x2, y2), color, thickness=line_thickness)
-        
-        # Optionally, draw small arrows to show heading
-        for x, y, _, yaw in waypoints:
-            start_pt = (int(x + self.offset_x), int(y + self.offset_y))
-            end_pt = (
-                int(start_pt[0] + 5 * np.cos(np.deg2rad(yaw))),
-                int(start_pt[1] + 5 * np.sin(np.deg2rad(yaw)))
-            )
-            cv2.arrowedLine(image, start_pt, end_pt, color, 1, tipLength=0.3)
-
-        return image
+            x1, y1 = int(waypoints[i][0]), int(waypoints[i][1])
+            x2, y2 = int(waypoints[i+1][0]), int(waypoints[i+1][1])
+            cv2.line(image, (x1, y1), (x2, y2), color, thickness=line_thickness, lineType = cv2.LINE_AA)
     
     def _render_map(self):
         
         # Create the map_image with padding to avoid going out of range
         self.map_image = np.zeros((int(self.new_max_y + self.offset_x * 2), int(self.max_x + self.offset_y * 2), 3), dtype = np.uint8)
-        self.map_image = self.draw_on_map(self.map_image, (255, 255, 255), self.waypoints_metadata)
+        self.map_image = self.draw_map(self.map_image, (255, 255, 255), self.waypoints_metadata)
         
         self.map_image = cv2.GaussianBlur(self.map_image, (5, 5), sigmaX = 0) 
         kernel         = np.ones((3,3), np.uint8)
         self.map_image = cv2.morphologyEx(self.map_image, cv2.MORPH_CLOSE, kernel)
 
-        self.canvas = self.map_image.copy()
     
+    @profile
     def retrieve_map(self, coordinate, heading, range_, resize_to=(50, 50)):
-        x, y = coordinate
+        """Instead of drawing on the larger self.map_image, we draw on the smaller cutout image and apply waypoints transformation"""
+        x, y, z = coordinate
+        before_scale = np.array(coordinate)
+
+        # ================ Retrieve Submap ======================
+        # Retrieve the normal submap with the same transformation as __init__
         x = int(x * self.scale + self.offset_x)
         y = int(y * self.scale - self.old_min_y + self.offset_y)
         
-        H, W, _ = self.canvas.shape
+        H, W, _ = self.map_image.shape
         w, h = range_
         radius = int(((w / 2) ** 2 + (h / 2) ** 2) ** 0.5)
 
@@ -111,7 +121,7 @@ class Map:
         y1, y2 = max(0, y - radius), min(H, y + radius)
 
         # First cutout uses radius to avoid missing lanes during rotation
-        cutout = self.canvas[y1:y2, x1:x2].copy()
+        cutout = self.map_image[y1:y2, x1:x2]
 
         cx, cy = x - x1, y - y1
         cos_t, sin_t = np.cos(np.deg2rad(heading)), np.sin(np.deg2rad(heading))
@@ -125,24 +135,52 @@ class Map:
         y1f, y2f = max(0, cy - h // 2), min(rotated.shape[0], cy + h // 2)
 
         # Second cutout to refine to the correct range
-        return cv2.resize(rotated[y1f:y2f, x1f:x2f], resize_to)
+        cutout = rotated[y1f:y2f, x1f:x2f]
+        
+        # ================= Draw path on map ====================
+        
+        if hasattr(self, "path_handler"):
+            # Extract the waypoints using interpolation, globals only, locals waypoints embedded in waypoint code will mess up rotation and transformation
+            # We don't need yaw, yaw = 0 is a dummy value        
+            global_wp = self.path_handler.waypoints(
+                before_scale, self.offset_path, yaw = 0, return_local = False
+            )
+            
+            pts_world = np.atleast_2d(global_wp)[:, :2].astype(float)  # (N,2)
+            # Same transformation
+            pts_pix = np.empty_like(pts_world, dtype=float)
+            pts_pix[:, 0] = pts_world[:, 0] * self.scale + self.offset_x
+            pts_pix[:, 1] = pts_world[:, 1] * self.scale - self.old_min_y + self.offset_y
+
+            pts_in_cutout = pts_pix - np.array([x1, y1], dtype=float)   # (N,2)
+
+            ones = np.ones((pts_in_cutout.shape[0], 1), dtype=float)
+            pts_hom = np.hstack([pts_in_cutout, ones])                  # (N,3)
+            pts_trans = (pts_hom @ M.T)                                 # (N,2)
+
+            pts_final = pts_trans - np.array([x1f, y1f], dtype=float)   # (N,2)
+
+            self.draw_waypoints_lines(cutout, pts_final, color = (255, 0, 0), line_thickness = 3 * self.scale)
+
+        return cv2.resize(cutout, resize_to)
     
     def waypoints_to_canvas(self, waypoints_metadata):
-        transformed = []
-        for x, y, z, yaw in waypoints_metadata:
-            cx = int(x * self.scale)
-            cy = int(y * self.scale - self.old_min_y)
-            transformed.append((cx, cy, z, yaw))
-        return np.array(transformed)
+        waypoints_metadata[:, 0] = waypoints_metadata[:, 0] * self.scale
+        waypoints_metadata[:, 1] = waypoints_metadata[:, 1] * self.scale - self.old_min_y
+        return waypoints_metadata
     
-    
-    def routed_map(self, coordinates: np.ndarray):
+    def waypoints_compute(self, coordinates: np.ndarray):
+        """This code was initially used for running online
+        Now it is used for precompute waypoints"""
         waypoints_metadata = []
 
         junctions = self.world.get_segments_from_points("junction", coordinates)
         junctions_metadata = []
         
-        
+        # This loop initially used caching because it was meant to run online
+        # Now it is needed to precompute the path through junctions
+        # Avoids KDTree snapping errors in dense areas by explicitly following entry→exit pairs
+        # Caches entry clusters per junction, but clears them once the ego passes the exit
         for junction in junctions:
             jid = junction.id
 
@@ -175,6 +213,7 @@ class Map:
 
         junctions_metadata = np.array(junctions_metadata)
 
+        # Compute waypoints mixed with junctions' waypoints
         for coordinate in coordinates:
             x, y, z = coordinate
             _, idx = self._tree.query([x, y])
@@ -191,11 +230,8 @@ class Map:
 
             waypoints_metadata.append([loc_x, loc_y, loc_z, yaw])
 
-        waypoints_metadata = self.waypoints_to_canvas(np.array(waypoints_metadata))
-        self.canvas = self.map_image.copy()
-        self.canvas = self.draw_waypoints_lines(
-            self.canvas, waypoints_metadata, color=(255, 0, 0), line_thickness=4*self.scale
-        )
+        waypoints_metadata = np.array(waypoints_metadata)
+        return waypoints_metadata
         
 
 if __name__ == "__main__":
