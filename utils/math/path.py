@@ -5,6 +5,7 @@ from utils.messages.message_handler import MessagingSenders, MessagingSubscriber
 from utils.others.data_processor import CarlaDatasetCollector
 from utils.math.coordinate_transform import global_2_local
 from utils.messages.logger import Logger
+from utils.control.world import World
 
 def wrap_to_pi(theta):
     return (theta + np.pi) % (2 * np.pi) - np.pi
@@ -109,17 +110,17 @@ class PathHandler(NodeFinder):
         if use_time:
             if self.t is None:
                 raise RuntimeError("This path has no time column.")
-            return np.array([
-                float(self.x_of_t(query)),
-                float(self.y_of_t(query)),
-                float(self.z_of_t(query))
-            ])
+            return np.stack([
+                self.x_of_t(query),
+                self.y_of_t(query),
+                self.z_of_t(query)
+            ], axis = -1)
         else:
-            return np.array([
-                float(self.x_of_s(query)),
-                float(self.y_of_s(query)),
-                float(self.z_of_s(query))
-            ])
+            return np.stack([
+                self.x_of_s(query),
+                self.y_of_s(query),
+                self.z_of_s(query)
+            ], axis = -1)
 
     def project(self, point_xyz: np.ndarray):
         """
@@ -193,29 +194,27 @@ class PathHandler(NodeFinder):
         t = np.dot(P - A, AB) / denom
         return (0.0 < t) and (t < 1.0)
 
-    def waypoints(self, position: np.ndarray, offsets: list[float], yaw: float, use_time: bool = False, return_global = False):
+    @profile
+    def waypoints(self, position: np.ndarray, offsets: list[float], yaw: float, use_time: bool = False, return_local = False):
         dist_travelled, *_ = self.project(position)
         if not use_time:
-            wp = []
-            for offset in offsets:
-                wp += [self.pose(dist_travelled + 2 + offset)]
+            dist_offset = dist_travelled + 2 + np.array(offsets)
+            wp = self.pose(dist_offset)
         else: 
             if self.has_time == False:
-                self.log.ERROR(f"Temporal mode was disabled but you enabled `use_time` argument. Exiting...")
-                exit(-1)
+                self.log.ERROR(f"Temporal mode was disabled but you enabled `use_time` argument. Exiting...", exit_code = -1)
             current_time = self.t_of_s(dist_travelled)
-            wp = []
-            for offset in offsets:
-                wp += [self.pose(current_time + offset, True)]
+            time_offset = current_time + offsets
+            wp = self.pose(time_offset, True)
                 
         wp = np.asarray(wp)
-        if not return_global:
-            return global_2_local(position, wp, yaw)
+        if not return_local:
+            return wp
         else:
             return global_2_local(position, wp, yaw), wp
         
 class TurnClassify:
-    def __init__(self, world, threshold_deg: float = 45):
+    def __init__(self, world: World, threshold_deg: float = 45):
         self.thresh_deg = threshold_deg
         self.signal = None
         self.world  = world
@@ -301,7 +300,7 @@ class TurnClassify:
         return self.signal
 
 class ReplayHandler(MessagingSubscribers, MessagingSenders):
-    def __init__(self, replay_file: str, world, data_collect_dir: str = None, use_temporal: bool = False, debug: bool = False):
+    def __init__(self, replay_file: str, world: World, data_collect_dir: str = None, use_temporal: bool = False, debug: bool = False):
         MessagingSubscribers.__init__(self)
         MessagingSenders.__init__(self)
         
@@ -310,7 +309,7 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
         self.debug = debug
         self.world = world
         self.use_temporal = use_temporal
-        self.scout_points = [i for i in range(-60, 60, 3)]
+        self.scout_points = [i for i in range(-18, 33, 2)]
         if not self.use_temporal:
             self.offset   = [1, 3, 5, 7, 9]
         else:
@@ -329,10 +328,10 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
         server_fps = self.sub_server_fps.receive()
         
         ego_wp, global_wp = self.path_handler.waypoints(
-            position, self.offset, heading, return_global=True, use_time = self.use_temporal
+            position, self.offset, heading, return_local = True, use_time = self.use_temporal
         )
-        _, global_scout = self.path_handler.waypoints(
-            position, self.scout_points, heading, return_global=True
+        global_scout = self.path_handler.waypoints(
+            position, self.scout_points, heading, return_local = False
         )
         curr_dist, *_ = self.path_handler.project(position)
 
