@@ -85,10 +85,8 @@ class Map:
         return image
 
     def draw_waypoints_lines(self, image, waypoints, color=(0, 0, 255), line_thickness=2):
-        for i in range(len(waypoints)-1):
-            x1, y1 = int(waypoints[i][0]), int(waypoints[i][1])
-            x2, y2 = int(waypoints[i+1][0]), int(waypoints[i+1][1])
-            cv2.line(image, (x1, y1), (x2, y2), color, thickness=line_thickness, lineType = cv2.LINE_AA)
+        pts = np.array(waypoints, dtype=np.int32).reshape((-1, 1, 2))
+        cv2.polylines(image, [pts], isClosed=False, color=color, thickness=line_thickness, lineType=cv2.LINE_AA)
     
     def _render_map(self):
         
@@ -101,7 +99,6 @@ class Map:
         self.map_image = cv2.morphologyEx(self.map_image, cv2.MORPH_CLOSE, kernel)
 
     
-    @profile
     def retrieve_map(self, coordinate, heading, range_, resize_to=(50, 50)):
         """Instead of drawing on the larger self.map_image, we draw on the smaller cutout image and apply waypoints transformation"""
         x, y, z = coordinate
@@ -235,7 +232,10 @@ class Map:
         
 
 if __name__ == "__main__":
-    map_processor = Map((6, 4), map_offset = (5, 5))
+    client = carla.Client("localhost", 2000)
+    
+    world = World(client, 10000)
+    map_processor = Map(world, rect_dim = (3, 4), map_offset = (5, 5))
 
     dx, dy = 0, 0
     dragging = False
@@ -268,12 +268,12 @@ if __name__ == "__main__":
     cv2.setMouseCallback("map_image", mouse_event)
 
     while True:
-        H, W = map_processor.map_image.shape
+        H, W, _ = map_processor.map_image.shape
         # apply scale
-        scaled = cv2.resize(map_processor.map_image, (int(W) // 1, int(H) // 1))
+        scaled = cv2.resize(map_processor.map_image, (int(W) // 5, int(H) // 5))
 
         # create black background of original size
-        view = np.zeros((H, W), dtype=np.uint8)
+        view = np.zeros((H, W, 3), dtype=np.uint8)
 
         # compute top-left corner with dx, dy applied
         x1 = int(dx)
@@ -296,7 +296,7 @@ if __name__ == "__main__":
         view[y1_clip:y2_clip, x1_clip:x2_clip] = scaled[sy1:sy2, sx1:sx2]
 
         cv2.imshow("map_image", view)
-        key = cv2.waitKey(30)
+        key = cv2.waitKey(1)
         if key == ord("q"):
             break
 

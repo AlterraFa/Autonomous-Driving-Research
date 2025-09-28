@@ -194,7 +194,6 @@ class PathHandler(NodeFinder):
         t = np.dot(P - A, AB) / denom
         return (0.0 < t) and (t < 1.0)
 
-    @profile
     def waypoints(self, position: np.ndarray, offsets: list[float], yaw: float, use_time: bool = False, return_local = False):
         dist_travelled, *_ = self.project(position)
         if not use_time:
