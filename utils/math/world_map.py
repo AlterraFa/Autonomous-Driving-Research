@@ -69,6 +69,7 @@ class Map:
         self.path_handler = PathHandler(points[mask][:, :3])
         self.offset_path  = [i for i in range(-100, 100, 2)]
 
+
     def draw_map(self, image, box_color: tuple, waypoints_coordinates):
         for cx, cy, _, yaw in waypoints_coordinates:
 
@@ -158,13 +159,13 @@ class Map:
             pts_final = pts_trans - np.array([x1f, y1f], dtype=float)   # (N,2)
 
             self.draw_waypoints_lines(cutout, pts_final, color = (255, 0, 0), line_thickness = 3 * self.scale)
+                
 
         return cv2.resize(cutout, resize_to)
     
-    def waypoints_to_canvas(self, waypoints_metadata):
-        waypoints_metadata[:, 0] = waypoints_metadata[:, 0] * self.scale
-        waypoints_metadata[:, 1] = waypoints_metadata[:, 1] * self.scale - self.old_min_y
-        return waypoints_metadata
+    def get_jid_for_point(self, point):
+        segs = self.world.get_segments_from_points("junction", np.array([point]))
+        return segs[0].id if segs else None
     
     def waypoints_compute(self, coordinates: np.ndarray):
         """This code was initially used for running online
@@ -172,43 +173,80 @@ class Map:
         waypoints_metadata = []
 
         junctions = self.world.get_segments_from_points("junction", coordinates)
+
+        # ========== Filter out duplicated adjacent junctions ============
+        last_jid = None
+        for junction_id in range(len(junctions) - 1, -1, -1):
+            if junctions[junction_id].id == last_jid:
+                junctions.pop(junction_id)
+            else:
+                last_jid = junctions[junction_id].id
+                
+        jids = [self.get_jid_for_point(p) for p in coordinates]
+
+
+        # ================ Grouping coordinate to respective junctions =================
+        # This is to avoid assigning wrong entry, exit wp when going over junction more than once
+        groups: list[np.ndarray] = []
+        current_group: list = []
+        current_jid = jids[0]
+        
+        # start current_group only if first point is in a junction
+        if current_jid is not None:
+            current_group.append(coordinates[0])
+
+        for pt, jid in zip(coordinates[1:], jids[1:]):
+            if jid == current_jid:
+                if jid is not None:
+                    current_group.append(pt)
+            else:
+                # boundary: flush previous junction group if any
+                if current_jid is not None and current_group:
+                    groups.append(np.array(current_group))
+                # start next group only if new jid is a junction
+                current_group = [pt] if jid is not None else []
+                current_jid = jid
+
+        # flush last group
+        if current_jid is not None and current_group:
+            groups.append(np.array(current_group))
+        
+            
         junctions_metadata = []
         
         # This loop initially used caching because it was meant to run online
         # Now it is needed to precompute the path through junctions
         # Avoids KDTree snapping errors in dense areas by explicitly following entry→exit pairs
         # Caches entry clusters per junction, but clears them once the ego passes the exit
-        for junction in junctions:
-            jid = junction.id
+        i = 0
+        temp = []
+        for coordinate_group, junction in zip(groups, junctions):
 
-            if jid in self.stored_entries:
-                possible_pairs = self.stored_entries[jid]
-            else:
-                wp_pairs = junction.get_waypoints(carla.LaneType.Driving)
-                possible_pairs = _find_entry_clusters(wp_pairs, coordinates)
-                self.stored_entries[jid] = possible_pairs
+            wp_pairs = junction.get_waypoints(carla.LaneType.Driving)
+            possible_pairs = _find_entry_clusters(wp_pairs, coordinate_group)
             
             # Dynamic exit
-            choosen_pairs     = _find_exit(possible_pairs, coordinates)
-            entry_wp, exit_wp = choosen_pairs
+            entry_wp, exit_wp = _find_exit(possible_pairs, coordinate_group)
 
             # Collect waypoints inside junction
             wp_in_junctions = waypoints_between(entry_wp, exit_wp)
 
-            # Clear stored entry if vehicle passed exit
-            ego_pos = coordinates[0][:2]
-            exit_pos = np.array([exit_wp.transform.location.x, exit_wp.transform.location.y])
-            if np.linalg.norm(exit_pos - ego_pos) < 1.0:
-                self.stored_entries.pop(jid, None)           
+            if junction.id == 281:
+                for entry, exiter in wp_pairs:
+                    print(entry.transform.location, exiter.transform.location)
+            i += 1
+            fuck = []
 
-            
             for wp in wp_in_junctions:
                 loc = wp.transform.location
                 yaw = wp.transform.rotation.yaw
                 junctions_metadata.append([loc.x, loc.y, loc.z, yaw])
+                fuck.append([loc.x, loc.y, loc.z, yaw])
+            temp += [np.array(fuck)]
 
-
+        
         junctions_metadata = np.array(junctions_metadata)
+        self.junctions_metadata = temp
 
         # Compute waypoints mixed with junctions' waypoints
         for coordinate in coordinates:
