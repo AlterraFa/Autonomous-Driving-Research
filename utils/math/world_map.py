@@ -66,8 +66,8 @@ class Map:
 
         # Always keep first point, then keep if distance > tol
         mask = np.insert(dists > 1e-2, 0, True)
-        self.path_handler = PathHandler(points[mask][:, :3])
-        self.offset_path  = [i for i in range(-100, 100, 2)]
+        self.path_handler = PathHandler(points[mask][:, :3], extrapolate = False)
+        self.offset_path  = [i for i in range(-70, 70, 2)]
 
 
     def draw_map(self, image, box_color: tuple, waypoints_coordinates):
@@ -181,16 +181,15 @@ class Map:
                 junctions.pop(junction_id)
             else:
                 last_jid = junctions[junction_id].id
-                
-        jids = [self.get_jid_for_point(p) for p in coordinates]
 
+        jids = [self.get_jid_for_point(p) for p in coordinates]
 
         # ================ Grouping coordinate to respective junctions =================
         # This is to avoid assigning wrong entry, exit wp when going over junction more than once
         groups: list[np.ndarray] = []
         current_group: list = []
         current_jid = jids[0]
-        
+
         # start current_group only if first point is in a junction
         if current_jid is not None:
             current_group.append(coordinates[0])
@@ -210,63 +209,57 @@ class Map:
         # flush last group
         if current_jid is not None and current_group:
             groups.append(np.array(current_group))
-        
-            
-        junctions_metadata = []
-        
+
+        junctions_metadata_groups = []
+
         # This loop initially used caching because it was meant to run online
         # Now it is needed to precompute the path through junctions
         # Avoids KDTree snapping errors in dense areas by explicitly following entry→exit pairs
         # Caches entry clusters per junction, but clears them once the ego passes the exit
-        i = 0
-        temp = []
         for coordinate_group, junction in zip(groups, junctions):
 
             wp_pairs = junction.get_waypoints(carla.LaneType.Driving)
             possible_pairs = _find_entry_clusters(wp_pairs, coordinate_group)
-            
+
             # Dynamic exit
             entry_wp, exit_wp = _find_exit(possible_pairs, coordinate_group)
 
             # Collect waypoints inside junction
             wp_in_junctions = waypoints_between(entry_wp, exit_wp)
 
-            if junction.id == 281:
-                for entry, exiter in wp_pairs:
-                    print(entry.transform.location, exiter.transform.location)
-            i += 1
-            fuck = []
-
+            group_meta = []
             for wp in wp_in_junctions:
                 loc = wp.transform.location
                 yaw = wp.transform.rotation.yaw
-                junctions_metadata.append([loc.x, loc.y, loc.z, yaw])
-                fuck.append([loc.x, loc.y, loc.z, yaw])
-            temp += [np.array(fuck)]
+                group_meta.append([loc.x, loc.y, loc.z, yaw])
+            junctions_metadata_groups.append(np.array(group_meta))
 
-        
-        junctions_metadata = np.array(junctions_metadata)
-        self.junctions_metadata = temp
+        # ============ Merge non-junction waypoints with junction metadata ============
+        combined_meta = []
+        group_iter = iter(junctions_metadata_groups)
 
-        # Compute waypoints mixed with junctions' waypoints
-        for coordinate in coordinates:
-            x, y, z = coordinate
-            _, idx = self._tree.query([x, y])
-            closest_wp = self._wp_list[idx]
-
-            if closest_wp.is_junction and junctions_metadata.size > 0:
-                distances = np.linalg.norm(junctions_metadata[:, :2] - np.array([x, y]), axis=1)
-                closest_idx = distances.argmin()
-                loc_x, loc_y, loc_z, yaw = junctions_metadata[closest_idx]
-            else:
+        i = 0
+        while i < len(coordinates):
+            jid = jids[i]
+            if jid is None:
+                # use KDTree for waypoints outside junctions
+                x, y, z = coordinates[i]
+                _, idx = self._tree.query([x, y])
+                closest_wp = self._wp_list[idx]
                 loc = closest_wp.transform.location
                 yaw = closest_wp.transform.rotation.yaw
-                loc_x, loc_y, loc_z = loc.x, loc.y, loc.z
+                combined_meta.append([loc.x, loc.y, loc.z, yaw])
+                i += 1
+            else:
+                # insert full junction group metadata
+                group_meta = next(group_iter)
+                combined_meta.extend(group_meta)
+                # skip all coordinates belonging to this junction
+                start_jid = jid
+                while i < len(jids) and jids[i] == start_jid:
+                    i += 1
 
-            waypoints_metadata.append([loc_x, loc_y, loc_z, yaw])
-
-        waypoints_metadata = np.array(waypoints_metadata)
-        return waypoints_metadata
+        return np.array(combined_meta)
         
 
 if __name__ == "__main__":

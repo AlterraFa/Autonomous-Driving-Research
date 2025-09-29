@@ -39,7 +39,7 @@ class PathHandler(NodeFinder):
       (N,3) -> [x, y, z]
       (N,4) -> [x, y, z, t]   (t = delta time recording)
     """
-    def __init__(self, defined_path: np.ndarray):
+    def __init__(self, defined_path: np.ndarray, extrapolate: bool = True):
         self.log = Logger()
         super().__init__(10, defined_path)
 
@@ -72,11 +72,11 @@ class PathHandler(NodeFinder):
 
         # --- interpolation in s ---
         self.x_of_s = interp1d(self.s, self.path_xyz[:, 0], kind="linear",
-                               bounds_error=False, fill_value="extrapolate")
+                               bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 0], self.path_xyz[-1, 0]))
         self.y_of_s = interp1d(self.s, self.path_xyz[:, 1], kind="linear",
-                               bounds_error=False, fill_value="extrapolate")
+                               bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 1], self.path_xyz[-1, 1]))
         self.z_of_s = interp1d(self.s, self.path_xyz[:, 2], kind="linear",
-                               bounds_error=False, fill_value="extrapolate")
+                               bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 2], self.path_xyz[-1, 2]))
 
         # --- interpolation in t if available ---
         if self.has_time:
@@ -87,13 +87,13 @@ class PathHandler(NodeFinder):
             self.t = np.cumsum(t_col)
             
             self.x_of_t = interp1d(self.t, self.path_xyz[:, 0], kind="linear",
-                                   bounds_error=False, fill_value="extrapolate")
+                                   bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 0], self.path_xyz[-1, 0]))
             self.y_of_t = interp1d(self.t, self.path_xyz[:, 1], kind="linear",
-                                   bounds_error=False, fill_value="extrapolate")
+                                   bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 1], self.path_xyz[-1, 1]))
             self.z_of_t = interp1d(self.t, self.path_xyz[:, 2], kind="linear",
-                                   bounds_error=False, fill_value="extrapolate")
+                                   bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 2], self.path_xyz[-1, 2]))
             self.t_of_s = interp1d(self.s, self.t, kind = "linear",
-                                   bounds_error=False, fill_value="extrapolate")
+                                   bounds_error=False, fill_value="extrapolate" if extrapolate else (t_col[0], t_col[-1]))
 
         else:
             self.log.DEBUG("Didn't find time vector. Disabling temporal mode")
@@ -367,7 +367,6 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
             if curr_dist - self.prev_dist > 1e-2:
                 self.addition_cnt = 0
             self.prev_dist = curr_dist
-        return global_scout 
 
 
 

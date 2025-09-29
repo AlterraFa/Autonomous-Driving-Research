@@ -1,13 +1,18 @@
 import pygame
+import inspect
 
 from utils.messages.message_handler import MessagingSubscribers
 
 class HUD(MessagingSubscribers):
-    def __init__(self, fontName="Arial", fontSize=24):
+    def __init__(self, fontName="Arial", fontSize=24, height=720):
         super().__init__()  # init all subscribers
         pygame.font.init()
         self.font = pygame.font.SysFont(fontName, fontSize, bold=True)
-        self.height = 20
+        self.text_height = 20
+        self._line_cache = {}
+        
+        self.overlay = pygame.Surface((310, height), pygame.SRCALPHA)
+        
 
     @staticmethod
     def heading_to_cardinal(deg: float) -> str:
@@ -24,20 +29,30 @@ class HUD(MessagingSubscribers):
         millis  = int((t % 1) * 1000)
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
 
-    def _render_line(self, surface, label: str, value: str, line_idx: int, x: int = 10, y: int = 10, spacing: int = 15):
-        text = self.font.render(f"{label:<{spacing}}{value:>{self.max_string}}", True, (255, 255, 255))
-        surface.blit(text, (x, y + self.height * line_idx))
+    def _render_line(self, surface, label: str, value: str, line_idx: int, 
+                 x: int = 10, y: int = 10):
+        key = (label, line_idx)
+        cached_val, cached_surface = self._line_cache.get(key, (None, None))
+        if value != cached_val:
+            text_surface = self.font.render(
+                f"{label:<15}{value:>{self.max_string}}", True, (255, 255, 255)
+            )
+            self._line_cache[key] = (value, text_surface)
+        else:
+            text_surface = cached_surface
+        if text_surface:  # blit always
+            surface.blit(text_surface, (x, y + self.text_height * line_idx))
 
     def _read(self, sub, default="N/A"):
         """Helper to read latest subscriber value or fallback."""
         val = sub.receive()
         return val if val is not None else default
 
+    @profile
     def draw_measurement(self, surface: pygame.Surface):
         # Transparent overlay
-        overlay = pygame.Surface((310, surface.get_height()), pygame.SRCALPHA)
-        pygame.draw.rect(overlay, (0, 0, 0, 100), overlay.get_rect())
-        surface.blit(overlay, (0, 0))
+        pygame.draw.rect(self.overlay, (0, 0, 0, 100), self.overlay.get_rect())
+        surface.blit(self.overlay, (0, 0))
 
         # Read values directly from subscribers
         server_fps = self._read(self.sub_server_fps, 0)
