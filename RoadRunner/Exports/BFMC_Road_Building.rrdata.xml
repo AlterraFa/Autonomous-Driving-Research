@@ -573,23 +573,7 @@
             </SignalPhase>
         </Junction>
         <Junction>
-            <ID>{18f52b87-37ea-4218-b10e-e62c6a3c527d}</ID>
-            <SignalPhase>
-                <Interval>
-                    <Time>20</Time>
-                </Interval>
-            </SignalPhase>
-        </Junction>
-        <Junction>
             <ID>{7e6a91b2-0a66-4c34-a589-ac191f1176b0}</ID>
-            <SignalPhase>
-                <Interval>
-                    <Time>20</Time>
-                </Interval>
-            </SignalPhase>
-        </Junction>
-        <Junction>
-            <ID>{4995f8ac-d398-41d1-b6a0-689c9320f23e}</ID>
             <SignalPhase>
                 <Interval>
                     <Time>20</Time>
@@ -733,10 +717,10 @@
             </SignalPhase>
         </Junction>
         <Junction>
-            <ID>{f96064ec-850d-45f3-beb6-16beb8402bf1}</ID>
+            <ID>{89b9dc3d-38dd-4f09-8e23-2de414b63029}</ID>
         </Junction>
         <Junction>
-            <ID>{89b9dc3d-38dd-4f09-8e23-2de414b63029}</ID>
+            <ID>{5300fb40-4cce-4c5f-b0a1-b3f31ccce23d}</ID>
         </Junction>
     </Signalization>
     <MaterialList>
@@ -1136,25 +1120,6 @@
             <ShadowCaster>true</ShadowCaster>
             <IsDecal>false</IsDecal>
             <SegmentationType>Sidewalk</SegmentationType>
-        </Material>
-        <Material>
-            <Name>Concrete5_Diff.png_rrx_Ground</Name>
-            <DiffuseMap>Concrete5_Diff.png</DiffuseMap>
-            <AmbientColor>0.200000,0.200000,0.200000</AmbientColor>
-            <DiffuseColor>1.000000,1.000000,1.000000</DiffuseColor>
-            <SpecularColor>0.039216,0.039216,0.039216</SpecularColor>
-            <Roughness>0.200000</Roughness>
-            <SpecularFactor>0.010000</SpecularFactor>
-            <TransparencyFactor>0.000000</TransparencyFactor>
-            <Emission>0.000000</Emission>
-            <EmissionColor>1.000000,1.000000,1.000000</EmissionColor>
-            <TextureScaleU>1</TextureScaleU>
-            <TextureScaleV>1</TextureScaleV>
-            <TwoSided>false</TwoSided>
-            <DrawQueue>0</DrawQueue>
-            <ShadowCaster>true</ShadowCaster>
-            <IsDecal>false</IsDecal>
-            <SegmentationType>Ground</SegmentationType>
         </Material>
         <Material>
             <Name>Concrete5_rrx_Ground</Name>
@@ -2809,6 +2774,27 @@
             <EmissionColor>1.000000,1.000000,1.000000</EmissionColor>
             <TextureScaleU>0.5</TextureScaleU>
             <TextureScaleV>0.5</TextureScaleV>
+            <TwoSided>false</TwoSided>
+            <DrawQueue>0</DrawQueue>
+            <ShadowCaster>true</ShadowCaster>
+            <IsDecal>false</IsDecal>
+            <SegmentationType>Ground</SegmentationType>
+        </Material>
+        <Material>
+            <Name>Gravel1_rrx_Ground</Name>
+            <DiffuseMap>Gravel1_Diff.png</DiffuseMap>
+            <NormalMap>Gravel1_Norm.png</NormalMap>
+            <SpecularMap>Gravel1_Spec.png</SpecularMap>
+            <AmbientColor>0.200000,0.200000,0.200000</AmbientColor>
+            <DiffuseColor>1.000000,1.000000,1.000000</DiffuseColor>
+            <SpecularColor>0.039216,0.039216,0.039216</SpecularColor>
+            <Roughness>0.100000</Roughness>
+            <SpecularFactor>0.010000</SpecularFactor>
+            <TransparencyFactor>0.000000</TransparencyFactor>
+            <Emission>0.000000</Emission>
+            <EmissionColor>1.000000,1.000000,1.000000</EmissionColor>
+            <TextureScaleU>0.2</TextureScaleU>
+            <TextureScaleV>0.2</TextureScaleV>
             <TwoSided>false</TwoSided>
             <DrawQueue>0</DrawQueue>
             <ShadowCaster>true</ShadowCaster>
