@@ -128,23 +128,29 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.map_processor = Map(self.virt_world, (6, 4), map_offset = (100, 100), scale = 5)
     
         
-    def init_sensor(self, sensors: list):
+    def init_sensor(self, sensors_metadata: dict):
         """Lazy initialize sensors"""
-        for sensor in sensors:
-            name = sensor.name.split(".")[-1]
+        for sensor, transform in sensors_metadata.items():
+            # If sensor is a camera, set default image size
             if sensor.name.split(".")[1] == 'camera':
                 sensor.set_attribute("image_size_x", self.width)
                 sensor.set_attribute("image_size_y", self.height)
-                self.camera_keys.append(name)
-            sensor.spawn(attach_to = self.vehicle, **CameraView.FIRST_PERSON.value)
-            self.sensors_list.update({name: sensor})
-            
+                self.camera_keys.append(sensor.name.split(".")[-1])
+                if transform is None:
+                    transform = CameraView.FIRST_PERSON.value  # default camera transform
+            else:
+                if transform is None:
+                    transform = {}  # default for non-camera sensors
+
+            # Spawn sensor with transform
+            sensor.spawn(attach_to=self.vehicle, **transform)
+            self.sensors_list[sensor.name.split(".")[-1]] = sensor
+
+        # Set first camera as active
         if self.camera_keys:
             self.active_cam_idx = 0
             self.choosen_sensor = self.sensors_list[self.camera_keys[self.active_cam_idx]]
-            
             self.log.INFO(f"Defaulting to {self.choosen_sensor.literal_name}")
-
 
     def switch_camera(self, step=1):
         """Switch between camera sensors"""
@@ -191,9 +197,9 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
 
         raise ValueError(f"Unsupported frame shape: {frame.shape}")
 
-    def draw_frame(self, frame: np.ndarray) -> None:
+    def draw_frame(self, frame: np.ndarray, position = (0, 0)) -> None:
         surface = self.to_surface(frame)
-        self.display.blit(surface, (0, 0))
+        self.display.blit(surface, position)
 
     def step_world(self) -> None:
         if self.sync:
@@ -272,6 +278,16 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.send_manual_logging.send(self.ctrl['manual'])
         self.send_gear_logging.send(self.ctrl['gear'])
         
+    def draw_border(self, frame, border_thicc: int, border_color: tuple):
+        frame = cv2.copyMakeBorder(
+            frame,
+            top=border_thicc, bottom=border_thicc,
+            left=border_thicc, right=border_thicc,
+            borderType=cv2.BORDER_CONSTANT,
+            value=border_color
+        )
+        return frame
+        
     @profile
     def run(self, 
             model_path = None,
@@ -334,8 +350,23 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                         heading  = self.sub_heading.receive()
                         submap   = self.map_processor.retrieve_map(location, heading, range_ = (250, 250), resize_to = (200, 200))
                         submap_h, submap_w, _ = submap.shape
-                        submap_surface = self.to_surface(submap)
-                        self.display.blit(submap_surface, (self.width - submap_w - 10, 0 + 10))
+                        self.draw_frame(submap, (self.width - submap_w - 10, 0 + 10))
+                    
+                    if "multi" in "".join(list(self.sensors_list.keys())):
+                        self.log.INFO("Multi camera sensor setup detected. Displaying it", once = True)
+                        sensor_tname = self.choosen_sensor.name.split(".")[-1]
+                        multi_tname  = "multi" + sensor_tname
+                        
+                        if multi_tname in "".join(list(self.sensors_list.keys())):
+                            data = self.sensors_list[multi_tname].extract_data()
+                            multi_images = []
+                            for images in data.values():
+                                multi_images += [images]
+                            multi_images = np.hstack(multi_images)
+                            multi_images_border = self.draw_border(multi_images, 3, (255, 100, 200, 255))                
+                            multi_h, multi_w, _ = multi_images_border.shape
+                            self.draw_frame(multi_images_border, (self.width - multi_w - 10, self.height - multi_h - 10))
+
                     
                     
                 if self.controller.view_changed:
