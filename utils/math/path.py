@@ -1,26 +1,45 @@
 import numpy as np
 import carla
 from scipy.interpolate import interp1d
+from scipy.spatial import cKDTree
 from utils.messages.message_handler import MessagingSenders, MessagingSubscribers
 from utils.others.data_processor import CarlaDatasetCollector
 from utils.math.coordinate_transform import global_2_local
 from utils.messages.logger import Logger
 from utils.control.world import World
 
+from numba import njit
+
 def wrap_to_pi(theta):
     return (theta + np.pi) % (2 * np.pi) - np.pi
+
+@njit(fastmath = True)
+def compute_distance(path_xyz, position):
+    n = path_xyz.shape[0]
+    out = np.empty(n, dtype=np.float32)
+    for i in range(n):
+        dx = path_xyz[i,0] - position[0]
+        dy = path_xyz[i,1] - position[1]
+        dz = path_xyz[i,2] - position[2]
+        out[i] = (dx*dx + dy*dy + dz*dz) ** 0.5
+    return out
     
 class NodeFinder:
     def __init__(self, Ld, path, update_dist = .5, **kwargs):
         super().__init__(**kwargs)
         self.Ld = Ld
         self.position_idx = 0
-        self.path = path
         self.update_dist = update_dist
+        self.path = path
+        
+        self.kdtree = cKDTree(self.path)
+    
+    # Keeping this just in case
+    def update_state(self, p):
 
-    def update_state(self, distance):
-
+        distance = compute_distance(self.path, p)
         in_range_path_idx = np.where(np.abs(distance - self.Ld) <= self.Ld)[0]
+        
         split_indices = np.where(np.diff(in_range_path_idx) != 1)[0] + 1
         consec_groups = np.split(in_range_path_idx, split_indices)
 
@@ -33,6 +52,59 @@ class NodeFinder:
                 return self.position_idx
         
         return self.position_idx
+    
+    @profile
+    def update_state(self, p):
+        """Optimized version using KDTree"""
+        dists, idxs = self.kdtree.query(p, k=len(self.path), distance_upper_bound=2*self.Ld)
+        mask = np.isfinite(dists)
+        idxs, dists = idxs[mask], dists[mask]
+
+        # Sort by index (path order)
+        order = np.argsort(idxs)
+        idxs, dists = idxs[order], dists[order]
+
+        
+        split_indices = np.where(np.diff(idxs) != 1)[0] + 1
+        consec_groups_idx   = np.split(idxs, split_indices)
+        consec_groups_dists = np.split(dists, split_indices)
+
+        # Split into groups where candidate index(local minimum distance) resides
+        # Choose based on if position index is in within a group (exploting high update frequency) and if the candidate index is greater than the current onek
+        for group_indices, group_distance in zip(consec_groups_idx, consec_groups_dists):
+            if self.position_idx in group_indices:
+                
+                min_index_group = np.argmin(np.abs(group_distance))
+                candidate_idx = group_indices[min_index_group]
+
+                relative_curr      = np.where(self.position_idx == group_indices)[0][0]
+                relative_candidate = np.where(candidate_idx == group_indices)[0][0]
+
+                
+                if candidate_idx > self.position_idx and abs(group_distance[relative_candidate] - dists[relative_curr]) > self.update_dist:
+                    self.position_idx = candidate_idx
+                return self.position_idx
+        
+        return self.position_idx
+
+    # @profile
+    # def update_state(self, p):
+    #     # All points within Ld
+    #     in_range_idx = self.kdtree.query_ball_point(p, r=self.Ld)
+
+    #     if not in_range_idx:
+    #         return self.position_idx
+        
+    #     # Pick index closest to desired Ld
+    #     dists = np.linalg.norm(self.path[in_range_idx] - p, axis=1)
+    #     min_index = np.argmin(np.abs(dists - self.Ld))
+    #     candidate_idx = in_range_idx[min_index]
+
+    #     if (candidate_idx > self.position_idx and 
+    #         abs(dists[min_index] - np.linalg.norm(self.path[self.position_idx] - p)) > self.update_dist):
+    #         self.position_idx = candidate_idx
+
+    #     return self.position_idx
 class PathHandler(NodeFinder):
     """
     defined_path: 
@@ -41,7 +113,7 @@ class PathHandler(NodeFinder):
     """
     def __init__(self, defined_path: np.ndarray, extrapolate: bool = True):
         self.log = Logger()
-        super().__init__(10, defined_path)
+        super().__init__(10, defined_path[:, :3])
 
         assert defined_path.ndim == 2 and defined_path.shape[1] in (3, 4), \
             "defined_path must be (N,3) [x,y,z] or (N,4) [x,y,z,t]"
@@ -100,7 +172,7 @@ class PathHandler(NodeFinder):
 
             self.t = None
             
-
+    
     def pose(self, query: float, use_time: bool = False):
         """
         Return [x, y, z].
@@ -122,6 +194,7 @@ class PathHandler(NodeFinder):
                 self.z_of_s(query)
             ], axis = -1)
 
+    @profile
     def project(self, point_xyz: np.ndarray):
         """
         Project 3D point onto the path polyline.
@@ -133,9 +206,8 @@ class PathHandler(NodeFinder):
         """
 
         p = np.asarray(point_xyz, dtype=float)
-        distances = np.linalg.norm(self.path_xyz - p, axis=1)
 
-        idx = self.update_state(distances)
+        idx = self.update_state(p)
 
         i = min(idx, len(self.path_xyz) - 2)
 
@@ -194,6 +266,7 @@ class PathHandler(NodeFinder):
         t = np.dot(P - A, AB) / denom
         return (0.0 < t) and (t < 1.0)
 
+    @profile
     def waypoints(self, position: np.ndarray, offsets: list[float], yaw: float, use_time: bool = False, return_local = False):
         dist_travelled, *_ = self.project(position)
         if not use_time:
@@ -336,12 +409,12 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
 
         if self.debug:
             self.world.draw_waypoints(global_wp, 1.5 * (1 / server_fps), size = .1)
-            self.world.draw_waypoints(global_scout, 1.5 * (1 / server_fps), color=(255, 0, 0), size=.2)
 
-        is_at_junction, junction = self.world.get_waypoint_junction(global_scout[14])
-        not_exit_junction, _ = self.world.get_waypoint_junction(global_scout[10])
-        is_exit_junction = not not_exit_junction
-        turn_signal = self.turn_classifier.turning_type(is_at_junction, junction, is_exit_junction, global_scout)
+        # is_at_junction, junction = self.world.get_waypoint_junction(global_scout[14])
+        # not_exit_junction, _ = self.world.get_waypoint_junction(global_scout[10])
+        # is_exit_junction = not not_exit_junction
+        # turn_signal = self.turn_classifier.turning_type(is_at_junction, junction, is_exit_junction, global_scout)
+        turn_signal = -1
         self.send_turn_signal.send(turn_signal)
 
         # Only save when it moves (Prevent saving all the time when stopping at red light or stop sign)

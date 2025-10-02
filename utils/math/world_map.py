@@ -67,7 +67,7 @@ class Map:
         # Always keep first point, then keep if distance > tol
         mask = np.insert(dists > 1e-2, 0, True)
         self.path_handler = PathHandler(points[mask][:, :3], extrapolate = False)
-        self.offset_path  = [i for i in range(-70, 70, 2)]
+        self.offset_path  = [i for i in range(-70, 70, 4)]
 
 
     def draw_map(self, image, box_color: tuple, waypoints_coordinates):
@@ -100,40 +100,47 @@ class Map:
         self.map_image = cv2.morphologyEx(self.map_image, cv2.MORPH_CLOSE, kernel)
 
     
-    def retrieve_map(self, coordinate, heading, range_, resize_to=(50, 50)):
+    @profile
+    def retrieve_map(self, coordinate, heading, range_, resize_to=(50, 50), display = False):
         """Instead of drawing on the larger self.map_image, we draw on the smaller cutout image and apply waypoints transformation"""
         x, y, z = coordinate
         before_scale = np.array(coordinate)
 
         # ================ Retrieve Submap ======================
         # Retrieve the normal submap with the same transformation as __init__
-        x = int(x * self.scale + self.offset_x)
-        y = int(y * self.scale - self.old_min_y + self.offset_y)
-        
-        H, W, _ = self.map_image.shape
-        w, h = range_
-        radius = int(((w / 2) ** 2 + (h / 2) ** 2) ** 0.5)
+        if display:
+            x = int(x * self.scale + self.offset_x)
+            y = int(y * self.scale - self.old_min_y + self.offset_y)
+            
+            H, W, _ = self.map_image.shape
+            w, h = range_
+            w *= self.scale; h *= self.scale
+            radius = int(((w / 2) ** 2 + (h / 2) ** 2) ** 0.5)
 
-        # clamp once
-        x1, x2 = max(0, x - radius), min(W, x + radius)
-        y1, y2 = max(0, y - radius), min(H, y + radius)
+            # clamp once
+            x1, x2 = max(0, x - radius), min(W, x + radius)
+            y1, y2 = max(0, y - radius), min(H, y + radius)
 
-        # First cutout uses radius to avoid missing lanes during rotation
-        cutout = self.map_image[y1:y2, x1:x2]
+            # First cutout uses radius to avoid missing lanes during rotation
+            cutout = self.map_image[y1:y2, x1:x2]
 
-        cx, cy = x - x1, y - y1
-        cos_t, sin_t = np.cos(np.deg2rad(heading)), np.sin(np.deg2rad(heading))
-        M = np.float32([[cos_t, sin_t, (1 - cos_t) * cx - sin_t * cy],
-                        [-sin_t, cos_t, sin_t * cx + (1 - cos_t) * cy]])
+            cx, cy = x - x1, y - y1
+            cos_t, sin_t = np.cos(np.deg2rad(heading)), np.sin(np.deg2rad(heading))
+            M = np.float32([[cos_t, sin_t, (1 - cos_t) * cx - sin_t * cy],
+                            [-sin_t, cos_t, sin_t * cx + (1 - cos_t) * cy]])
 
-        rotated = cv2.warpAffine(cutout, M, (cutout.shape[1], cutout.shape[0]), flags=cv2.INTER_LINEAR)
+            # Much faster because overhead offload to GPU
+            gpu_img = cv2.cuda_GpuMat()
+            gpu_img.upload(cutout)
+            rotated = cv2.cuda.warpAffine(gpu_img, M, (cutout.shape[1], cutout.shape[0]))
+            rotated = rotated.download()
 
-        # one precise crop
-        x1f, x2f = max(0, cx - w // 2), min(rotated.shape[1], cx + w // 2)
-        y1f, y2f = max(0, cy - h // 2), min(rotated.shape[0], cy + h // 2)
+            # one precise crop
+            x1f, x2f = max(0, cx - w // 2), min(rotated.shape[1], cx + w // 2)
+            y1f, y2f = max(0, cy - h // 2), min(rotated.shape[0], cy + h // 2)
 
-        # Second cutout to refine to the correct range
-        cutout = rotated[y1f:y2f, x1f:x2f]
+            # Second cutout to refine to the correct range
+            cutout = rotated[y1f:y2f, x1f:x2f]
         
         # ================= Draw path on map ====================
         
@@ -144,24 +151,24 @@ class Map:
                 before_scale, self.offset_path, yaw = 0, return_local = False
             )
             
-            pts_world = np.atleast_2d(global_wp)[:, :2].astype(float)  # (N,2)
-            # Same transformation
-            pts_pix = np.empty_like(pts_world, dtype=float)
-            pts_pix[:, 0] = pts_world[:, 0] * self.scale + self.offset_x
-            pts_pix[:, 1] = pts_world[:, 1] * self.scale - self.old_min_y + self.offset_y
+            if display:
+                pts_world = np.atleast_2d(global_wp)[:, :2].astype(float)  # (N,2)
+                # Same transformation
+                pts_world[:, 0] = pts_world[:, 0] * self.scale + self.offset_x
+                pts_world[:, 1] = pts_world[:, 1] * self.scale - self.old_min_y + self.offset_y
 
-            pts_in_cutout = pts_pix - np.array([x1, y1], dtype=float)   # (N,2)
+                pts_in_cutout = pts_world - np.array([x1, y1], dtype=float)   # (N,2)
 
-            ones = np.ones((pts_in_cutout.shape[0], 1), dtype=float)
-            pts_hom = np.hstack([pts_in_cutout, ones])                  # (N,3)
-            pts_trans = (pts_hom @ M.T)                                 # (N,2)
+                ones = np.ones((pts_in_cutout.shape[0], 1), dtype=float)
+                pts_hom = np.hstack([pts_in_cutout, ones])                  # (N,3)
+                pts_trans = (pts_hom @ M.T)                                 # (N,2)
 
-            pts_final = pts_trans - np.array([x1f, y1f], dtype=float)   # (N,2)
+                pts_final = pts_trans - np.array([x1f, y1f], dtype=float)   # (N,2)
 
-            self.draw_waypoints_lines(cutout, pts_final, color = (255, 0, 0), line_thickness = 3 * self.scale)
+                self.draw_waypoints_lines(cutout, pts_final, color = (255, 0, 0), line_thickness = 3 * self.scale)
                 
 
-        return cv2.resize(cutout, resize_to)
+        return cv2.resize(cutout, resize_to) if display else None
     
     def get_jid_for_point(self, point):
         segs = self.world.get_segments_from_points("junction", np.array([point]))

@@ -97,7 +97,7 @@ Logger().INFO(generate_controller_doc(KEYBINDS, JOYBINDS))
 
 
 class CarlaViewer(MessagingSenders, MessagingSubscribers):
-    def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, sync: bool = False, fps: int = 80):
+    def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, sync: bool = False, fps: int = 70):
         self.log = Logger() 
         MessagingSenders.__init__(self)
         MessagingSubscribers.__init__(self)
@@ -125,7 +125,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         
         self.controller = Controller()
         self.hud = HUD("jetbrainsmononerdfontpropo", fontSize = 12, height = self.height)
-        self.map_processor = Map(self.virt_world, (6, 4), map_offset = (100, 100), scale = 5)
+        self.map_processor = Map(self.virt_world, (6, 4), map_offset = (100, 100), scale = 3)
     
         
     def init_sensor(self, sensors_metadata: dict):
@@ -345,10 +345,11 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                     self.hud.draw_controls(self.display)
                     self.hud.draw_logging(self.display)
 
-                    if self.controller.toggle_map or replayer is not None:
-                        location = self.sub_location.receive()
-                        heading  = self.sub_heading.receive()
-                        submap   = self.map_processor.retrieve_map(location, heading, range_ = (250, 250), resize_to = (200, 200))
+
+                    location = self.sub_location.receive()
+                    heading  = self.sub_heading.receive()
+                    submap   = self.map_processor.retrieve_map(location, heading, range_ = (75, 75), resize_to = (200, 200), display = self.controller.toggle_map)
+                    if self.controller.toggle_map:
                         submap_h, submap_w, _ = submap.shape
                         self.draw_frame(submap, (self.width - submap_w - 10, 0 + 10))
                     
@@ -440,6 +441,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         for name, sensor in list(self.sensors_list.items()):
             sensor.destroy()
         self.virt_world.factory_reset()
+        self.world.wait_for_tick()
 
         try:
             if pygame.get_init():
