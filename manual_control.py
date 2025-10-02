@@ -52,10 +52,10 @@ def main(args):
     virt_world.apply_settings()
 
     rgb_sensor = RGB(virt_world.world)
-    semantic_sensor = SemSeg(virt_world.world, convert_to = partial(SemSeg.SemanticData.to_image))
+    # semantic_sensor = SemSeg(virt_world.world, convert_to = partial(SemSeg.SemanticData.to_image))
     gnss_sensor = GNSS(virt_world.world)
     imu_sensor = IMU(virt_world.world)
-    depth_sensor = Depth(virt_world.world, convert_to = partial(Depth.DepthMap.to_log, invert = False, max_depth = 100))
+    # depth_sensor = Depth(virt_world.world, convert_to = partial(Depth.DepthMap.to_log, invert = False, max_depth = 100))
     
     if args.replay != "None" and args.record == True:
         raise NotImplementedError(f"Replay and recording simultaneously selected.")
@@ -64,7 +64,7 @@ def main(args):
     folder = os.path.dirname(script_path)
     if args.replay != "None":
         spawner = Spawn(virt_world.world, virt_world.tm)
-        spawner.destroy_all_vehicles()
+        spawner.despawn_vehicles()
 
         path_2_recording = folder + "/" + args.replay + "/log.log"
         path_2_waypoints = folder + "/" + args.replay + "/trajectory.npy"
@@ -78,8 +78,14 @@ def main(args):
             raise RuntimeError("Could not find a vehicle with role_name='ego' in the replay.")
         controlling_vehicle = Vehicle(vehicle, virt_world.world)
         
-        game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
-        game_viewer.init_sensor([rgb_sensor, semantic_sensor, gnss_sensor, imu_sensor, depth_sensor])
+        game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync, fps = 70)
+        game_viewer.init_sensor({
+            rgb_sensor     : None, 
+            # semantic_sensor: None, 
+            gnss_sensor    : None, 
+            imu_sensor     : None, 
+            # depth_sensor   : None,
+        })
         game_viewer.run(replay_logging = [path_2_waypoints, duration], use_temporal_wp = args.temporal, debug = True)
 
         client.stop_replayer(True)
@@ -87,7 +93,7 @@ def main(args):
     else:
         
         spawner = Spawn(virt_world.world, virt_world.tm)
-        spawner.destroy_all_vehicles()
+        spawner.despawn_vehicles()
         spawner.spawn_mass_vehicle(6, exclude = [VClass.Large, VClass.Tiny])
         spawner.spawn_single_vehicle(bp_id = "vehicle.dodge.charger_2020", exclude = [VClass.Large, VClass.Medium, VClass.Tiny], autopilot = False)
         controlling_vehicle = Vehicle(spawner.single_vehicle, virt_world.world)
@@ -98,15 +104,21 @@ def main(args):
             directory = f"{folder}/log/recording_{date}"
             os.mkdir(directory)
             client.start_recorder(f"{directory}/log.log")
-        game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
-        game_viewer.init_sensor([rgb_sensor, semantic_sensor, gnss_sensor, imu_sensor, depth_sensor])
+        game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync, fps = 70)
+        game_viewer.init_sensor({
+            rgb_sensor     : None, 
+            # semantic_sensor: None, 
+            gnss_sensor    : None, 
+            imu_sensor     : None, 
+            # depth_sensor   : None,
+        })
         if args.record:
             game_viewer.run(save_logging = directory)
             client.stop_recorder()
         else:
             game_viewer.run()
 
-        spawner.destroy_all_vehicles()
+        spawner.despawn_vehicles()
 
         return
     
