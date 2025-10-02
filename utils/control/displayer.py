@@ -48,7 +48,7 @@ class HUD(MessagingSubscribers):
         val = sub.receive()
         return val if val is not None else default
 
-    @profile
+    # @profile
     def draw_measurement(self, surface: pygame.Surface):
         # Transparent overlay
         pygame.draw.rect(self.overlay, (0, 0, 0, 100), self.overlay.get_rect())
