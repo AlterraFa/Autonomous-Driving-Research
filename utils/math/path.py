@@ -53,7 +53,6 @@ class NodeFinder:
         
         return self.position_idx
     
-    @profile
     def update_state(self, p):
         """Optimized version using KDTree"""
         dists, idxs = self.kdtree.query(p, k=len(self.path), distance_upper_bound=2*self.Ld)
@@ -87,24 +86,6 @@ class NodeFinder:
         
         return self.position_idx
 
-    # @profile
-    # def update_state(self, p):
-    #     # All points within Ld
-    #     in_range_idx = self.kdtree.query_ball_point(p, r=self.Ld)
-
-    #     if not in_range_idx:
-    #         return self.position_idx
-        
-    #     # Pick index closest to desired Ld
-    #     dists = np.linalg.norm(self.path[in_range_idx] - p, axis=1)
-    #     min_index = np.argmin(np.abs(dists - self.Ld))
-    #     candidate_idx = in_range_idx[min_index]
-
-    #     if (candidate_idx > self.position_idx and 
-    #         abs(dists[min_index] - np.linalg.norm(self.path[self.position_idx] - p)) > self.update_dist):
-    #         self.position_idx = candidate_idx
-
-    #     return self.position_idx
 class PathHandler(NodeFinder):
     """
     defined_path: 
@@ -194,7 +175,6 @@ class PathHandler(NodeFinder):
                 self.z_of_s(query)
             ], axis = -1)
 
-    @profile
     def project(self, point_xyz: np.ndarray):
         """
         Project 3D point onto the path polyline.
@@ -266,11 +246,10 @@ class PathHandler(NodeFinder):
         t = np.dot(P - A, AB) / denom
         return (0.0 < t) and (t < 1.0)
 
-    @profile
     def waypoints(self, position: np.ndarray, offsets: list[float], yaw: float, use_time: bool = False, return_local = False):
         dist_travelled, *_ = self.project(position)
         if not use_time:
-            dist_offset = dist_travelled + 2 + np.array(offsets)
+            dist_offset = dist_travelled + np.array(offsets)
             wp = self.pose(dist_offset)
         else: 
             if self.has_time == False:
@@ -372,6 +351,9 @@ class TurnClassify:
         return self.signal
 
 class ReplayHandler(MessagingSubscribers, MessagingSenders):
+
+    turn_classify = True
+    
     def __init__(self, replay_file: str, world: World, data_collect_dir: str = None, use_temporal: bool = False, debug: bool = False):
         MessagingSubscribers.__init__(self)
         MessagingSenders.__init__(self)
@@ -394,7 +376,7 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
         self.prev_dist = 0
         self.addtional_max = 20; self.addition_cnt = 0
 
-    def step(self, frame: np.ndarray):
+    def step(self, **frame: np.ndarray):
         position   = self.sub_enu.receive()
         heading    = np.radians(self.sub_heading.receive())
         server_fps = self.sub_server_fps.receive()
@@ -402,19 +384,21 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
         ego_wp, global_wp = self.path_handler.waypoints(
             position, self.offset, heading, return_local = True, use_time = self.use_temporal
         )
-        global_scout = self.path_handler.waypoints(
-            position, self.scout_points, heading, return_local = False
-        )
         curr_dist, *_ = self.path_handler.project(position)
 
         if self.debug:
             self.world.draw_waypoints(global_wp, 1.5 * (1 / server_fps), size = .1)
 
-        # is_at_junction, junction = self.world.get_waypoint_junction(global_scout[14])
-        # not_exit_junction, _ = self.world.get_waypoint_junction(global_scout[10])
-        # is_exit_junction = not not_exit_junction
-        # turn_signal = self.turn_classifier.turning_type(is_at_junction, junction, is_exit_junction, global_scout)
-        turn_signal = -1
+        if self.turn_classify:
+            global_scout = self.path_handler.waypoints(
+                position, self.scout_points, heading, return_local = False
+            )
+            is_at_junction, junction = self.world.get_waypoint_junction(global_scout[14])
+            not_exit_junction, _ = self.world.get_waypoint_junction(global_scout[10])
+            is_exit_junction = not not_exit_junction
+            turn_signal = self.turn_classifier.turning_type(is_at_junction, junction, is_exit_junction, global_scout)
+        else:
+            turn_signal = -1
         self.send_turn_signal.send(turn_signal)
 
         # Only save when it moves (Prevent saving all the time when stopping at red light or stop sign)
@@ -425,7 +409,7 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
                 brake    = self.sub_brake_logging.receive()
                 velocity = self.sub_velocity.receive()
                 saved = self.data_collector.maybe_save(
-                    frame, ego_wp,
+                    ego_wp,
                     {
                         "steer": steer,
                         "throttle": throttle,
@@ -433,6 +417,7 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
                         "velocity": velocity,
                     },
                     turn_signal,
+                    **frame
                 )
                 if saved:
                     if curr_dist - self.prev_dist < 1e-2:

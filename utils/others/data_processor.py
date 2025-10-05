@@ -9,6 +9,8 @@ from rich import print
 from pathlib import Path
 from typing import Dict, Any
 
+from utils.messages.logger import Logger
+
 class TrajectoryBuffer:
     def __init__(self, save_dir: str, init_cap = 8192, dist_thresh_m = 0, min_dt_s = 0.05):
         self.arr = np.empty((init_cap, 4), dtype=np.float32)
@@ -62,6 +64,7 @@ class CarlaDatasetCollector:
             save_dir (str): Base directory to save dataset.
             save_interval (int): Save every N frames (to avoid flooding disk).
         """
+        self.log = Logger()
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -80,10 +83,10 @@ class CarlaDatasetCollector:
 
     def maybe_save(
         self,
-        frame: np.ndarray,
         ego_waypoints: np.ndarray,
         control: Dict[str, Any],
         turn_signal: str,
+        **images: np.ndarray,
     ) -> None:
         """
         Save dataset sample occasionally.
@@ -98,20 +101,43 @@ class CarlaDatasetCollector:
         if self.frame_count % self.save_interval != 0:
             return  False
 
-        img_name = f"{self.sample_idx:06d}.png"
-        img_path = self.img_dir / img_name
-        self.saver.save(cv2.imwrite, str(img_path), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+        # lock image keys on first run
+        if not hasattr(self, "_image_keys"):
+            self._image_keys = list(images.keys())
+            self.log.DEBUG("Initializing SAVERS thread", once = True)
+            self._savers = {}
+            for key in self._image_keys:
+                saver_dir = self.img_dir / key
+                saver_dir.mkdir(parents = True, exist_ok=True)
+                # each saver handles its own queue of jobs
+                self._savers[key] = AsyncSaver()  # assume AsyncSaver(self, queue, etc.)
+        else:
+            if set(images.keys()) != set(self._image_keys):
+                self.log.ERROR(f"Image keys mismatch. Expected {self._image_keys}, got {list(images.keys())}", exit_code = -1) 
+        
+        saved_files = {}
+        for key in self._image_keys:
+            img = images[key]
+            fname = f"{key}/{self.sample_idx:06d}_{key}.png"
+            fpath = self.img_dir / fname
+            # push to that saver’s queue
+            self._savers[key].save(
+                cv2.imwrite, str(fpath), cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            )
+            saved_files[key] = str(fpath.relative_to(self.save_dir))
+
 
         meta = {
-            "img_file": str(img_path.relative_to(self.save_dir)),
+            "img_file": saved_files,
             "ego_waypoints": ego_waypoints.tolist(),
             "control": control,
             "turn_signal": turn_signal,
             "timestamp": time.time() - self.time_start,
         }
+
         np.save(self.meta_dir / f"{self.sample_idx:06d}.npy", meta, allow_pickle=True)
 
-        print(f"[cyan][INFO[/] [purple]({self.__class__.__name__})[/]]: Saved sample {self.sample_idx} → {img_path}")
+        self.log.DEBUG(f"Saved sample → {self.sample_idx + 1} samples")
         self.sample_idx += 1
         return True
     

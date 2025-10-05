@@ -29,7 +29,7 @@ from utils.messages.logger import Logger
 
 from typing import Optional
 from typing import Union, Dict
-from traceback import print_exc
+from tqdm.auto import tqdm
         
 
 def generate_controller_doc(keybinds: dict, joybinds: dict) -> str:
@@ -97,17 +97,22 @@ Logger().INFO(generate_controller_doc(KEYBINDS, JOYBINDS))
 
 
 class CarlaViewer(MessagingSenders, MessagingSubscribers):
-    def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, sync: bool = False, fps: int = 70):
+    def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, headless = False, sync: bool = False, fps: int = 70):
         self.log = Logger() 
         MessagingSenders.__init__(self)
         MessagingSubscribers.__init__(self)
 
+        self.log.WARNING("HEADLESS MODE [bold][red][u]ENABLED[/][/][/]")
+        self.headless = headless
         self.virt_world = world
         self.world = world.world
         self.width = width
         self.height = height
         self.sync = sync
-        self.fps = fps
+        self.fps = fps if not self.headless else 100
+
+        self.avg_server_fps = 0.0
+        self.alpha = 0.05  # smoothing factor, adjust as needed
 
         self.virt_vehicle = vehicle
         self.vehicle      = vehicle.vehicle
@@ -125,7 +130,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         
         self.controller = Controller()
         self.hud = HUD("jetbrainsmononerdfontpropo", fontSize = 12, height = self.height)
-        self.map_processor = Map(self.virt_world, (6, 4), map_offset = (100, 100), scale = 3)
+        self.map_processor = Map(self.virt_world, (6, 4), map_offset = (100, 100), range_ = (50, 50), resize_to = (200, 200), scale = 3)
     
         
     def init_sensor(self, sensors_metadata: dict):
@@ -165,6 +170,15 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.log.DEBUG(f"Switched to camera - [bold]{self.choosen_sensor.literal_name}[/]")
 
     def init_win(self, title: str = "CARLA Camera") -> None:
+        if self.headless:
+            # # headless mode → fake clock for FPS timing
+            class DummyClock:
+                def __init__(self, fps) : self._fps = fps
+                def tick(self, fps=None): time.sleep(1.0 / (fps or self._fps))
+                def get_fps(self)       : return self._fps
+            self.clock = DummyClock(self.fps)
+            return
+
         pygame.init()
         self.display = pygame.display.set_mode((self.width, self.height),
                                                pygame.HWSURFACE | pygame.DOUBLEBUF)
@@ -172,8 +186,8 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.clock = pygame.time.Clock()
 
 
-    @staticmethod
-    def to_surface(frame: np.ndarray) -> pygame.Surface:
+    def to_surface(self, frame: np.ndarray) -> pygame.Surface:
+        if self.headless: return
         if frame.dtype != np.uint8:
             frame = np.clip(frame, 0, 255).astype(np.uint8, copy=False)
         frame = np.ascontiguousarray(frame)
@@ -198,6 +212,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         raise ValueError(f"Unsupported frame shape: {frame.shape}")
 
     def draw_frame(self, frame: np.ndarray, position = (0, 0)) -> None:
+        if self.headless: return
         surface = self.to_surface(frame)
         self.display.blit(surface, position)
 
@@ -288,7 +303,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         )
         return frame
         
-    @profile
+    # WARNING: REMEMBER TO CHECK COLOR CHANNEL
     def run(self, 
             model_path = None,
             save_logging: str = None, 
@@ -306,32 +321,24 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         logger    = TrajectoryBuffer(save_logging, min_dt_s = .2) if save_logging else None
         replayer  = ReplayHandler(replay_logging[0], self.virt_world, data_collect_dir, use_temporal_wp, debug) if replay_logging else None
         inference = AsyncInference.load_model(model_path) if model_path is not None else None
+        pbar      = tqdm(total = replay_logging[1], unit = 'server second', desc = "Creating data") if replay_logging else None
 
         if replayer is not None:
             self.map_processor.precompute_waypoints(replay_logging[0])
 
         H, W, _    = 720, 1280, 3
-        x_top_left = 70; x_top_right = W - x_top_left
+        x_top_left = 200; x_top_right = W - x_top_left
         x_bot_left = 20; x_bot_right = W - x_bot_left
-        y_hor      = 390; y_bot         = 720
-        src_points = np.float32([[x_top_left, y_hor],
-                                [x_top_right, y_hor],
-                                [x_bot_right, y_bot],
-                                [x_bot_left, y_bot]])
-        width = 270; height = 150
-        dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
-
-        M = cv2.getPerspectiveTransform(src_points, dst_points)
-        frame_id = 0
+        y_hor      = 390; y_bot         = 680
         try:
             self.last_platform_time = None; 
             self.server_fps = self.fps; 
             self.client_start = time.time()
             self.server_start = self.world.get_snapshot().timestamp.elapsed_seconds
-            while self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
+            while True if self.headless else self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
                 self.step_world()
                 self.data_bus(replay_logging != None)
-
+                
                 frame = self.choosen_sensor.extract_data()
                 try:
                     H, W, _ = frame.shape
@@ -341,17 +348,18 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
 
                 if frame is not None:
                     self.draw_frame(frame)
-                    self.hud.draw_measurement(self.display)
-                    self.hud.draw_controls(self.display)
-                    self.hud.draw_logging(self.display)
+                    if not self.headless:
+                        self.hud.draw_measurement(self.display)
+                        self.hud.draw_controls(self.display)
+                        self.hud.draw_logging(self.display)
 
 
                     location = self.sub_location.receive()
                     heading  = self.sub_heading.receive()
-                    submap   = self.map_processor.retrieve_map(location, heading, range_ = (75, 75), resize_to = (200, 200), display = self.controller.toggle_map)
+                    unrouted_map, routed_map = self.map_processor.retrieve_map(location, heading, display = self.controller.toggle_map or replayer is not None)
                     if self.controller.toggle_map:
-                        submap_h, submap_w, _ = submap.shape
-                        self.draw_frame(submap, (self.width - submap_w - 10, 0 + 10))
+                        submap_h, submap_w, _ = routed_map.shape
+                        self.draw_frame(routed_map, (self.width - submap_w - 10, 0 + 10))
                     
                     if "multi" in "".join(list(self.sensors_list.keys())):
                         self.log.INFO("Multi camera sensor setup detected. Displaying it", once = True)
@@ -360,10 +368,10 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                         
                         if multi_tname in "".join(list(self.sensors_list.keys())):
                             data = self.sensors_list[multi_tname].extract_data()
-                            multi_images = []
+                            multi_images_list = []
                             for images in data.values():
-                                multi_images += [images]
-                            multi_images = np.hstack(multi_images)
+                                multi_images_list += [images]
+                            multi_images = np.hstack(multi_images_list)
                             multi_images_border = self.draw_border(multi_images, 3, (255, 100, 200, 255))                
                             multi_h, multi_w, _ = multi_images_border.shape
                             self.draw_frame(multi_images_border, (self.width - multi_w - 10, self.height - multi_h - 10))
@@ -384,10 +392,31 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                 if logger: # In recording mode
                     logger.update(self.sub_location.receive())
                 if replayer: # in replaying mode
-                    replayer.step(frame)
+                    multi_images_list = list(data.values())   # e.g. [img1, img2, img3]
+                    multi_keys = [f"I{i+1}" for i in range(len(multi_images_list))]
+
+                    frame_cutout = frame[y_hor: y_bot, x_top_left: x_top_right]
+                    frame_cutout = cv2.resize(frame_cutout, (multi_images_list[0].shape[1], multi_images_list[0].shape[0]))
+
+                    image_kwargs = {"I0": frame_cutout} | {k: cv2.resize(v, (50, 50)) for k, v in zip(multi_keys, multi_images_list)} | {"MU": unrouted_map, "MR": routed_map}
+
+                    replayer.step(**image_kwargs)
+
 
                 if model_path and self.controller.model_autopilot: # in inference mode
                     
+                    H, W, _    = 720, 1280, 3
+                    x_top_left = 70; x_top_right = W - x_top_left
+                    x_bot_left = 20; x_bot_right = W - x_bot_left
+                    y_hor      = 390; y_bot         = 720
+                    src_points = np.float32([[x_top_left, y_hor],
+                                            [x_top_right, y_hor],
+                                            [x_bot_right, y_bot],
+                                            [x_bot_left, y_bot]])
+                    width = 270; height = 150
+                    dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
+
+                    M = cv2.getPerspectiveTransform(src_points, dst_points)
                     
                     if frame_id % 1 == 0:
                         inp = cv2.warpPerspective(frame[:, :, :3], M, (width, height))
@@ -412,10 +441,28 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                 if replay_logging is not None and replay_logging[1] <= self.sub_server_runtime.receive():
                     self.log.INFO("Reached replay limit. Goodbye.")
                     break
+                else:
+                    elapsed = round(self.sub_server_runtime.receive(), 1)                    
+                    pbar.n  = min(elapsed, replay_logging[1])
+                    pbar.refresh()
 
-                pygame.display.flip()
-                if self.clock:
-                    self.clock.tick(self.fps)
+
+                if not self.headless:
+                    pygame.display.flip()
+                    if self.clock:
+                        # if self.server_fps > 0:
+                        #     if self.avg_server_fps == 0:
+                        #         self.avg_server_fps = self.server_fps
+                        #     else:
+                        #         self.avg_server_fps = (1 - self.alpha) * self.avg_server_fps + self.alpha * self.server_fps
+                        # frame_time = self.clock.tick(0)
+                        # target = min(self.fps, int(self.avg_server_fps)) if self.avg_server_fps > 0 else self.fps
+                        # if target > 0:
+                        #     target_dt = 1000.0 / target
+                        #     sleep_time = max(0, target_dt - frame_time)
+                        #     if sleep_time > 0:
+                        #         time.sleep(sleep_time / 1000.0)
+                        self.clock.tick(self.fps)
 
 
 

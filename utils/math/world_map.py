@@ -8,7 +8,7 @@ from utils.math.path import _find_entry_clusters, _find_exit, waypoints_between,
 from scipy.spatial import cKDTree
 
 class Map:
-    def __init__(self, world: World, rect_dim: tuple, map_offset: tuple = (0, 0), scale: int = 10, ):
+    def __init__(self, world: World, rect_dim: tuple, map_offset: tuple = (0, 0), range_ = (50, 50), resize_to = (200, 200), scale: int = 10, ):
         self.log = Logger()
         self.world = world
 
@@ -46,6 +46,8 @@ class Map:
         self.length, self.width      = rect_dim[0] * scale, rect_dim[1] * scale
         self.offset_x, self.offset_y = map_offset[0] * scale, map_offset[1] * scale
         self.scale = scale
+        self.range = (range_[0] * self.scale, range_[1] * self.scale)
+        self.resize_to = resize_to
 
         self.stored_entries = {}  # junction_id -> entry_wp
         self._wp_list = list(self.wp_dict.values())
@@ -67,7 +69,7 @@ class Map:
         # Always keep first point, then keep if distance > tol
         mask = np.insert(dists > 1e-2, 0, True)
         self.path_handler = PathHandler(points[mask][:, :3], extrapolate = False)
-        self.offset_path  = [i for i in range(-70, 70, 4)]
+        self.offset_path  = [i for i in range(-70, 70, 3)]
 
 
     def draw_map(self, image, box_color: tuple, waypoints_coordinates):
@@ -95,13 +97,12 @@ class Map:
         self.map_image = np.zeros((int(self.new_max_y + self.offset_x * 2), int(self.max_x + self.offset_y * 2), 3), dtype = np.uint8)
         self.map_image = self.draw_map(self.map_image, (255, 255, 255), self.waypoints_metadata)
         
-        self.map_image = cv2.GaussianBlur(self.map_image, (5, 5), sigmaX = 0) 
+        self.map_image = cv2.GaussianBlur(self.map_image, (3, 3), sigmaX = 0) 
         kernel         = np.ones((3,3), np.uint8)
         self.map_image = cv2.morphologyEx(self.map_image, cv2.MORPH_CLOSE, kernel)
 
     
-    @profile
-    def retrieve_map(self, coordinate, heading, range_, resize_to=(50, 50), display = False):
+    def retrieve_map(self, coordinate, heading, display = False):
         """Instead of drawing on the larger self.map_image, we draw on the smaller cutout image and apply waypoints transformation"""
         x, y, z = coordinate
         before_scale = np.array(coordinate)
@@ -113,8 +114,7 @@ class Map:
             y = int(y * self.scale - self.old_min_y + self.offset_y)
             
             H, W, _ = self.map_image.shape
-            w, h = range_
-            w *= self.scale; h *= self.scale
+            w, h = self.range
             radius = int(((w / 2) ** 2 + (h / 2) ** 2) ** 0.5)
 
             # clamp once
@@ -141,6 +141,7 @@ class Map:
 
             # Second cutout to refine to the correct range
             cutout = rotated[y1f:y2f, x1f:x2f]
+            unrouted_cutout = cutout.copy()
         
         # ================= Draw path on map ====================
         
@@ -167,8 +168,13 @@ class Map:
 
                 self.draw_waypoints_lines(cutout, pts_final, color = (255, 0, 0), line_thickness = 3 * self.scale)
                 
-
-        return cv2.resize(cutout, resize_to) if display else None
+        if display:
+            if hasattr(self, "path_handler"): # If we have path, return both
+                return cv2.resize(unrouted_cutout, self.resize_to)[..., 0], cv2.resize(cutout, self.resize_to)
+            else:
+                return None, cv2.resize(cutout, self.resize_to) # Else we return cutout as it is the same as unrouted_cutout
+        else:
+            return None, None
     
     def get_jid_for_point(self, point):
         segs = self.world.get_segments_from_points("junction", np.array([point]))
