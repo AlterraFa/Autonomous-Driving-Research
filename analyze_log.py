@@ -5,9 +5,6 @@ sys.path.insert(0, root)
 import carla
 import argparse
 import pygame
-import torch
-import importlib
-from functools import partial
 import re
 
 from utils.spawn.actor_spawner import Spawn, VehicleClass as VClass
@@ -20,10 +17,12 @@ from utils.spawn.sensor_spawner import (
     CarlaLabel as Clabel
 )
 from utils.spawn.multicam import MultiCamera
+from utils.math.path import ReplayHandler
 
 from utils.control.world import World
 from utils.control.vehicle_control import Vehicle
 from utils.control.viewer import CarlaViewer
+from utils.messages.logger import Logger
 
 def get_recording_duration(log_path: str) -> float:
     """
@@ -45,6 +44,10 @@ def get_recording_duration(log_path: str) -> float:
     
 def main(args):
     pygame.init()
+
+    ReplayHandler.turn_classify = args.use_turn
+    Logger.set_levels("CUSTOM", "ERROR", "INFO", "WARNING")
+
 
     script_path = os.path.abspath(__file__)
     folder = os.path.dirname(script_path)
@@ -88,7 +91,7 @@ def main(args):
     spawner.wait_for_actor_by_role("ego")
     controlling_vehicle = Vehicle(spawner.single_vehicle, virt_world.world)
     
-    game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
+    game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync, headless = args.headless)
     game_viewer.init_sensor({
         rgb_sensor     : None, 
         # semantic_sensor: None, 
@@ -165,6 +168,16 @@ if __name__ == "__main__":
         type = str,
         help = "Path to models file as well as its class reference",
         default = None
+    )
+    argparser.add_argument(
+        "--use-turn",
+        action = "store_true",
+        help = "Turn on turn classification at junctions"
+    )
+    argparser.add_argument(
+        "--headless",
+        action = "store_true",
+        help = "Enable Pygame headless rendering"
     )
     
     args = argparser.parse_args()

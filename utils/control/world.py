@@ -23,7 +23,7 @@ class World:
         self.map = self.world.get_map()
 
         self.sync = False; self.delta = delta
-        self.timeout = 1.0; self.disable_render = False
+        self.disable_render = False
         self.settings: carla.WorldSettings = self.world.get_settings()
 
         self.log = Logger()   # <-- attach logger to this class
@@ -32,7 +32,6 @@ class World:
         self.client.load_world(name)
         
     def apply_settings(self):
-        self.client.set_timeout(self.timeout)
         self.settings.synchronous_mode = self.sync
         self.settings.fixed_delta_seconds = self.delta if self.sync != 0 else None
         self.settings.no_rendering_mode = self.disable_render
@@ -44,7 +43,6 @@ class World:
             f"    synchronous_mode={self.settings.synchronous_mode}\n"
             f"    fixed_delta_seconds={self.settings.fixed_delta_seconds}\n"
             f"    no_rendering_mode={self.settings.no_rendering_mode}\n"
-            f"    timeout={self.timeout}\n"
             f"    tm_port={self.tm.get_port()}"
         )
 
@@ -53,6 +51,7 @@ class World:
         self.sync = False
         self.settings.synchronous_mode = self.sync
         self.settings.fixed_delta_seconds = self.delta if self.sync else None
+        self.settings.no_rendering_mode = self.disable_render
         try:
             self.tm.set_synchronous_mode(self.sync)
             self.world.apply_settings(self.settings)
