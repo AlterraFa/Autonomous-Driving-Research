@@ -18,9 +18,10 @@ from utils.spawn.sensor_spawner import (
     Depth,
     CarlaLabel as Clabel
 )
+from utils.spawn.multicam import MultiCamera
 
 from utils.control.world import World
-from utils.control.vehicle_control import Vehicle, wait_for_actor_by_role
+from utils.control.vehicle_control import Vehicle
 from utils.control.viewer import CarlaViewer
 
 def get_recording_duration(log_path: str) -> float:
@@ -56,6 +57,11 @@ def main(args):
     gnss_sensor = GNSS(virt_world.world)
     imu_sensor = IMU(virt_world.world)
     # depth_sensor = Depth(virt_world.world, convert_to = partial(Depth.DepthMap.to_log, invert = False, max_depth = 100))
+    # multi_rgb = MultiCamera(virt_world.world, RGB, quantity = 2)
+    # # Set this first
+    # multi_rgb.set_attribute("image_size_x", value = 200)
+    # multi_rgb.set_attribute("image_size_y", value = 80)
+    # multi_rgb.set_attribute("fov", value = 60)
     
     if args.replay != "None" and args.record == True:
         raise NotImplementedError(f"Replay and recording simultaneously selected.")
@@ -73,7 +79,7 @@ def main(args):
         client.show_recorder_file_info(path_2_recording, False)
         client.replay_file(path_2_recording, 0, 0, 0) # Start replay: start=0.0, duration=0.0 (entire), follow_id=0 (don't auto-follow)
 
-        vehicle = wait_for_actor_by_role(virt_world.world, "ego")
+        vehicle = spawner.wait_for_actor_by_role("ego")
         if vehicle is None:
             raise RuntimeError("Could not find a vehicle with role_name='ego' in the replay.")
         controlling_vehicle = Vehicle(vehicle, virt_world.world)
@@ -85,6 +91,7 @@ def main(args):
             gnss_sensor    : None, 
             imu_sensor     : None, 
             # depth_sensor   : None,
+            # multi_rgb      : {'x' : 0, 'y': [-0.25, .25], 'z': 2, 'pitch': -20, 'yaw': [-30, 30], 'roll': [-5, 5]}
         })
         game_viewer.run(replay_logging = [path_2_waypoints, duration], use_temporal_wp = args.temporal, debug = True)
 
@@ -111,6 +118,7 @@ def main(args):
             gnss_sensor    : None, 
             imu_sensor     : None, 
             # depth_sensor   : None,
+            # multi_rgb      : {'x' : 0, 'y': [-0.25, .25], 'z': 2, 'pitch': -20, 'yaw': [-30, 30], 'roll': [-5, 5]}
         })
         if args.record:
             game_viewer.run(save_logging = directory)
@@ -119,8 +127,6 @@ def main(args):
             game_viewer.run()
 
         spawner.despawn_vehicles()
-
-        return
     
     
 if __name__ == "__main__":

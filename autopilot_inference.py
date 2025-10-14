@@ -19,56 +19,18 @@ from utils.spawn.sensor_spawner import (
     Depth,
     CarlaLabel as Clabel
 )
+from utils.spawn.multicam import MultiCamera
 
 from utils.control.world import World
-from utils.control.vehicle_control import Vehicle, wait_for_actor_by_role
+from utils.control.vehicle_control import Vehicle
 from utils.control.viewer import CarlaViewer
-
-def load_model_from_checkpoint(path: str, device: str = "cpu", **model_kwargs):
-    """
-    Load a model checkpoint, automatically inferring class name and module path from filename.
-
-    Args:
-        path (str): Path to checkpoint file (e.g. 'model/PilotNet/best_PilotNetStatic_run1.pt')
-        device (str): Device to load model onto ('cpu' or 'cuda')
-        **model_kwargs: Extra arguments to pass to the model constructor (needed if state_dict only)
-
-    Returns:
-        torch.nn.Module: Loaded model
-    """
-    fname = os.path.basename(path)
-    match = re.search(r"best_(.+?)_run\d+\.pt", fname)
-    if not match:
-        raise ValueError(f"Could not parse class name from filename: {fname}")
-    class_name = match.group(1)
-
-    dir_path = os.path.dirname(os.path.dirname(os.path.dirname(path)))           # "model/PilotNet"
-    module_path = dir_path.replace("/", ".")   # "model.PilotNet"
-    module_path = module_path + ".model"       # append ".model"
-
-    module = importlib.import_module(module_path)
-    cls = getattr(module, class_name)
-
-    try:
-        state_dict = torch.load(path, map_location=device)
-        if isinstance(state_dict, dict):
-            model = cls(**model_kwargs)
-            model.load_state_dict(state_dict)
-            model.to(device).eval()
-            return model
-    except Exception:
-        torch.serialization.add_safe_globals([cls])
-        model = torch.load(path, weights_only=False, map_location=device)
-        model.to(device).eval()
-        return model
 
     
 def main(args):
     pygame.init()
 
-    # torch.set_float32_matmul_precision('highest')
-    # model = load_model_from_checkpoint(args.model_path, device = "cuda")
-    # model = torch.compile(model).eval().to(next(model.parameters()).device)
+    CarlaViewer.override_render_map = args.render_map
+
 
     client = carla.Client(args.host, args.port)
     virt_world = World(client, args.traffic_port)
@@ -78,7 +40,7 @@ def main(args):
     virt_world.apply_settings()
 
     spawner = Spawn(virt_world.world, virt_world.tm)
-    spawner.destroy_all_vehicles()
+    spawner.despawn_vehicles()
     spawner.spawn_mass_vehicle(6, exclude = [VClass.Large, VClass.Tiny])
     spawner.spawn_single_vehicle(bp_id = "vehicle.dodge.charger_2020", exclude = [VClass.Large, VClass.Medium, VClass.Tiny], autopilot = False)
 
@@ -87,11 +49,23 @@ def main(args):
     gnss_sensor     = GNSS(virt_world.world)
     imu_sensor      = IMU(virt_world.world)
     depth_sensor    = Depth(virt_world.world, convert_to = partial(Depth.DepthMap.to_log, invert = False, max_depth = 100))
+    multi_rgb       = MultiCamera(virt_world.world, RGB, quantity = 2)
+    # Set this first
+    multi_rgb.set_attribute("image_size_x", value = 200)
+    multi_rgb.set_attribute("image_size_y", value = 80)
+    multi_rgb.set_attribute("fov", value = 60)
     
     controlling_vehicle = Vehicle(spawner.single_vehicle, virt_world.world)
     
     game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
-    game_viewer.init_sensor([rgb_sensor, semantic_sensor, gnss_sensor, imu_sensor, depth_sensor])
+    game_viewer.init_sensor({
+            rgb_sensor     : None, 
+            # semantic_sensor: None, 
+            gnss_sensor    : None, 
+            imu_sensor     : None, 
+            # depth_sensor   : None,
+            multi_rgb      : {'x' : 0, 'y': [-0.25, .25], 'z': 2, 'pitch': -20, 'yaw': [-30, 30], 'roll': [-5, 5]}
+        })
     game_viewer.run(model_path = args.model_path)
     
     
@@ -140,6 +114,11 @@ if __name__ == "__main__":
         type = str,
         help = "Path to models file as well as its class reference",
         required = True
+    )
+    argparser.add_argument(
+        "--render-map",
+        action = "store_true",
+        help = "Force render map"
     )
     
     args = argparser.parse_args()
