@@ -97,7 +97,7 @@ class AsyncInference:
                 data = self.input_data
                 self.input_data = None
             if data is None:
-                time.sleep(0.02)
+                time.sleep(0.05)
                 continue
 
             try:  # ← ADD TRY-CATCH
@@ -164,7 +164,7 @@ class AsyncInference:
                     data = self.input_data
                     self.input_data = None   # consume once
                 if data is None:
-                    time.sleep(0.005)        # yield CPU, avoid busy spin
+                    time.sleep(0.075)        # yield CPU, avoid busy spin
                     continue
 
                 inp_img, extra_data = data

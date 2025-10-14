@@ -235,8 +235,8 @@ class VENL(nn.Module):
     def preprocessor(self, I0: torch.Tensor, I1: torch.Tensor, I2: torch.Tensor, MU: torch.Tensor, MR: torch.Tensor):
 
         H, W, _    = I0.shape
-        x_top_left = 200; x_top_right = W - x_top_left
-        y_hor      = 250; y_bot         = 680
+        x_top_left = 250; x_top_right = W - x_top_left
+        y_hor      = 300; y_bot         = 680
         I0 = I0[y_hor: y_bot, x_top_left: x_top_right]
         I0 = cv2.resize(I0, (self.input_metadata["I0"][3], self.input_metadata["I0"][2]))[..., :3]
         I1 = I1[..., :3]
