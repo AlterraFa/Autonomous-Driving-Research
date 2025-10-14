@@ -228,8 +228,29 @@ class VENL(nn.Module):
             sigma   = torch.exp(sigma_weights).view(-1, self.components, self.num_waypoints, 2)  # (batch, modes, waypoints, dim)
             return weights, muy, sigma
 
-    def postprocess(self, data):
-        return self.extract_gparams(data)
+    @staticmethod
+    def postprocessor(raw_out: dict, data):
+        return tuple([output[0] for output in raw_out.values()])
+
+    def preprocessor(self, I0: torch.Tensor, I1: torch.Tensor, I2: torch.Tensor, MU: torch.Tensor, MR: torch.Tensor):
+
+        H, W, _    = I0.shape
+        x_top_left = 200; x_top_right = W - x_top_left
+        y_hor      = 250; y_bot         = 680
+        I0 = I0[y_hor: y_bot, x_top_left: x_top_right]
+        I0 = cv2.resize(I0, (self.input_metadata["I0"][3], self.input_metadata["I0"][2]))[..., :3]
+        I1 = I1[..., :3]
+        I2 = I2[..., :3]
+
+        # I0 = I0[..., ::-1]
+        # I1 = I1[..., ::-1]
+        # I2 = I2[..., ::-1]
+
+        MU = cv2.resize(MU, (self.input_metadata["MU"][3], self.input_metadata["MU"][2]))[..., None]
+        MR = cv2.resize(MR, (self.input_metadata["MR"][3], self.input_metadata["MR"][2]))[..., ::-1]
+
+        return (I0, I1, I2, MU, MR)
+
 
     def gaussian_function(self, sample, parameters: tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
         weights, muy, sigma = parameters
@@ -273,6 +294,7 @@ class VENL(nn.Module):
         norm_const = (1.0 / (torch.sqrt(torch.tensor(2.0 * torch.pi)) * sigma)).prod(dim=3)
         exp_term = torch.exp(-0.5 * (((sample - muy) / sigma) ** 2).sum(dim=3))
         return norm_const * exp_term
+    
 
 def single_epoch_training(model: VENL, loader: DataLoader, optimizer: optim, target_spread: Union[torch.Tensor, float], l1_weight: float, l2_weight: float, l1 = 0.0, l2 = 0.0):
     model.train()
@@ -280,11 +302,11 @@ def single_epoch_training(model: VENL, loader: DataLoader, optimizer: optim, tar
 
     trainBar = tqdm(loader, desc = "Train", position = 1, leave = False)
     trainMetrics = {"Total": 0, "MSE": 0, "NLL": 0, "STD Reg": 0}
-    for images, true_waypoints, controls, _ in trainBar:
+    for images, controls in trainBar:
         optimizer.zero_grad(set_to_none = True)
 
         images = {name: image.to(device) for name, image in images.items()}
-        gt     = true_waypoints.to(device) if model.output_names[0] == "waypoint" else controls['steer'].unsqueeze(1).to(device)
+        gt     = controls['midlane_wp'].to(device) if model.output_names[0] == "waypoint" else controls['steer'].unsqueeze(1).to(device)
 
         determ, weights, muy, sigma = model(**images)        
         gmm_prob_per_mode = model.gaussian_function(gt, (weights, muy, sigma))
@@ -306,13 +328,13 @@ def single_epoch_training(model: VENL, loader: DataLoader, optimizer: optim, tar
         l1Norm = sum(p.abs().mean() for p in weightParams)
         l2Norm = sum(p.pow(2.0).mean() for p in weightParams)
 
-        loss = nll_loss + \
-            mse_loss + \
-            l1_weights_norm * l1_weight + \
-            l2_weights_norm * l2_weight + \
-            std_reg + \
-            l1Norm * l1 + \
-            l2Norm * l2
+        loss = 0.3 * nll_loss + \
+            0.5 * mse_loss + \
+            (0.2 / 5) * std_reg + \
+            (0.2 / 5) * l1_weights_norm * l1_weight + \
+            (0.2 / 5) * l2_weights_norm * l2_weight + \
+            (0.2 / 5) * l1Norm * l1 + \
+            (0.2 / 5) * l2Norm * l2
         
         loss.backward()
         optimizer.step()
@@ -340,7 +362,7 @@ def single_epoch_training(model: VENL, loader: DataLoader, optimizer: optim, tar
     trainMetrics["NLL"]     /= len(loader)
     trainMetrics["STD Reg"] /= len(loader)
     
-    del images, true_waypoints, gt, determ, weights, muy, sigma
+    del images, gt, determ, weights, muy, sigma
     torch.cuda.empty_cache()
 
     return trainMetrics
@@ -352,10 +374,10 @@ def single_epoch_val(model: VENL, loader: DataLoader, target_spread: torch.Tenso
     valBar = tqdm(loader, desc = "Val", position = 2, leave = False)
     valMetrics = {"Total": 0, "MSE": 0, "NLL": 0, "STD Reg": 0}
     with torch.no_grad():
-        for images, true_waypoints, controls, _ in valBar:
+        for images, controls in valBar:
 
             images = {name: image.to(device) for name, image in images.items()}
-            gt     = true_waypoints.to(device) if model.output_names[0] == "waypoint" else controls['steer'].unsqueeze(1).to(device)
+            gt     = controls['midlane_wp'].to(device) if model.output_names[0] == "waypoint" else controls['steer'].unsqueeze(1).to(device)
 
             determ, weights, muy, sigma = model(**images)        
             gmm_prob_per_mode = model.gaussian_function(gt, (weights, muy, sigma))
@@ -372,11 +394,11 @@ def single_epoch_val(model: VENL, loader: DataLoader, target_spread: torch.Tenso
             # each component and x, y will have the same target std_dev
             std_reg    = F.mse_loss(torch.log(sigma), target_spread.view(1, 1, -1, 1).to(device))
 
-            loss = nll_loss + \
-                mse_loss + \
-                l1_weights_norm * l1_weight + \
-                l2_weights_norm * l2_weight + \
-                std_reg
+            loss = 0.3 * nll_loss + \
+                0.5 * mse_loss + \
+                0.2 / 3 * l1_weights_norm * l1_weight + \
+                0.2 / 3 * l2_weights_norm * l2_weight + \
+                0.2 / 3 * std_reg
 
             valMetrics["Total"]  += loss.item()
             valMetrics["MSE"]    += mse_loss.item()
@@ -400,7 +422,7 @@ def single_epoch_val(model: VENL, loader: DataLoader, target_spread: torch.Tenso
     valMetrics["NLL"]     /= len(loader)
     valMetrics["STD Reg"] /= len(loader)
 
-    del images, true_waypoints, gt, determ, weights, muy, sigma
+    del images, gt, determ, weights, muy, sigma
     torch.cuda.empty_cache()
 
     return valMetrics
@@ -475,9 +497,7 @@ class CarlaDatasetLoader:
 
             return {
                 "image": image,
-                "ego_waypoints": np.array(meta["ego_waypoints"], dtype=np.float32),
                 "control": meta["control"],
-                "turn_signal": meta["turn_signal"],
                 "timestamp": meta["timestamp"],
             }
         else:
@@ -494,16 +514,14 @@ class CarlaDatasetLoader:
 
             return {
                 "images": inp_images,
-                "ego_waypoints": np.array(meta["ego_waypoints"], dtype=np.float32),
                 "control": meta["control"],
-                "turn_signal": meta["turn_signal"],
                 "timestamp": meta["timestamp"],
             }
     
     def __getitem__(self, idx):
         return self._get_samples(idx)
 
-    CONTROL_KEYS = ["steer", "throttle", "brake", "velocity"]
+    CONTROL_KEYS = ["exp_wp", "midlane_wp", "steer", "throttle", "brake", "velocity", "turn_signal"]
 
     @classmethod
     def collate_fn(cls, batch):
@@ -535,9 +553,6 @@ class CarlaDatasetLoader:
         else:
             raise TypeError(f"Unsupported image type in batch: {type(first_item)}")
 
-        # --- Non-image metadata ---
-        wp = torch.stack([torch.from_numpy(data["ego_waypoints"]) for data in batch])
-
         controls = {
             key: torch.tensor(
                 [data["control"][key] for data in batch],
@@ -546,11 +561,7 @@ class CarlaDatasetLoader:
             for key in cls.CONTROL_KEYS
         }
 
-        turn_signals = torch.tensor(
-            [data["turn_signal"] for data in batch], dtype=torch.long
-        )
-
-        return images, wp, controls, turn_signals
+        return images, controls
 
     def split(self, train = 0.9, val = 0.1):
         
