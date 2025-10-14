@@ -1,5 +1,9 @@
 import numpy as np
 import carla
+import networkx as nx
+import math
+from collections import deque
+
 from scipy.interpolate import interp1d
 from scipy.spatial import cKDTree
 from utils.messages.message_handler import MessagingSenders, MessagingSubscribers
@@ -9,6 +13,7 @@ from utils.messages.logger import Logger
 from utils.control.world import World
 
 from numba import njit
+
 
 def wrap_to_pi(theta):
     return (theta + np.pi) % (2 * np.pi) - np.pi
@@ -246,6 +251,17 @@ class PathHandler(NodeFinder):
         t = np.dot(P - A, AB) / denom
         return (0.0 < t) and (t < 1.0)
 
+    @staticmethod
+    def _project_point_to_segment(P, A, B):
+        AB = B - A
+        denom = float(np.dot(AB, AB))
+        if denom < 1e-9:
+            return A.copy(), 0.0
+        t = float(np.dot(P - A, AB) / denom)
+        t = float(np.clip(t, 0.0, 1.0))  # remove clip to project onto infinite line
+        Q = A + t * AB
+        return Q
+
     def waypoints(self, position: np.ndarray, offsets: list[float], yaw: float, use_time: bool = False, return_local = False):
         dist_travelled, *_ = self.project(position)
         if not use_time:
@@ -354,12 +370,15 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
 
     turn_classify = True
     
-    def __init__(self, replay_file: str, world: World, data_collect_dir: str = None, use_temporal: bool = False, debug: bool = False):
+    def __init__(self, replay_file: str, world: World, data_collect_dir: str = None, use_temporal: bool = False, midlane_waypoints: np.ndarray = None, debug: bool = False):
         MessagingSubscribers.__init__(self)
         MessagingSenders.__init__(self)
         
         waypoints_storage = np.load(replay_file)
         self.path_handler = PathHandler(waypoints_storage)
+        if midlane_waypoints is not None:
+            print("Midlane waypoints found as an extra data")
+            self.midlane_handler = PathHandler(midlane_waypoints)
         self.debug = debug
         self.world = world
         self.use_temporal = use_temporal
@@ -386,8 +405,13 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
         )
         curr_dist, *_ = self.path_handler.project(position)
 
+        if hasattr(self, "midlane_handler"):
+            mid_ego, mid_global = self.midlane_handler.waypoints(
+                position, self.offset, heading, return_local = True, use_time = self.use_temporal
+            )
+            
         if self.debug:
-            self.world.draw_waypoints(global_wp, 1.5 * (1 / server_fps), size = .1)
+            self.world.draw_waypoints(mid_global, 1.5 * (1 / server_fps), size = .1)
 
         if self.turn_classify:
             global_scout = self.path_handler.waypoints(
@@ -409,14 +433,15 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
                 brake    = self.sub_brake_logging.receive()
                 velocity = self.sub_velocity.receive()
                 saved = self.data_collector.maybe_save(
-                    ego_wp,
                     {
-                        "steer": steer,
-                        "throttle": throttle,
-                        "brake": brake,
-                        "velocity": velocity,
+                        "exp_wp"     : ego_wp,
+                        "midlane_wp" : mid_ego,
+                        "steer"      : steer,
+                        "throttle"   : throttle,
+                        "brake"      : brake,
+                        "velocity"   : velocity,
+                        "turn_signal": turn_signal,
                     },
-                    turn_signal,
                     **frame
                 )
                 if saved:
@@ -425,7 +450,6 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
             if curr_dist - self.prev_dist > 1e-2:
                 self.addition_cnt = 0
             self.prev_dist = curr_dist
-
 
 
 def consecutive_angles(points: np.ndarray, signed: bool = False) -> np.ndarray:
@@ -531,3 +555,430 @@ def waypoints_between(entry_wp, exit_wp, step=1.0):
         wps.append(exit_wp)
 
     return wps
+
+class OptimizePath:
+    def __init__(self, world: World, step: float):
+        self.log = Logger()
+        self.world = world
+
+        carla_map = world.world.get_map()
+        self.network, self.nodes = self._build_detailed_graph(carla_map, step = step, epsilon = 0.1)
+
+        self.log.DEBUG("Built Road network of path optimization")        
+
+    @staticmethod
+    def fast_extract_coordinates(network_or_nodes):
+        """
+        Extract coordinates as dictionary (vectorized, no loops).
+        
+        Args:
+            network_or_nodes: Either NetworkX graph or nodes dictionary
+        
+        Returns:
+            dict: {node_id: (x, y)} dictionary of coordinates
+        """
+        # Handle NetworkX graph
+        if hasattr(network_or_nodes, 'nodes') and hasattr(network_or_nodes.nodes, 'data'):
+            nodes_data = network_or_nodes.nodes(data=True)
+            if not nodes_data:
+                return {}
+            
+            coord_dict = {}
+            
+            for nid, attrs in nodes_data:
+                if 'pos' in attrs:
+                    coord_dict[nid] = attrs['pos']
+                elif 'x' in attrs and 'y' in attrs:
+                    coord_dict[nid] = (attrs['x'], attrs['y'])
+                else:
+                    raise ValueError(f"Node {nid} has no coordinate data")
+            
+            return coord_dict
+        
+        # Handle dictionary
+        elif isinstance(network_or_nodes, dict):
+            return dict(network_or_nodes)  # Return copy of the dictionary
+        
+        else:
+            raise TypeError("Input must be NetworkX graph or dictionary")
+
+    @staticmethod
+    def _find_or_create_node(nodes, loc, epsilon=0.1):
+        """Tìm node gần loc trong nodes, nếu không có thì tạo mới."""
+        for nid, (x, y) in nodes.items():
+            if math.hypot(loc.x - x, loc.y - y) < epsilon:
+                return nid
+        nid = len(nodes)
+        nodes[nid] = (loc.x, loc.y)
+        return nid
+
+    def _build_detailed_graph(self, cmap, step=3.0, epsilon=0.1):
+        """
+        Xây dựng đồ thị với các điểm cách nhau khoảng step mét,
+        lọc bỏ các cạnh tự nối và cạnh quá ngắn < min_edge_length.
+        """
+        G = nx.DiGraph()
+        nodes = {}
+
+        for start_wp, end_wp in cmap.get_topology():
+            # Lấy danh sách các waypoint liên tục trên lane
+            wp_list = start_wp.next_until_lane_end(step)
+            wp_list = [start_wp] + wp_list
+
+            if end_wp not in wp_list:
+                wp_list.append(end_wp)
+
+            prev_id = None
+            for wp in wp_list:
+                nid = self._find_or_create_node(nodes, wp.transform.location, epsilon)
+                
+                # Store coordinates in NetworkX node attributes
+                if nid not in G.nodes:
+                    G.add_node(nid, x=nodes[nid][0], y=nodes[nid][1], pos=nodes[nid])
+                
+                if prev_id is not None and prev_id != nid:
+                    G.add_edge(prev_id, nid)
+                prev_id = nid
+
+        return G, nodes
+
+    def update_coordinates(self, new_coords_dict):
+        """
+        Update NetworkX node coordinates efficiently.
+        
+        Args:
+            new_coords_dict: {node_id: (x, y)} dictionary
+        """
+        for nid, (x, y) in new_coords_dict.items():
+            if nid in self.network.nodes:
+                self.network.nodes[nid]['x'] = x
+                self.network.nodes[nid]['y'] = y  
+                self.network.nodes[nid]['pos'] = (x, y)
+
+    def get_positions(self):
+        """
+        Get positions dictionary for NetworkX drawing functions.
+        
+        Returns:
+            Dictionary {node_id: (x, y)} for use with nx.draw()
+        """
+        return {nid: data.get('pos', (0, 0)) for nid, data in self.network.nodes(data=True)}
+
+    def bfs_shortest_path(self, start, goal):
+        """
+        Find shortest path between two nodes using BFS algorithm.
+        
+        Args:
+            start: Starting node ID
+            goal: Goal node ID
+            
+        Returns:
+            list: Shortest path as list of node IDs, or None if no path exists
+        """
+        from collections import deque
+        
+        if start not in self.network.nodes or goal not in self.network.nodes:
+            self.log.ERROR(f"Start node {start} or goal node {goal} not found in network")
+            return None
+            
+        if start == goal:
+            return [start]
+        
+        queue = deque([(start, [start])])
+        visited = set()
+        
+        while queue:
+            node, path = queue.popleft()
+            
+            if node == goal:
+                self.log.INFO(f"Found path from {start} to {goal} with {len(path)} nodes")
+                return path
+                
+            if node not in visited:
+                visited.add(node)
+                
+                # Get neighbors from NetworkX graph
+                for neighbor in self.network.neighbors(node):
+                    if neighbor not in visited:
+                        queue.append((neighbor, path + [neighbor]))
+        
+        self.log.WARNING(f"No path found from {start} to {goal}")
+        return None
+
+    def get_path_coordinates(self, path):
+        """
+        Get coordinates for a path of node IDs.
+        
+        Args:
+            path: List of node IDs
+            
+        Returns:
+            np.array: Array of coordinates with shape (N, 2)
+        """
+        if not path:
+            return np.array([]).reshape(0, 2)
+            
+        coords = []
+        for node_id in path:
+            if node_id in self.nodes:
+                coords.append(self.nodes[node_id])
+            else:
+                self.log.WARNING(f"Node {node_id} not found in coordinates")
+                
+        return np.array(coords)
+    
+    def find_nearest_node(self, position, max_distance=50.0):
+        """
+        Find the nearest node to a given position, applying the same transformation as the network.
+        
+        Args:
+            position: (x, y) coordinate tuple (untransformed, e.g. world coordinates)
+            max_distance: Maximum search distance
+            
+        Returns:
+            int: Node ID of nearest node, or None if none found within max_distance
+        """
+        coords_dict = self.fast_extract_coordinates(self.network)
+        if not coords_dict:
+            return None
+
+        pos_array = np.array(position, dtype=float)
+
+        min_dist = float('inf')
+        nearest_node = None
+
+        for node_id, (x, y) in coords_dict.items():
+            node_pos = np.array([x, y])
+            dist = np.linalg.norm(pos_array - node_pos)
+            if dist < min_dist and dist <= max_distance:
+                min_dist = dist
+                nearest_node = node_id
+
+        return nearest_node
+
+    def plan_path(self, start_pos, goal_pos, max_search_distance=50.0):
+        """
+        Plan a path between two world positions using BFS.
+        
+        Args:
+            start_pos: (x, y) starting position
+            goal_pos: (x, y) goal position  
+            max_search_distance: Maximum distance to search for nearest nodes
+            
+        Returns:
+            tuple: (path_nodes, path_coordinates) or (None, None) if no path found
+        """
+        # Find nearest nodes to start and goal positions
+        start_node = self.find_nearest_node(start_pos, max_search_distance)
+        goal_node = self.find_nearest_node(goal_pos, max_search_distance)
+        
+        if start_node is None:
+            self.log.ERROR(f"No start node found near position {start_pos}")
+            return None, None
+            
+        if goal_node is None:
+            self.log.ERROR(f"No goal node found near position {goal_pos}")
+            return None, None
+        
+        # Find shortest path using BFS
+        path_nodes = self.bfs_shortest_path(start_node, goal_node)
+        
+        if path_nodes is None:
+            return None, None
+            
+        # Get coordinates for the path
+        path_coords = self.get_path_coordinates(path_nodes)
+        
+        self.log.INFO(f"Planned path with {len(path_nodes)} nodes, total distance: {self._calculate_path_distance(path_coords):.2f}m")
+        
+        return path_nodes, path_coords
+
+    def _calculate_path_distance(self, path_coords):
+        """Calculate total distance of a path."""
+        if len(path_coords) < 2:
+            return 0.0
+            
+        diffs = np.diff(path_coords, axis=0)
+        distances = np.linalg.norm(diffs, axis=1)
+        return np.sum(distances)
+
+    def visualize_path(self, path_nodes=None, path_coords=None, start_pos=None, goal_pos=None, 
+                       title="BFS Shortest Path", figsize=(16, 12), save_path=None):
+        """
+        Visualize the road network and highlight the BFS path.
+        
+        Args:
+            path_nodes: List of node IDs in the path
+            path_coords: Array of coordinates for the path
+            start_pos: Starting position (x, y)
+            goal_pos: Goal position (x, y)
+            title: Plot title
+            figsize: Figure size tuple
+            save_path: Optional path to save the figure
+        """
+        import matplotlib.pyplot as plt
+        
+        plt.figure(figsize=figsize)
+        
+        # Get network positions
+        pos = self.get_positions()
+        
+        # Draw the full road network
+        nx.draw(
+            self.network, 
+            pos=pos,
+            with_labels=False,
+            node_color='lightgray',
+            edge_color='gray',
+            node_size=30,
+            width=0.5,
+            alpha=0.6,
+            arrows=False
+        )
+        
+        # Highlight the path if provided
+        if path_coords is not None and len(path_coords) > 0:
+            # Draw path as connected line
+            plt.plot(path_coords[:, 0], path_coords[:, 1], 
+                    'b-', linewidth=4, label=f'BFS Path ({len(path_coords)} nodes)', alpha=0.8)
+            
+            # Highlight path nodes
+            if path_nodes is not None:
+                path_positions = [pos[node] for node in path_nodes if node in pos]
+                if path_positions:
+                    path_x, path_y = zip(*path_positions)
+                    plt.scatter(path_x, path_y, c='blue', s=80, zorder=5, 
+                              edgecolors='darkblue', linewidth=1, label='Path Nodes')
+        
+        # Mark start and goal positions
+        if start_pos is not None:
+            plt.plot(start_pos[0], start_pos[1], 'go', markersize=12, 
+                    markeredgewidth=2, markeredgecolor='darkgreen', 
+                    label='Start Position', zorder=6)
+            
+        if goal_pos is not None:
+            plt.plot(goal_pos[0], goal_pos[1], 'ro', markersize=12, 
+                    markeredgewidth=2, markeredgecolor='darkred', 
+                    label='Goal Position', zorder=6)
+        
+        # Add distance information if path exists
+        if path_coords is not None and len(path_coords) > 1:
+            distance = self._calculate_path_distance(path_coords)
+            title += f" (Distance: {distance:.1f}m)"
+        
+        plt.title(title, fontsize=14, fontweight='bold')
+        plt.xlabel('X Coordinate (m)', fontsize=12)
+        plt.ylabel('Y Coordinate (m)', fontsize=12)
+        plt.legend(loc='best', fontsize=10)
+        plt.grid(True, alpha=0.3)
+        plt.axis('equal')
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            self.log.INFO(f"Path visualization saved to {save_path}")
+        
+        plt.show()
+
+    def visualize_path_planning(self, start_pos, goal_pos, max_search_distance=50.0, 
+                               title="BFS Path Planning", save_path=None):
+        """
+        Plan a path and visualize it in one step.
+        
+        Args:
+            start_pos: (x, y) starting position
+            goal_pos: (x, y) goal position
+            max_search_distance: Maximum distance to search for nearest nodes
+            title: Plot title
+            save_path: Optional path to save the figure
+        """
+        # Plan the path
+        path_nodes, path_coords = self.plan_path(start_pos, goal_pos, max_search_distance)
+        
+        if path_nodes is None:
+            self.log.ERROR("No path found - cannot visualize")
+            # Still show the network with start/goal positions
+            self.visualize_path(start_pos=start_pos, goal_pos=goal_pos, 
+                              title=f"{title} - NO PATH FOUND", save_path=save_path)
+            return None, None
+        
+        # Visualize the result
+        self.visualize_path(path_nodes, path_coords, start_pos, goal_pos, 
+                          title=title, save_path=save_path)
+        
+        return path_nodes, path_coords
+    
+    def find_distant_nodes(self, position, min_distance, max_distance=None):
+        """
+        Find nodes that are at least min_distance away from a given position,
+        optionally within a maximum distance.
+        
+        Args:
+            position: (x, y) coordinate tuple
+            min_distance: Minimum distance threshold
+            max_distance: Maximum distance threshold (optional)
+            
+        Returns:
+            list: List of (node_id, distance, (x, y)) tuples sorted by distance
+        """
+        coords_dict = self.fast_extract_coordinates(self.network)
+        if not coords_dict:
+            return []
+
+        pos_array = np.array(position, dtype=float)
+        distant_nodes = []
+
+        for node_id, (x, y) in coords_dict.items():
+            node_pos = np.array([x, y])
+            dist = np.linalg.norm(pos_array - node_pos)
+            
+            if dist >= min_distance:
+                if max_distance is None or dist <= max_distance:
+                    distant_nodes.append((node_id, dist, (x, y)))
+
+        # Sort by distance
+        distant_nodes.sort(key=lambda x: x[1])
+        return distant_nodes
+
+if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+    client = carla.Client("localhost", 2000)
+    world = World(client, 10000)
+    
+    path_optim = OptimizePath(world, step = 2.0)
+    
+    # Example: Plan and visualize a path between two nodes
+    print("Testing BFS pathfinding...")
+    path_result = path_optim.bfs_shortest_path(0, 800)
+    print(f"Path from node 0 to 800: {path_result}")
+    
+    # Example: Plan and visualize a path between two positions
+    coords_dict = path_optim.fast_extract_coordinates(path_optim.network)
+    if coords_dict and len(coords_dict) >= 2:
+        # Get some coordinates for demo
+        all_coords = list(coords_dict.values())
+        all_nodes = list(coords_dict.keys())
+        
+        # Pick start and goal positions
+        start_idx = 0
+        goal_idx = 800
+        
+        start_pos = all_coords[start_idx]
+        goal_pos = all_coords[goal_idx]
+        
+        print(f"\nPlanning path from {start_pos} to {goal_pos}")
+        print(f"Node IDs: {all_nodes[start_idx]} -> {all_nodes[goal_idx]}")
+        
+        # Plan and visualize the path
+        path_nodes, path_coords = path_optim.visualize_path_planning(
+            start_pos, goal_pos, 
+            title="BFS Shortest Path Visualization",
+            max_search_distance=100.0
+        )
+        
+        if path_nodes:
+            print(f"✅ Path found with {len(path_nodes)} nodes")
+            print(f"📏 Total distance: {path_optim._calculate_path_distance(path_coords):.2f}m")
+            print(f"🛣️  Path nodes: {path_nodes[:10]}{'...' if len(path_nodes) > 10 else ''}")
+        else:
+            print("❌ No path found between these positions")

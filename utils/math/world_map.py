@@ -56,20 +56,18 @@ class Map:
 
         self._render_map()
         
-    def precompute_waypoints(self, replay_file: str):
+    def precompute_waypoints(self, trajectories: np.ndarray):
         
-        trajectories = np.load(replay_file)
         points = self.waypoints_compute(trajectories[:, :3])
         if len(points) == 0:
-                return points
-
-        diffs = np.diff(points, axis=0)
-        dists = np.linalg.norm(diffs, axis=1)
+            return points
 
         # Always keep first point, then keep if distance > tol
-        mask = np.insert(dists > 1e-2, 0, True)
-        self.path_handler = PathHandler(points[mask][:, :3], extrapolate = False)
+        self.path_handler = PathHandler(points, extrapolate = False)
         self.offset_path  = [i for i in range(-70, 70, 3)]
+
+        points[:, -1] = trajectories[:, -1] # replace with time data
+        return points
 
 
     def draw_map(self, image, box_color: tuple, waypoints_coordinates):
@@ -130,6 +128,7 @@ class Map:
                             [-sin_t, cos_t, sin_t * cx + (1 - cos_t) * cy]])
 
             # Much faster because overhead offload to GPU
+            # rotated = cv2.warpAffine(cutout, M, (cutout.shape[1], cutout.shape[0]))
             gpu_img = cv2.cuda_GpuMat()
             gpu_img.upload(cutout)
             rotated = cv2.cuda.warpAffine(gpu_img, M, (cutout.shape[1], cutout.shape[0]))
@@ -183,7 +182,6 @@ class Map:
     def waypoints_compute(self, coordinates: np.ndarray):
         """This code was initially used for running online
         Now it is used for precompute waypoints"""
-        waypoints_metadata = []
 
         junctions = self.world.get_segments_from_points("junction", coordinates)
 
@@ -266,13 +264,66 @@ class Map:
             else:
                 # insert full junction group metadata
                 group_meta = next(group_iter)
-                combined_meta.extend(group_meta)
-                # skip all coordinates belonging to this junction
+                if len(group_meta) > 0:
+                    j_tree = cKDTree(group_meta[:, :2])
                 start_jid = jid
                 while i < len(jids) and jids[i] == start_jid:
+                    x, y, z = coordinates[i]
+                    if len(group_meta) > 0:
+                        _, gi = j_tree.query([x, y])
+                        gx, gy, gz, gyaw = group_meta[int(gi)]
+                        combined_meta.append([float(gx), float(gy), float(gz), float(gyaw)])
+                    else:
+                        # fallback to global KDTree if junction group is empty
+                        _, idx = self._tree.query([x, y])
+                        closest_wp = self._wp_list[idx]
+                        loc = closest_wp.transform.location
+                        yaw = closest_wp.transform.rotation.yaw
+                        combined_meta.append([loc.x, loc.y, loc.z, yaw])
                     i += 1
 
-        return np.array(combined_meta)
+        filtered_meta = []
+        tol = 1e-2
+        for i in range(len(coordinates)):
+            closest_wp = np.array(combined_meta[i], dtype = float)[:3]
+
+            j = i
+            backward_point = np.array(closest_wp)
+            while j != 0:
+                backward_point = np.array(combined_meta[j], dtype = float)[:3]
+                if not np.allclose(closest_wp, backward_point, atol = tol):
+                    break
+                j -= 1
+            
+            k = i
+            forward_point = np.array(closest_wp)
+            while k != len(coordinates):
+                forward_point = np.array(combined_meta[k], dtype = float)[:3]
+                if not np.allclose(closest_wp, forward_point, atol = tol):
+                    break
+                k += 1
+
+            choose_backward = PathHandler._edge_opposite_test(coordinates[i], backward_point, closest_wp)
+            choose_forward  = PathHandler._edge_opposite_test(coordinates[i], forward_point, closest_wp)
+            if choose_backward == choose_forward: # Projected point too close to coordinates
+                Q = coordinates[i]
+            if choose_backward:
+                # Project the coordinates[i] on to the line created by closest_wp and backward_point
+                A = closest_wp
+                B = backward_point
+                P = np.array(coordinates[i], dtype = float)
+                Q = PathHandler._project_point_to_segment(P, A, B)
+
+            if choose_forward:
+                # Project the coordinates[i] on to the line created by closest_wp and forward_point
+                A = closest_wp
+                B = forward_point
+                P = np.array(coordinates[i], dtype = float)
+                Q = PathHandler._project_point_to_segment(P, A, B)
+            filtered_meta += [[Q[0], Q[1], Q[2], 0]]
+
+
+        return np.array(filtered_meta)
         
 
 if __name__ == "__main__":
