@@ -7,7 +7,7 @@ import gc
 
 from utils.control.world import World
 from utils.control.controller import Controller
-from utils.control.displayer import HUD
+from utils.control.renderer import HUD
 from utils.control.vehicle_control import Vehicle
 
 from utils.math.path import ReplayHandler, OptimizePath
@@ -133,13 +133,15 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.display: Optional[pygame.Surface] = None
         self.clock: Optional[pygame.time.Clock] = None
 
+        self.init_win()
+
         self.running = False
         self.rgb_sensor = None  
         self.sensors_list: Dict[str, Union[RGB, Depth, SemanticSegmentation, GNSS, IMU, LidarRaycast]] = {}
         self.camera_keys = []
         
         self.controller = Controller()
-        self.hud = HUD("jetbrainsmononerdfontpropo", fontSize = 12, height = self.height)
+        self.hud = HUD(display = self.display, fontName = "jetbrainsmononerdfontpropo", fontSize = 12, height = self.height, headless = headless)
         
         self.map_processor  = Map(self.virt_world, (6, 4), map_offset = (100, 100), range_ = (50, 50), resize_to = (200, 200), scale = 3)
         self.path_optimizer = OptimizePath(self.virt_world, step = 2.0) 
@@ -196,37 +198,6 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                                                pygame.HWSURFACE | pygame.DOUBLEBUF)
         pygame.display.set_caption(title)
         self.clock = pygame.time.Clock()
-
-
-    def to_surface(self, frame: np.ndarray) -> pygame.Surface:
-        if self.headless: return
-        if frame.dtype != np.uint8:
-            frame = np.clip(frame, 0, 255).astype(np.uint8, copy=False)
-        frame = np.ascontiguousarray(frame)
-
-        # RGBA Processing
-        if frame.ndim == 3 and frame.shape[2] == 4:
-            h, w, _ = frame.shape
-            surf = pygame.image.frombuffer(frame.data, (w, h), "BGRA")
-            return surf
-        # RGB Processing
-        if frame.ndim == 3 and frame.shape[2] == 3:
-            h, w, _ = frame.shape
-            surf = pygame.image.frombuffer(frame.data, (w, h), "RGB")
-            return surf
-
-        # Grayscaled Processing
-        if frame.ndim == 2:
-            rgb = np.repeat(frame[:, :, None], 3, axis=2)
-            h, w, _ = rgb.shape
-            return pygame.image.frombuffer(rgb.data, (w, h), "RGB")
-
-        raise ValueError(f"Unsupported frame shape: {frame.shape}")
-
-    def draw_frame(self, frame: np.ndarray, position = (0, 0)) -> None:
-        if self.headless: return
-        surface = self.to_surface(frame)
-        self.display.blit(surface, position)
 
     def step_world(self) -> None:
         if self.sync:
@@ -323,8 +294,6 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
             data_collect_dir: str = None, 
             replay_logging: str = None, 
             debug = False) -> None:
-        if self.display is None:
-            self.init_win()
 
         try:
             self.virt_vehicle.set_autopilot(self.controller.autopilot) # First init for autopilot
@@ -337,18 +306,26 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                 midlane_waypoints = self.map_processor.precompute_waypoints(trajectories)
             else:
                 self.log.INFO("CREATING RANDOM PATH FOR MAP")
-                self.prev_loc = self.vehicle.get_location()
-                distant_nodes = self.path_optimizer.find_distant_nodes(np.array([self.prev_loc.x, self.prev_loc.y]), 200)
-                if distant_nodes:
-                    rand_node = np.random.randint(0, len(distant_nodes))
-                    fartest_id, farthes_distance, farthest_pos = distant_nodes[rand_node]
+                prev_loc = np.array([self.vehicle.get_location().x, self.vehicle.get_location().y])
+                extended_path = None
+                for _ in range(10):
+                    distant_nodes = self.path_optimizer.find_distant_nodes(prev_loc, np.random.randint(50, 200))
+                    if distant_nodes:
+                        rand_node = np.random.randint(0, len(distant_nodes))
+                        fartest_id, farthes_distance, farthest_pos = distant_nodes[rand_node]
 
-                nodes, path_coor = self.path_optimizer.plan_path(
-                    np.array([self.prev_loc.x, self.prev_loc.y]), 
-                    np.array(list(farthest_pos))
-                )
-                path_coor = np.hstack([path_coor, np.zeros((path_coor.shape[0], 1))])
-                self.map_processor.precompute_waypoints(path_coor)
+                    farthest_pos = np.array(list(farthest_pos))
+                    nodes, path_coor = self.path_optimizer.plan_path(
+                        prev_loc, 
+                        farthest_pos
+                    )
+                    path_coor = np.hstack([path_coor, np.zeros((path_coor.shape[0], 1))])
+                    if extended_path is None:
+                        extended_path = path_coor
+                    else:
+                        extended_path = np.vstack([extended_path, path_coor])
+                    prev_loc = farthest_pos
+                self.map_processor.precompute_waypoints(extended_path)
 
             logger    = TrajectoryBuffer(save_logging, min_dt_s = .2) if save_logging else None
             replayer  = ReplayHandler(replay_logging[0], self.virt_world, data_collect_dir, use_temporal_wp, midlane_waypoints, debug) if replay_logging else None
@@ -356,10 +333,6 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
             pbar      = tqdm(total = replay_logging[1], unit = 'server second', desc = "Play duration") if replay_logging else None
             # ================== INITIALIZING CLASSES =====================
 
-            H, W, _    = 720, 1280, 3
-            x_top_left = 250; x_top_right = W - x_top_left
-            x_bot_left = 20; x_bot_right = W - x_bot_left
-            y_hor      = 300; y_bot         = 680
             frame_id = 0
             while True if self.headless else self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
                 self.step_world()
@@ -373,11 +346,11 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
 
 
                 if frame is not None:
-                    self.draw_frame(frame)
                     if not self.headless:
-                        self.hud.draw_measurement(self.display)
-                        self.hud.draw_controls(self.display)
-                        self.hud.draw_logging(self.display)
+                        self.hud.draw_frame(frame)
+                        self.hud.draw_measurement()
+                        self.hud.draw_controls()
+                        self.hud.draw_logging()
 
 
                     location = self.sub_location.receive()
@@ -404,7 +377,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                             multi_images = np.hstack(multi_images_list)
                             multi_images_border = self.draw_border(multi_images, 3, (255, 100, 200, 255))                
                             multi_h, multi_w, _ = multi_images_border.shape
-                            self.draw_frame(multi_images_border, (self.width - multi_w - 10, self.height - multi_h - 10))
+                            self.hud.draw_frame(multi_images_border, (self.width - multi_w - 10, self.height - multi_h - 10))
 
                     
                     
@@ -425,6 +398,9 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                     multi_images_list = list(data.values())   # e.g. [img1, img2, img3]
                     multi_keys = [f"I{i+1}" for i in range(len(multi_images_list))]
 
+                    H, W, _    = frame.shape
+                    x_top_left = 250; x_top_right = W - x_top_left
+                    y_hor      = 300; y_bot         = 680
                     frame_cutout = frame[y_hor: y_bot, x_top_left: x_top_right]
                     frame_cutout = cv2.resize(frame_cutout, (multi_images_list[0].shape[1], multi_images_list[0].shape[0]))
                     image_kwargs = (
@@ -459,17 +435,9 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
 
                                     wp_canvas = draw_waypoints_canvas(output, canvas_size = (100, 100), scale = 5.0)
                                     wp_canvas_h, wp_canvas_w, _ = wp_canvas.shape
-                                    self.draw_frame(wp_canvas, (10, self.height - wp_canvas_h - 10))
+                                    self.hud.draw_frame(wp_canvas, (10, self.height - wp_canvas_h - 10))
                         
-                        # preview_h, preview_w, _ = inp.shape
-                        # inp_surface = self.to_surface(inp[:, :, ::-1])
-                        # self.display.blit(inp_surface, (self.width - preview_w - 10, self.height - preview_h - 10))
                     frame_id += 1
-                    
-                    # local_wp = infer(model, inp)[0]
-                    # local_wp[:, 1] = -local_wp[:, 1]
-                    # global_wp = self.virt_vehicle.global_transform(local_wp, np.radians(self.sub_heading.receive()))
-                    # # self.virt_world.draw_waypoints(global_wp, duration = 1 * (1 / self.server_fps))
 
                 
 

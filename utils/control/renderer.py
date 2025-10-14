@@ -1,18 +1,49 @@
 import pygame
-import inspect
+import numpy as np
 
 from utils.messages.message_handler import MessagingSubscribers
 
 class HUD(MessagingSubscribers):
-    def __init__(self, fontName="Arial", fontSize=24, height=720):
+    def __init__(self, display, fontName="Arial", fontSize=24, height=720, headless = False):
         super().__init__()  # init all subscribers
         pygame.font.init()
+        self.display = display
+        self.headless = headless
         self.font = pygame.font.SysFont(fontName, fontSize, bold=True)
         self.text_height = 20
         self._line_cache = {}
         
         self.overlay = pygame.Surface((310, height), pygame.SRCALPHA)
         
+    def to_surface(self, frame: np.ndarray) -> pygame.Surface:
+        if self.headless: return
+        if frame.dtype != np.uint8:
+            frame = np.clip(frame, 0, 255).astype(np.uint8, copy=False)
+        frame = np.ascontiguousarray(frame)
+
+        # RGBA Processing
+        if frame.ndim == 3 and frame.shape[2] == 4:
+            h, w, _ = frame.shape
+            surf = pygame.image.frombuffer(frame.data, (w, h), "BGRA")
+            return surf
+        # RGB Processing
+        if frame.ndim == 3 and frame.shape[2] == 3:
+            h, w, _ = frame.shape
+            surf = pygame.image.frombuffer(frame.data, (w, h), "RGB")
+            return surf
+
+        # Grayscaled Processing
+        if frame.ndim == 2:
+            rgb = np.repeat(frame[:, :, None], 3, axis=2)
+            h, w, _ = rgb.shape
+            return pygame.image.frombuffer(rgb.data, (w, h), "RGB")
+
+        raise ValueError(f"Unsupported frame shape: {frame.shape}")
+
+    def draw_frame(self, frame: np.ndarray, position = (0, 0)) -> None:
+        if self.headless: return
+        surface = self.to_surface(frame)
+        self.display.blit(surface, position)
 
     @staticmethod
     def heading_to_cardinal(deg: float) -> str:
@@ -29,7 +60,7 @@ class HUD(MessagingSubscribers):
         millis  = int((t % 1) * 1000)
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
 
-    def _render_line(self, surface, label: str, value: str, line_idx: int, 
+    def _render_line(self, label: str, value: str, line_idx: int, 
                  x: int = 10, y: int = 10):
         key = (label, line_idx)
         cached_val, cached_surface = self._line_cache.get(key, (None, None))
@@ -41,17 +72,17 @@ class HUD(MessagingSubscribers):
         else:
             text_surface = cached_surface
         if text_surface:  # blit always
-            surface.blit(text_surface, (x, y + self.text_height * line_idx))
+            self.display.blit(text_surface, (x, y + self.text_height * line_idx))
 
     def _read(self, sub, default="N/A"):
         """Helper to read latest subscriber value or fallback."""
         val = sub.receive()
         return val if val is not None else default
 
-    def draw_measurement(self, surface: pygame.Surface):
+    def draw_measurement(self):
         # Transparent overlay
         pygame.draw.rect(self.overlay, (0, 0, 0, 100), self.overlay.get_rect())
-        surface.blit(self.overlay, (0, 0))
+        self.display.blit(self.overlay, (0, 0))
 
         # Read values directly from subscribers
         server_fps = self._read(self.sub_server_fps, 0)
@@ -101,9 +132,9 @@ class HUD(MessagingSubscribers):
         self.max_string = max(max(len(v) for _, v, _ in value_lines), 15)
 
         for label, value, idx in value_lines:
-            self._render_line(surface, label, value, idx)
+            self._render_line(label, value, idx)
 
-    def draw_controls(self, surface, x=10, y=330):
+    def draw_controls(self, x=10, y=330):
         line_h = 20
         bar_w, bar_h = 150, 10
         bar_x = x + 100
@@ -125,34 +156,34 @@ class HUD(MessagingSubscribers):
         regulate = self._read(self.sub_regulate_speed_logging, False)
 
         # Bars
-        surface.blit(self.font.render("Throttle:", True, white), (x, y))
-        pygame.draw.rect(surface, white, (bar_x, y+5, bar_w, bar_h), 1)
-        pygame.draw.rect(surface, green, (bar_x, y+5, int(bar_w * min(throttle,1.0)), bar_h))
+        self.display.blit(self.font.render("Throttle:", True, white), (x, y))
+        pygame.draw.rect(self.display, white, (bar_x, y+5, bar_w, bar_h), 1)
+        pygame.draw.rect(self.display, green, (bar_x, y+5, int(bar_w * min(throttle,1.0)), bar_h))
 
-        surface.blit(self.font.render("Steer:", True, white), (x, y+line_h))
-        pygame.draw.rect(surface, white, (bar_x, y+line_h+5, bar_w, bar_h), 1)
+        self.display.blit(self.font.render("Steer:", True, white), (x, y+line_h))
+        pygame.draw.rect(self.display, white, (bar_x, y+line_h+5, bar_w, bar_h), 1)
         if steer >= 0:
-            pygame.draw.rect(surface, green, (bar_x + bar_w//2, y+line_h+5,
+            pygame.draw.rect(self.display, green, (bar_x + bar_w//2, y+line_h+5,
                                               int((bar_w//2) * min(steer,1.0)), bar_h))
         else:
-            pygame.draw.rect(surface, green, (bar_x + bar_w//2 + int((bar_w//2)*steer), y+line_h+5,
+            pygame.draw.rect(self.display, green, (bar_x + bar_w//2 + int((bar_w//2)*steer), y+line_h+5,
                                               int(-(bar_w//2) * steer), bar_h))
 
-        surface.blit(self.font.render("Brake:", True, white), (x, y+2*line_h))
-        pygame.draw.rect(surface, white, (bar_x, y+2*line_h+5, bar_w, bar_h), 1)
-        pygame.draw.rect(surface, red, (bar_x, y+2*line_h+5, int(bar_w * min(brake,1.0)), bar_h))
+        self.display.blit(self.font.render("Brake:", True, white), (x, y+2*line_h))
+        pygame.draw.rect(self.display, white, (bar_x, y+2*line_h+5, bar_w, bar_h), 1)
+        pygame.draw.rect(self.display, red, (bar_x, y+2*line_h+5, int(bar_w * min(brake,1.0)), bar_h))
 
         # Others as text
         spacing = 33
-        surface.blit(self.font.render(f"{'Throttle:':<{spacing}} {'■' if reverse else '□'}", True, white), (x, y+3*line_h))
-        surface.blit(self.font.render(f"{'Hand brake:':<{spacing}} {'■' if handbrake else '□'}", True, white), (x, y+4*line_h))
-        surface.blit(self.font.render(f"{'Manual:':<{spacing}} {'■' if manual else '□'}", True, white), (x, y+5*line_h))
-        surface.blit(self.font.render(f"{'Gear:':<{spacing}} {gear}", True, white), (x, y+6*line_h))
-        surface.blit(self.font.render(f"{'Autopilot:':<{spacing}} {'■' if autopilot else '□'}", True, white), (x, y+7*line_h))
-        surface.blit(self.font.render(f"{'Model autopilot:':<{spacing}} {'■' if model_autopilot else '□'}", True, white), (x, y+8*line_h))
-        surface.blit(self.font.render(f"{'Regulate speed:':<{spacing}} {'■' if regulate else '□'}", True, white), (x, y+9*line_h))
+        self.display.blit(self.font.render(f"{'Throttle:':<{spacing}} {'■' if reverse else '□'}", True, white), (x, y+3*line_h))
+        self.display.blit(self.font.render(f"{'Hand brake:':<{spacing}} {'■' if handbrake else '□'}", True, white), (x, y+4*line_h))
+        self.display.blit(self.font.render(f"{'Manual:':<{spacing}} {'■' if manual else '□'}", True, white), (x, y+5*line_h))
+        self.display.blit(self.font.render(f"{'Gear:':<{spacing}} {gear}", True, white), (x, y+6*line_h))
+        self.display.blit(self.font.render(f"{'Autopilot:':<{spacing}} {'■' if autopilot else '□'}", True, white), (x, y+7*line_h))
+        self.display.blit(self.font.render(f"{'Model autopilot:':<{spacing}} {'■' if model_autopilot else '□'}", True, white), (x, y+8*line_h))
+        self.display.blit(self.font.render(f"{'Regulate speed:':<{spacing}} {'■' if regulate else '□'}", True, white), (x, y+9*line_h))
 
-    def draw_logging(self, surface, x=10, y=510):
+    def draw_logging(self, x=10, y=510):
         turn = self._read(self.sub_turn_signal, -1)
         if turn == -1:
             direction_str = "Keep lane"
@@ -168,4 +199,4 @@ class HUD(MessagingSubscribers):
         line_h = 20
         spacing = 15
         text = self.font.render(f"{'Turn signal:':<{spacing}}{direction_str:>{self.max_string}}", True, (255, 255, 255))
-        surface.blit(text, (x, y + 1 * line_h))
+        self.display.blit(text, (x, y + 1 * line_h))
