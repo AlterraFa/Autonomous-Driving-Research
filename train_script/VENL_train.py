@@ -51,11 +51,11 @@ if __name__ == "__main__":
     gpu = torch.device("cuda")
     torch.manual_seed(45)
 
-    model = VENL.waypoint(num_waypoints = 5, droprate = 0.2).to(gpu) 
+    model = VENL.waypoint(num_waypoints = 5, droprate = 0.25).to(gpu) 
     images_key = list(model.input_metadata.keys())
 
     dataset = CarlaDatasetLoader(
-        "./data/recording_20250930_220859_best_temporal", 
+        "./data/recording_20251012_205458_best_temporal/", 
         images_key = images_key, 
         downsize_ratio = 1, 
         load_size = -1
@@ -63,7 +63,7 @@ if __name__ == "__main__":
     train, val, test = dataset.split(train = 0.8, val = 0.2)
     train_loader     = DataLoader(train, batch_size = 120, shuffle = True, collate_fn = dataset.collate_fn)
     val_loader       = DataLoader(val, batch_size = 200, shuffle = True, collate_fn = dataset.collate_fn)
-    
+
 
     model_name = "VENL"
     run        = get_next_run(model_name)
@@ -87,6 +87,7 @@ if __name__ == "__main__":
     l1_weight    = float(config["VENL"]["l1_weight"])
     l2_weight    = float(config["VENL"]["l2_weight"])
     target_spread = torch.tensor(ast.literal_eval(config["VENL"]["target_spread"]))
+    patience      = int(config["VENL"]["patience"])
 
     optimizer = optim.AdamW(model.parameters(), lr = initLR, betas = (0.95, 0.999))
 
@@ -98,7 +99,7 @@ if __name__ == "__main__":
         milestones=[epochs // 2]
     )
 
-    earlystop = EarlyStopping(20, 1e-5, path = f"{FILE_DIR}/../model/{model_name}/Experiment/run{run}/{model._get_name()}_run{run}.pt", verbose = True)
+    earlystop = EarlyStopping(patience, 1e-5, path = f"{FILE_DIR}/../model/{model_name}/Experiment/run{run}/{model._get_name()}_run{run}.pt", verbose = True)
     
     pbar = tqdm(range(epochs), desc="Training Epochs", position = 0)
     for epoch in pbar:
