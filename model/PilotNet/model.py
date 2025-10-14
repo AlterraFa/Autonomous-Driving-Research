@@ -1,5 +1,7 @@
 import os, sys
+import numpy as np
 import torch
+import cv2
 
 from tqdm.auto import tqdm
 from torch import nn
@@ -70,6 +72,7 @@ class PilotNetStatic(nn.Module):
                 nn.Identity() if self.mode == "waypoint" else nn.Tanh()
             )]
         self.cmd_branch = nn.ModuleList(cmd_branch)
+
         
     def forward(self, I0, branch: int = -1):
         out = self.residual1(I0)
@@ -111,6 +114,25 @@ class PilotNetStatic(nn.Module):
         control_type = list(raw_out.keys())[0]
         log.INFO(message = f"Using control type: [bold]{control_type}[/]", once = True)
         return raw_out[control_type][:, data + 1][0, 0]
+
+    def preprocessor(self, I0):
+        # Preprocess
+        if not hasattr(self, "registered_preprocess"):
+            self.registered_preprocess = True
+            H, W, _    = I0.shape
+            x_top_left = 70; x_top_right = W - x_top_left
+            x_bot_left = 20; x_bot_right = W - x_bot_left
+            y_hor      = 390; y_bot         = 720
+            src_points = np.float32([[x_top_left, y_hor],
+                                    [x_top_right, y_hor],
+                                    [x_bot_right, y_bot],
+                                    [x_bot_left, y_bot]])
+            self.target_width = self.input_metadata['I0'][3]; self.target_height = self.input_metadata['I0'][2]
+            dst_points = np.float32([[0, 0], [self.target_width, 0], [self.target_width, self.target_height], [0, self.target_height]])
+            self.M = cv2.getPerspectiveTransform(src_points, dst_points)
+
+        inp = cv2.warpPerspective(I0[:, :, :3], self.M, (self.target_width, self.target_height))
+        return inp
 
 def single_epoch_training_static(model: PilotNetStatic, mode: Literal["steer", "waypoint"], loader: DataLoader, criterion: nn, optimizer: optim, l1 = 0.0, l2 = 0.0):
     model.train()
