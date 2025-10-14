@@ -1,3 +1,4 @@
+#!/home/alterraonix/miniconda/envs/Core/bin/python
 import carla
 
 client = carla.Client("localhost", 2000)
