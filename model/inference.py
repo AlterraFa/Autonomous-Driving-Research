@@ -75,94 +75,127 @@ class ModelLoader:
         self.log.ERROR(f"Could not find class [bold]{class_name}[/] in any of: {candidate_modules}", exit_code = 12)
 
 class AsyncInference:
-    def __init__(self):
+    def __init__(self, path, device = "cpu", batch_output = False, **model_kwargs):
+        self.log = Logger()
         self.input_data = None
         self.output_data = None
+
+        self.batch_output = batch_output
+
+        self.load_model(path, device, **model_kwargs)
         
         self._event = threading.Event()
         self._lock = threading.Lock()
         self.infer_thread = threading.Thread(target=self._inference_torch if self.use_tensorrt == False else self._inference_tensorrt, daemon=True)
         self.infer_thread.start()
-
+    
     def _inference_torch(self):
-
-
+        
         while not self._event.is_set():
+
             with self._lock:
                 data = self.input_data
-                self.input_data = None   # consume once
+                self.input_data = None
             if data is None:
-                time.sleep(0.005)        # yield CPU, avoid busy spin
+                time.sleep(0.02)
                 continue
 
-            inp_img, extra_data = data
-            
-            if isinstance(inp_img, (torch.Tensor, np.ndarray, cv2.Mat)):
-                inp = torch.from_numpy(np.ascontiguousarray(inp_img)).float()
-                inp = inp.permute(2, 0, 1).unsqueeze(0).to(self.device, non_blocking=True) / 255.0
-                inp = [inp]
-            else:
-                inp = []
-                for img in inp_img:
-                    inp_tmp = torch.from_numpy(np.ascontiguousarray(img)).float()
-                    inp_tmp = inp_tmp.permute(2, 0, 1).unsqueeze(0).to(self.device, non_blocking=True) / 255.0
-                    inp += [inp_tmp]
-                    
-            if not isinstance(extra_data, (torch.Tensor, np.ndarray, cv2.Mat)):
-                processor_data = extra_data
-            else:
-                ...
+            try:  # ← ADD TRY-CATCH
+                inp_img, extra_data = data
+                
+                if isinstance(inp_img, (torch.Tensor, np.ndarray, cv2.Mat)):
+                    inp = torch.from_numpy(np.ascontiguousarray(inp_img)).float()
+                    inp = inp.permute(2, 0, 1).unsqueeze(0).to(self.device, non_blocking=True) / 255.0
+                    inp = [inp]
+                else:
+                    inp = []
+                    for img in inp_img:
+                        inp_tmp = torch.from_numpy(np.ascontiguousarray(img)).float()
+                        inp_tmp = inp_tmp.permute(2, 0, 1).unsqueeze(0).to(self.device, non_blocking=True) / 255.0
+                        inp += [inp_tmp]
+                        
+                if not isinstance(extra_data, (torch.Tensor, np.ndarray, cv2.Mat)):
+                    processor_data = extra_data
+                else:
+                    processor_data = None  # ← FIX THE ELLIPSIS
 
-            with torch.no_grad():
-                output = self.pytorch(*inp, processor_data).detach().cpu().numpy()[0]
+                with torch.no_grad():
+                    if processor_data != None:
+                        output = self.pytorch(*inp, processor_data)
+                    else:
+                        output = self.pytorch(*inp)
+                    if isinstance(output, torch.Tensor):
+                        # Single tensor output
+                        if self.batch_output == True:
+                            output = output.detach().cpu().numpy()
+                        else:
+                            output = output.detach().cpu().numpy()[0]
+                    elif isinstance(output, (tuple, list)):
+                        # Multiple tensor outputs (tuple or list)
+                        if self.batch_output:
+                            output = tuple(
+                                tensor.detach().cpu().numpy() if isinstance(tensor, torch.Tensor) else tensor
+                                for tensor in output
+                            )
+                        else:
+                            output = tuple(
+                                tensor.detach().cpu().numpy()[0] if isinstance(tensor, torch.Tensor) else tensor
+                                for tensor in output
+                            )
+                        
+                with self._lock:
+                    self.output_data = output
                     
-            with self._lock:
-                self.output_data = output
+            except Exception as e:  # ← ADD EXCEPTION HANDLING
+                self.log.ERROR(f"PyTorch inference error: {e}")
+                print_exc()
+                break
+                
+        self.log.INFO("PyTorch inference stopped")  # ← ADD LOG MESSAGE
         
     def _inference_tensorrt(self):
 
         self.ctx.push()
         self.log.INFO("Started engine inference")
 
-        while not self._event.is_set():
-            with self._lock:
-                data = self.input_data
-                self.input_data = None   # consume once
-            if data is None:
-                time.sleep(0.005)        # yield CPU, avoid busy spin
-                continue
+        try:
+            while not self._event.is_set():
+                with self._lock:
+                    data = self.input_data
+                    self.input_data = None   # consume once
+                if data is None:
+                    time.sleep(0.005)        # yield CPU, avoid busy spin
+                    continue
 
-            inp_img, extra_data = data
-            
-            if isinstance(inp_img, (torch.Tensor, np.ndarray, cv2.Mat)):
-                inp = torch.from_numpy(np.ascontiguousarray(inp_img)).float()
-                inp = inp.permute(2, 0, 1).unsqueeze(0) / 255.0
-                inp = inp.detach().cpu().numpy().astype(np.float32)
-                inp = np.ascontiguousarray(inp)
-                inp = [inp]
-            else:
-                inp = []
-                for img in inp_img:
-                    inp_tmp = torch.from_numpy(np.ascontiguousarray(img)).float()
-                    inp_tmp = inp_tmp.permute(2, 0, 1).unsqueeze(0).to(non_blocking=True) / 255.0
-                    inp += [inp_tmp]
-
-            if not isinstance(extra_data, (torch.Tensor, np.ndarray, cv2.Mat)):
-                processor_data = extra_data
-            else:
-                ...
-                    
-            try:
-                raw_output = self.engine.infer(*inp)
-                # Unwrap using .__func__ is needed
-                output = self.processor.__func__(raw_output, processor_data) # All of the function should have been static method but the first arg is prepend with a self
+                inp_img, extra_data = data
                 
-            except Exception as e:
-                print_exc()
-                break
+                if isinstance(inp_img, (torch.Tensor, np.ndarray, cv2.Mat)):
+                    inp = torch.from_numpy(np.ascontiguousarray(inp_img)).float()
+                    inp = inp.permute(2, 0, 1).unsqueeze(0) / 255.0
+                    inp = inp.detach().cpu().numpy().astype(np.float32)
+                    inp = np.ascontiguousarray(inp)
+                    inp = [inp]
+                else:
+                    inp = []
+                    for img in inp_img:
+                        inp_tmp = torch.from_numpy(np.ascontiguousarray(img)).float()
+                        inp_tmp = inp_tmp.permute(2, 0, 1).unsqueeze(0).to(non_blocking=True) / 255.0
+                        inp += [np.ascontiguousarray(inp_tmp)]
 
-            with self._lock:
-                self.output_data = output
+                if not isinstance(extra_data, (torch.Tensor, np.ndarray, cv2.Mat)):
+                    processor_data = extra_data
+                else:
+                    ...
+                
+                        
+                raw_output = self.engine.infer(*inp)
+                output = self.processor(raw_output, processor_data)
+
+                with self._lock:
+                    self.output_data = output
+
+        except Exception as e:
+            print_exc()
         self.ctx.pop()
         self.log.INFO("Engine inference stopped")
 
@@ -207,8 +240,7 @@ class AsyncInference:
             model.to(device).eval()
             return model
     
-    @classmethod
-    def load_model(cls, path: str, device: str = "cpu", **model_kwargs):
+    def load_model(self, path: str, device: str = "cpu", **model_kwargs):
         """
         Load a model checkpoint, automatically inferring class name and module path from filename.
 
@@ -220,41 +252,37 @@ class AsyncInference:
         Returns:
             torch.nn.Module: Loaded model
         """
-        cls.log = Logger()
 
+        basepath = os.path.dirname(path)
         fname = os.path.basename(path)
         name, ext = os.path.splitext(fname)
         
         model_class = ModelLoader()._extract_class(path)
+        
+        pt_path = basepath + "/" + name + ".pt"
 
         if ext == ".pt":
-            cls.log.INFO("Using Dynamic graph model variant (Pytorch)")
-            cls.pytorch = cls._from_checkpoint(model_class, path, device = device)
-            cls.device = next(cls.pytorch.parameters()).device
-            cls.use_tensorrt = False
-            return cls()
+            self.log.INFO("Using Dynamic graph model variant (Pytorch)")
+            self.pytorch = self._from_checkpoint(model_class, pt_path, device = device)
+            self.device = next(self.pytorch.parameters()).device
+            self.use_tensorrt = False
         elif ext == '.engine':
-            cls.log.INFO("Using Engine variant")
+            self.log.INFO("Using Engine variant")
             if hasattr(model_class, "postprocessor"):
-                # Getattr actually does take a function wrapped in staticmethod but because we invoked cls.processor, the class prepend self to it automatically
-                cls.log.DEBUG("Found a custom postprocessor")
-                cls.processor = getattr(model_class, "postprocessor") 
+                self.log.DEBUG("Found a custom postprocessor")
+                self.processor = getattr(model_class, "postprocessor") 
             else:
-                cls.log.DEBUG("Using default postprocessor")
-                cls.processor = cls.default_postprocessor
+                self.log.DEBUG("Using default postprocessor")
+                self.processor = self.default_postprocessor
 
+            self.pytorch = self._from_checkpoint(model_class, pt_path, device = 'cpu')
             # Make a cuda context in main thread but then pop it out in order to push into worker thread
-            cls.ctx = cuda.Device(0).make_context()
-            cls.engine = ImageTensorRTInference()
-            cls.engine.load_engine(path)
-            cls.ctx.pop()
-            cls.use_tensorrt = True
-
-            
-            return cls()
+            self.ctx = cuda.Device(0).make_context()
+            self.engine = ImageTensorRTInference()
+            self.engine.load_engine(path)
+            self.ctx.pop()
+            self.use_tensorrt = True
 
     @staticmethod
     def default_postprocessor(*input):
         return input
-            
-
