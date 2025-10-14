@@ -2,12 +2,15 @@ import numpy as np
 
 def local_2_global(location: np.ndarray, points: np.ndarray, rotation: float):
 
-    x, y, z = location
+    if len(location) == 3:
+        x, y, z = location
+    else:
+        x, y = location
     c, s = np.cos(rotation), np.sin(rotation)
 
     T = np.array([
         [ c, -s, x],
-        [ s,  c, y],
+        [ s,  c, -y],
         [ 0,  0, 1]
     ])
 
