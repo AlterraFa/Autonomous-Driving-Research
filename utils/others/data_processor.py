@@ -83,9 +83,7 @@ class CarlaDatasetCollector:
 
     def maybe_save(
         self,
-        ego_waypoints: np.ndarray,
         control: Dict[str, Any],
-        turn_signal: str,
         **images: np.ndarray,
     ) -> None:
         """
@@ -121,17 +119,20 @@ class CarlaDatasetCollector:
             fname = f"{key}/{self.sample_idx:06d}_{key}.png"
             fpath = self.img_dir / fname
             # push to that saver’s queue
-            self._savers[key].save(
-                cv2.imwrite, str(fpath), cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            )
+            if len(img.shape) == 3:
+                self._savers[key].save(
+                    cv2.imwrite, str(fpath), cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                )
+            else:
+                self._savers[key].save(
+                    cv2.imwrite, str(fpath), img
+                )
             saved_files[key] = str(fpath.relative_to(self.save_dir))
 
 
         meta = {
             "img_file": saved_files,
-            "ego_waypoints": ego_waypoints.tolist(),
             "control": control,
-            "turn_signal": turn_signal,
             "timestamp": time.time() - self.time_start,
         }
 

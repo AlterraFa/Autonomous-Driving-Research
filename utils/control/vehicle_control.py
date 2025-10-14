@@ -6,6 +6,7 @@ import math
 
 from traceback import print_exc
 from scipy.signal import butter, lfilter, lfilter_zi
+from scipy.interpolate import interp1d
 from utils.messages.message_handler import MessagingSubscribers
 
 class OnlineLowPassFilter:
@@ -62,6 +63,9 @@ class Vehicle(MessagingSubscribers):
         self.threads = [self.tl_thread, self.ts_thread, self.junction_thread, self.waypoint_thread, self.location_thread]
         
         self.prev_loc = self.vehicle.get_transform().location
+
+        self.max_steer = 70
+        self.wheelbase = 3.047080078125
         
         
     def stop(self):
@@ -532,21 +536,3 @@ def _next_along(current_wp: carla.Waypoint, step: float, prev_dir: np.ndarray) -
     if len(nxt) == 1:
         return nxt[0]
     return _pick_straightest(prev_dir, nxt)
-
-def wait_for_actor_by_role(world: carla.World, role_name: str, timeout_s: float = 10.0) -> carla.Actor | None:
-    import time
-    t0 = time.time()
-    while time.time() - t0 < timeout_s:
-        vehicles = world.get_actors().filter('vehicle.*')
-        for v in vehicles:
-            try:
-                if v.attributes.get('role_name', '') == role_name:
-                    return v
-            except Exception:
-                pass
-        # advance world in sync or just sleep in async
-        if world.get_settings().synchronous_mode:
-            world.tick()
-        else:
-            time.sleep(0.05)
-    return None

@@ -10,8 +10,10 @@ from utils.control.controller import Controller
 from utils.control.displayer import HUD
 from utils.control.vehicle_control import Vehicle
 
-from utils.math.path import ReplayHandler
+from utils.math.path import ReplayHandler, OptimizePath
 from utils.math.world_map import Map
+from utils.math.pid import lateral_control
+from utils.math.coordinate_transform import local_2_global
 
 from utils.spawn.sensor_spawner import *
 from utils.others.data_processor import TrajectoryBuffer
@@ -97,12 +99,16 @@ Logger().INFO(generate_controller_doc(KEYBINDS, JOYBINDS))
 
 
 class CarlaViewer(MessagingSenders, MessagingSubscribers):
+    override_render_map = False
+
+
     def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, headless = False, sync: bool = False, fps: int = 70):
         self.log = Logger() 
         MessagingSenders.__init__(self)
         MessagingSubscribers.__init__(self)
 
-        self.log.WARNING("HEADLESS MODE [bold][red][u]ENABLED[/][/][/]")
+        if headless:
+            self.log.WARNING("HEADLESS MODE [bold][red][u]ENABLED[/][/][/]")
         self.headless = headless
         self.virt_world = world
         self.world = world.world
@@ -110,6 +116,10 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.height = height
         self.sync = sync
         self.fps = fps if not self.headless else 100
+        self.last_platform_time = None; 
+        self.server_fps = self.fps; 
+        self.client_start = time.time()
+        self.server_start = self.world.get_snapshot().timestamp.elapsed_seconds
 
         self.avg_server_fps = 0.0
         self.alpha = 0.05  # smoothing factor, adjust as needed
@@ -130,7 +140,9 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         
         self.controller = Controller()
         self.hud = HUD("jetbrainsmononerdfontpropo", fontSize = 12, height = self.height)
-        self.map_processor = Map(self.virt_world, (6, 4), map_offset = (100, 100), range_ = (50, 50), resize_to = (200, 200), scale = 3)
+        
+        self.map_processor  = Map(self.virt_world, (6, 4), map_offset = (100, 100), range_ = (50, 50), resize_to = (200, 200), scale = 3)
+        self.path_optimizer = OptimizePath(self.virt_world, step = 2.0) 
     
         
     def init_sensor(self, sensors_metadata: dict):
@@ -314,27 +326,41 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         if self.display is None:
             self.init_win()
 
-        self.virt_vehicle.set_autopilot(self.controller.autopilot) # First init for autopilot
-        self.prev_loc = self.vehicle.get_transform().location
-
-        
-        logger    = TrajectoryBuffer(save_logging, min_dt_s = .2) if save_logging else None
-        replayer  = ReplayHandler(replay_logging[0], self.virt_world, data_collect_dir, use_temporal_wp, debug) if replay_logging else None
-        inference = AsyncInference.load_model(model_path) if model_path is not None else None
-        pbar      = tqdm(total = replay_logging[1], unit = 'server second', desc = "Creating data") if replay_logging else None
-
-        if replayer is not None:
-            self.map_processor.precompute_waypoints(replay_logging[0])
-
-        H, W, _    = 720, 1280, 3
-        x_top_left = 200; x_top_right = W - x_top_left
-        x_bot_left = 20; x_bot_right = W - x_bot_left
-        y_hor      = 390; y_bot         = 680
         try:
-            self.last_platform_time = None; 
-            self.server_fps = self.fps; 
-            self.client_start = time.time()
-            self.server_start = self.world.get_snapshot().timestamp.elapsed_seconds
+            self.virt_vehicle.set_autopilot(self.controller.autopilot) # First init for autopilot
+            
+            # ================== INITIALIZING CLASSES =====================
+            midlane_waypoints = None
+            if replay_logging is not None:
+                self.log.INFO("REPLAYING PATH FOR MAP")
+                trajectories = np.load(replay_logging[0])
+                midlane_waypoints = self.map_processor.precompute_waypoints(trajectories)
+            else:
+                self.log.INFO("CREATING RANDOM PATH FOR MAP")
+                self.prev_loc = self.vehicle.get_location()
+                distant_nodes = self.path_optimizer.find_distant_nodes(np.array([self.prev_loc.x, self.prev_loc.y]), 200)
+                if distant_nodes:
+                    rand_node = np.random.randint(0, len(distant_nodes))
+                    fartest_id, farthes_distance, farthest_pos = distant_nodes[rand_node]
+
+                nodes, path_coor = self.path_optimizer.plan_path(
+                    np.array([self.prev_loc.x, self.prev_loc.y]), 
+                    np.array(list(farthest_pos))
+                )
+                path_coor = np.hstack([path_coor, np.zeros((path_coor.shape[0], 1))])
+                self.map_processor.precompute_waypoints(path_coor)
+
+            logger    = TrajectoryBuffer(save_logging, min_dt_s = .2) if save_logging else None
+            replayer  = ReplayHandler(replay_logging[0], self.virt_world, data_collect_dir, use_temporal_wp, midlane_waypoints, debug) if replay_logging else None
+            inference = AsyncInference(model_path, device = 'cuda', batch_output = False) if model_path is not None else None
+            pbar      = tqdm(total = replay_logging[1], unit = 'server second', desc = "Play duration") if replay_logging else None
+            # ================== INITIALIZING CLASSES =====================
+
+            H, W, _    = 720, 1280, 3
+            x_top_left = 250; x_top_right = W - x_top_left
+            x_bot_left = 20; x_bot_right = W - x_bot_left
+            y_hor      = 300; y_bot         = 680
+            frame_id = 0
             while True if self.headless else self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
                 self.step_world()
                 self.data_bus(replay_logging != None)
@@ -356,7 +382,11 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
 
                     location = self.sub_location.receive()
                     heading  = self.sub_heading.receive()
-                    unrouted_map, routed_map = self.map_processor.retrieve_map(location, heading, display = self.controller.toggle_map or replayer is not None)
+                    unrouted_map, routed_map = self.map_processor.retrieve_map(
+                        coordinate = location, 
+                        heading = heading, 
+                        display = self.controller.toggle_map or replayer is not None or self.override_render_map
+                    )
                     if self.controller.toggle_map:
                         submap_h, submap_w, _ = routed_map.shape
                         self.draw_frame(routed_map, (self.width - submap_w - 10, 0 + 10))
@@ -397,38 +427,43 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
 
                     frame_cutout = frame[y_hor: y_bot, x_top_left: x_top_right]
                     frame_cutout = cv2.resize(frame_cutout, (multi_images_list[0].shape[1], multi_images_list[0].shape[0]))
-
-                    image_kwargs = {"I0": frame_cutout} | {k: cv2.resize(v, (50, 50)) for k, v in zip(multi_keys, multi_images_list)} | {"MU": unrouted_map, "MR": routed_map}
+                    image_kwargs = (
+                        {"I0": frame_cutout} | 
+                        {k: v for k, v in zip(multi_keys, multi_images_list)} | 
+                        {"MU": cv2.resize(unrouted_map, (50, 50)), "MR": cv2.resize(routed_map, (50, 50))}
+                    )
 
                     replayer.step(**image_kwargs)
 
 
                 if model_path and self.controller.model_autopilot: # in inference mode
                     
-                    H, W, _    = 720, 1280, 3
-                    x_top_left = 70; x_top_right = W - x_top_left
-                    x_bot_left = 20; x_bot_right = W - x_bot_left
-                    y_hor      = 390; y_bot         = 720
-                    src_points = np.float32([[x_top_left, y_hor],
-                                            [x_top_right, y_hor],
-                                            [x_bot_right, y_bot],
-                                            [x_bot_left, y_bot]])
-                    width = 270; height = 150
-                    dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
-
-                    M = cv2.getPerspectiveTransform(src_points, dst_points)
-                    
                     if frame_id % 1 == 0:
-                        inp = cv2.warpPerspective(frame[:, :, :3], M, (width, height))
-                        turn_signal = self.sub_turn_signal.receive()
-                        inference.put(inp, turn_signal)
-                        steer = inference.get()
-                        if steer is not None:
-                            self.send_model_steer.send(float(steer))
+                        # inp = inference.pytorch.preprocessor(**{"I0": frame})
+                        inp = inference.pytorch.preprocessor(I0 = frame, I1 = multi_images_list[0], I2 = multi_images_list[1], MU = unrouted_map, MR = routed_map)
+                        inference.put(inp, None)
+                        output = inference.get()
+                        if output is not None:
+                            if not isinstance(output, tuple): # the model has no extra information
+                                if isinstance(output, float): # if output is just steering
+                                    self.send_model_steer.send(float(output))
+                                else: # output is waypoints
+                                    ...
+                            else: # with extra info
+                                output, *extra = output
+                                if len(output.shape) == 1:
+                                    self.send_model_steer.send(float(output[0]))
+                                else:
+                                    norm_steer = lateral_control(output, Ld = 5, wheelbase = self.virt_vehicle.wheelbase, max_steer = self.virt_vehicle.max_steer)
+                                    self.send_model_steer.send(norm_steer)
+
+                                    wp_canvas = draw_waypoints_canvas(output, canvas_size = (100, 100), scale = 5.0)
+                                    wp_canvas_h, wp_canvas_w, _ = wp_canvas.shape
+                                    self.draw_frame(wp_canvas, (10, self.height - wp_canvas_h - 10))
                         
-                        preview_h, preview_w, _ = inp.shape
-                        inp_surface = self.to_surface(inp[:, :, ::-1])
-                        self.display.blit(inp_surface, (self.width - preview_w - 10, self.height - preview_h - 10))
+                        # preview_h, preview_w, _ = inp.shape
+                        # inp_surface = self.to_surface(inp[:, :, ::-1])
+                        # self.display.blit(inp_surface, (self.width - preview_w - 10, self.height - preview_h - 10))
                     frame_id += 1
                     
                     # local_wp = infer(model, inp)[0]
@@ -442,9 +477,10 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                     self.log.INFO("Reached replay limit. Goodbye.")
                     break
                 else:
-                    elapsed = round(self.sub_server_runtime.receive(), 1)                    
-                    pbar.n  = min(elapsed, replay_logging[1])
-                    pbar.refresh()
+                    if pbar is not None: # Not in data collect mode
+                        elapsed = round(self.sub_server_runtime.receive(), 1)                    
+                        pbar.n  = min(elapsed, replay_logging[1])
+                        pbar.refresh()
 
 
                 if not self.headless:
@@ -498,3 +534,48 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
             self.log.ERROR("Pygame quit failed", full_traceback = e)
             
         gc.collect()
+
+def draw_waypoints_canvas(waypoints: np.ndarray, canvas_size=(200, 200), scale=5.0, color=(0, 255, 0)):
+    """
+    Draw waypoints on a blank canvas.
+    
+    Args:
+        waypoints: Array of waypoints in vehicle-local coordinates (N x 2)
+        canvas_size: (width, height) of the canvas
+        scale: Scaling factor for waypoint coordinates
+        color: Color of waypoint dots (BGR format)
+    
+    Returns:
+        np.ndarray: Canvas image with waypoints drawn
+    """
+    canvas = np.zeros((canvas_size[1], canvas_size[0], 3), dtype=np.uint8)
+    
+    # Canvas center (vehicle position)
+    center_x, center_y = canvas_size[0] // 2, canvas_size[1] // 2
+    
+    # Draw vehicle position as a red dot
+    cv2.circle(canvas, (center_x, center_y), 3, (0, 0, 255), -1)
+    
+    # Draw waypoints
+    for wp in waypoints:
+        # Convert local coordinates to canvas coordinates
+        x = int(center_x + wp[0] * scale)
+        y = int(center_y - wp[1] * scale)  # Flip Y axis (canvas Y increases downward)
+        
+        # Check if point is within canvas bounds
+        if 0 <= x < canvas_size[0] and 0 <= y < canvas_size[1]:
+            cv2.circle(canvas, (x, y), 2, color, -1)
+    
+    # Draw connecting lines between waypoints
+    for i in range(len(waypoints) - 1):
+        x1 = int(center_x + waypoints[i][0] * scale)
+        y1 = int(center_y - waypoints[i][1] * scale)
+        x2 = int(center_x + waypoints[i+1][0] * scale)
+        y2 = int(center_y - waypoints[i+1][1] * scale)
+        
+        # Check bounds for both points
+        if (0 <= x1 < canvas_size[0] and 0 <= y1 < canvas_size[1] and
+            0 <= x2 < canvas_size[0] and 0 <= y2 < canvas_size[1]):
+            cv2.line(canvas, (x1, y1), (x2, y2), color, 1)
+    
+    return canvas
