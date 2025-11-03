@@ -11,24 +11,27 @@ class EarlyStopping:
         self.min_delta = min_delta
         self.path      = path
         self.verbose   = verbose
-        self.counter   = 0
+        self.counter   = 1
         self.best_loss = torch.inf
         self.early_stop = False
         basename = os.path.basename(path)
         self.parent_folder = os.path.dirname(path)
         self.best_name = "/best_" + basename
         self.last_name = "/last_" + basename
+        self.improved = False
 
     def __call__(self, val_loss: float, model: torch.nn.Module):
         # check if loss improved by at least min_delta
         if val_loss < self.best_loss - self.min_delta:
             self.best_loss = val_loss
-            self.counter   = 0
+            self.counter   = 1
             torch.save(model, self.parent_folder + self.best_name)
+            self.improved = True
             if self.verbose:
                 print(f"Validation loss improved to {val_loss:.4f}. Saved model to {self.parent_folder + self.best_name}")
         else:
             self.counter += 1
+            self.improved = False
             if self.verbose:
                 print(f"No improvement in val loss for {self.counter}/{self.patience} epochs.")
             if self.counter >= self.patience:

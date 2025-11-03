@@ -13,6 +13,8 @@ from utils.messages.logger import Logger
 
 class TrajectoryBuffer:
     def __init__(self, save_dir: str, init_cap = 8192, dist_thresh_m = 0, min_dt_s = 0.05):
+        self.log = Logger()
+        self.log.DEBUG("SAVING VEHICLE TRAJECTORY")
         self.arr = np.empty((init_cap, 4), dtype=np.float32)
         self.n = 0
         self.last = None
