@@ -17,7 +17,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(FILE_DIR, "../.."))   # .../ (CARLAP
 
 sys.path.append(PROJECT_ROOT)
 from model.PilotNet.model import PilotNetStatic, single_epoch_training_static, single_epoch_val_static
-from utils.others.data_processor import CarlaDatasetLoader
+from model.data_loader import CarlaDatasetLoader, get_next_run
 from utils.others.helper import EarlyStopping
 
 
@@ -42,23 +42,22 @@ def get_next_run(base_dir: str = "PilotNetExperiment") -> int:
 
 if __name__ == "__main__":
     
+    run   = get_next_run(FILE_DIR)
     gpu = torch.device("cuda")
     torch.manual_seed(45)
 
-    dataset          = CarlaDatasetLoader("./data/recording_20250905_231635_best_spatial_roi", downsize_ratio = 1, load_size = -1)
+    dataset          = CarlaDatasetLoader("./data/PilotNet/recording_20250905_231635_best_spatial_roi", downsize_ratio = 1, load_size = -1)
     train, val, test = dataset.split(train = 0.8, val = 0.2)
     train_loader     = DataLoader(train, batch_size = 60, shuffle = True, collate_fn = dataset.collate_fn)
     val_loader       = DataLoader(val, batch_size = 50, shuffle = True, collate_fn = dataset.collate_fn)
     
-    experiment_name = "PilotNetExperiment"
     mode  = "steer"
-    run   = get_next_run(experiment_name)
 
     dummy = torch.zeros((1, 3, 300, 150)).to(gpu)
-    model = PilotNetStatic(mode = mode, num_waypoints = 5, num_cmd = 4, droprate = 0.25).to(gpu) 
+    model = PilotNetStatic(mode = mode, num_waypoints = 5, num_cmd = 4, droprate = 0.25).to(gpu).eval()
     model(dummy)  # Initialize dummy layers
 
-    log_dir = f"{FILE_DIR}/model/PilotNet/{experiment_name}/run{run}"
+    log_dir = f"{FILE_DIR}/Experiment/run{run}"
     writer = SummaryWriter(log_dir=log_dir)
     writer.add_graph(model, dummy)
     writer.flush()
@@ -78,7 +77,7 @@ if __name__ == "__main__":
     )
 
     criterion = nn.HuberLoss(delta = 0.05)
-    earlystop = EarlyStopping(20, 1e-5, path = f"{FILE_DIR}/model/PilotNet/{experiment_name}/run{run}/best_{model._get_name()}_run{run}.pt", verbose = True)
+    earlystop = EarlyStopping(20, 1e-5, path = f"{FILE_DIR}/Experiment/run{run}/best_{model._get_name()}_run{run}.pt", verbose = True)
     
     pbar = tqdm(range(epochs), desc="Training Epochs", position = 0)
     for epoch in pbar:
