@@ -262,7 +262,7 @@ class PathHandler(NodeFinder):
         Q = A + t * AB
         return Q
 
-    def waypoints(self, position: np.ndarray, offsets: list[float], yaw: float, use_time: bool = False, return_local = False):
+    def waypoints(self, position: np.ndarray, offsets: list[float], use_time: bool = False):
         dist_travelled, *_ = self.project(position)
         if not use_time:
             dist_offset = dist_travelled + np.array(offsets)
@@ -275,16 +275,129 @@ class PathHandler(NodeFinder):
             wp = self.pose(time_offset, True)
                 
         wp = np.asarray(wp)
-        if not return_local:
-            return wp
-        else:
-            return global_2_local(position, wp, yaw), wp
+        return wp
         
+class BranchingPath:
+    def __init__(self, world: World):
+        self.virt_world = world
+
+    def brancher(self, global_wp: np.ndarray, scout_pts: np.ndarray, persist_dist = np.inf):
+        junctions_metadata = self.virt_world.get_multi_junctions(global_wp) # this is already sorted based on distance (closest -> furthest)
+        
+        
+        branch_wp = []
+        for junction in junctions_metadata:
+            wp_pairs = junction.get_waypoints(carla.LaneType.Driving)
+            pairs = _find_entry_clusters(wp_pairs, scout_pts)
+            
+            if len(pairs) == 1: continue # If there's only 1 pair then just skip it
+            
+            entry = carla_waypoints_to_np(pairs[0][0])[0]
+            insert_idx = self.insertion_point(global_wp, entry)
+
+            path_in_junction = global_wp[insert_idx: ]
+            remainder_path   = global_wp[: insert_idx]
+            
+            if len(path_in_junction) != len(global_wp):
+                path_in_junction = np.vstack([entry[None, ...], path_in_junction])
+                extra_length = 0
+            else: extra_length = np.linalg.norm(entry - global_wp[0]) 
+
+            if extra_length > persist_dist: continue
+            segment_length = self.compute_seg_length(path_in_junction) + extra_length 
+            
+            branch_candidates = []
+            for pair in pairs:
+                entry_wp, exit_wp = pair
+                wp_junction        = waypoints_between(entry_wp, exit_wp, step = 2)
+                wp_junction_loc    = carla_waypoints_to_np(wp_junction)
+                junction_seglength = self.compute_seg_length(wp_junction_loc)
+                
+                z_of_s = interp1d(junction_seglength, wp_junction_loc[:, 2],
+                                bounds_error=False,
+                                fill_value=(wp_junction_loc[0, 2], wp_junction_loc[-1, 2]))
+
+                y_of_s = interp1d(junction_seglength, wp_junction_loc[:, 1],
+                                bounds_error=False,
+                                fill_value=(wp_junction_loc[0, 1], wp_junction_loc[-1, 1]))
+
+                x_of_s = interp1d(junction_seglength, wp_junction_loc[:, 0],
+                                bounds_error=False,
+                                fill_value=(wp_junction_loc[0, 0], wp_junction_loc[-1, 0]))                
+
+                interp_wp = np.stack([
+                    x_of_s(segment_length),
+                    y_of_s(segment_length),
+                    z_of_s(segment_length),
+                ], axis = -1)
+                if extra_length == 0:
+                    padded_wp = np.concatenate([remainder_path, interp_wp[1: ]]) # Remove the entry point
+                else:
+                    padded_wp = np.concatenate([remainder_path, interp_wp[0: ]])
+                    
+                if np.linalg.norm(padded_wp[-1] - carla_waypoints_to_np(exit_wp)) < 0.5: continue
+                    
+                dists = np.linalg.norm(global_wp[:, None, :] - padded_wp[None, :, :], axis=2)
+                min_dist = dists.mean()
+                branch_candidates.append((min_dist, padded_wp))
+
+            branch_candidates.sort(key=lambda x: x[0])
+            branch_candidates = branch_candidates[1:]  # remove closest branch
+
+            for _, branch in branch_candidates:
+                branch_wp.append(branch)
+        
+        branch_wp += [global_wp]
+        return np.array(branch_wp)
+                    
+            
+            
+    @staticmethod
+    def insertion_point(waypoints: np.ndarray, compare_point: np.ndarray) -> int:
+        closest_idx = np.argmin(np.linalg.norm(waypoints - compare_point, axis = 1))
+        closest_wp = waypoints[closest_idx]
+
+        j = closest_idx
+        backward_point = closest_wp
+        while j != 0:
+            backward_point = waypoints[j]
+            if not np.allclose(closest_wp, backward_point, atol = 1e-2):
+                break
+            j -= 1
+            
+        k = closest_idx
+        forward_point = np.array(closest_wp)
+        while k != len(waypoints):
+            forward_point = waypoints[k]
+            if not np.allclose(closest_wp, forward_point, atol = 1e-2):
+                break
+            k += 1
+            
+        choose_backward = PathHandler._edge_opposite_test(compare_point, backward_point, closest_wp)
+        choose_forward  = PathHandler._edge_opposite_test(compare_point, forward_point, closest_wp)
+        if choose_backward == choose_forward: # Projected point too close to coordinates
+            insert_idx  = closest_idx
+        elif choose_backward:
+            insert_idx  = closest_idx 
+        elif choose_forward:
+            insert_idx  = closest_idx + 1
+            
+        return insert_idx
+    
+    @staticmethod
+    def compute_seg_length(waypoints: np.ndarray) -> float:
+        if len(waypoints) < 2:
+            return 0.0
+        diffs = np.diff(waypoints, axis=0)
+        segment_lengths = np.linalg.norm(diffs, axis=1)
+        return np.cumsum(np.concatenate([[0], segment_lengths]))
+                
+            
 class TurnClassify:
     def __init__(self, world: World, threshold_deg: float = 45):
         self.thresh_deg = threshold_deg
         self.signal = None
-        self.world  = world
+        self.virt_world  = world
         pass
 
 
@@ -346,8 +459,8 @@ class TurnClassify:
             choosen_pairs  = _find_exit(possible_pairs, waypoints)
 
             if debug:
-                self.world.debug.draw_point(choosen_pairs[0].transform.location, size = 0.18, color = carla.Color(0, 0, 255), life_time = 1.5 * (1 / 70))
-                self.world.debug.draw_point(choosen_pairs[1].transform.location, size = 0.18, color = carla.Color(0, 0, 255), life_time = 1.5 * (1 / 70))
+                self.virt_world.debug.draw_point(choosen_pairs[0].transform.location, size = 0.18, color = carla.Color(0, 0, 255), life_time = 1.5 * (1 / 70))
+                self.virt_world.debug.draw_point(choosen_pairs[1].transform.location, size = 0.18, color = carla.Color(0, 0, 255), life_time = 1.5 * (1 / 70))
             
             entry_heading  = waypoint_heading(choosen_pairs[0])
             exit_heading   = waypoint_heading(choosen_pairs[1])
@@ -380,14 +493,15 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
             print("Midlane waypoints found as an extra data")
             self.midlane_handler = PathHandler(midlane_waypoints)
         self.debug = debug
-        self.world = world
+        self.virt_world = world
         self.use_temporal = use_temporal
         self.scout_points = [i for i in range(-18, 33, 2)]
         if not self.use_temporal:
-            self.offset   = [1, 3, 5, 7, 9]
+            self.offset   = [0, 1, 3, 5, 7, 9]
         else:
-            self.offset   = [.2, .4, .6, .8, 1.0]
+            self.offset   = [.0, .15, .3, .45, .6, .75]
         self.turn_classifier = TurnClassify(world=world, threshold_deg=15)
+        self.branching_path  = BranchingPath(self.virt_world)
         self.data_collector = None
         if data_collect_dir:
             self.data_collector = CarlaDatasetCollector(save_dir=data_collect_dir, save_interval=20)
@@ -396,29 +510,60 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
         self.addtional_max = 20; self.addition_cnt = 0
 
     def step(self, **frame: np.ndarray):
-        position   = self.sub_enu.receive()
-        heading    = np.radians(self.sub_heading.receive())
+        vehicle_location = self.sub_location.receive() # The pivot point
+
+        # Convert yaw from degrees to radians for math functions
+        heading  = np.radians(self.sub_heading.receive())
+
+        # Distance from the center to the front of the car (adjust as per your vehicle)
+        front_offset = 3 / 2  # meters
+
+        # Calculate offset in x and y directions
+        offset_x = front_offset * np.cos(heading - np.pi / 2)
+        offset_y = front_offset * np.sin(heading - np.pi / 2)
+
+        # Calculate front location coordinates
+        position = np.array([
+            vehicle_location[0] + offset_x,
+            vehicle_location[1] + offset_y,
+            vehicle_location[2]  # same height as center
+        ])
         server_fps = self.sub_server_fps.receive()
         
-        ego_wp, global_wp = self.path_handler.waypoints(
-            position, self.offset, heading, return_local = True, use_time = self.use_temporal
+        
+        
+        global_wp = self.path_handler.waypoints(
+            position, self.offset, use_time = self.use_temporal
         )
+        ego_wp = global_2_local(vehicle_location, global_wp, heading)
         curr_dist, *_ = self.path_handler.project(position)
-
+        
         if hasattr(self, "midlane_handler"):
-            mid_ego, mid_global = self.midlane_handler.waypoints(
-                position, self.offset, heading, return_local = True, use_time = self.use_temporal
+            mid_global_scout = self.midlane_handler.waypoints(
+                position, self.scout_points
             )
+            mid_global = self.midlane_handler.waypoints(
+                position, self.offset, use_time = self.use_temporal
+            )
+            mid_ego = global_2_local(vehicle_location, mid_global, heading)
             
+            path_branches  = self.branching_path.brancher(mid_global, mid_global_scout, persist_dist = 10)
+            ego_branches = np.empty_like(path_branches)[..., :2]
+            for idx, branch in enumerate(path_branches):
+                ego_branches[idx] = global_2_local(vehicle_location, branch, heading)
+                
+                
         if self.debug:
-            self.world.draw_waypoints(mid_global, 1.5 * (1 / server_fps), size = .1)
+            # for path in path_branches:
+            #     self.virt_world.draw_waypoints(path, 1.5 * (1 / server_fps), size = .1, color = (255, 0, 0))
+            self.virt_world.draw_waypoints(mid_global, 1.5 * (1 / server_fps), size = .1)
 
         if self.turn_classify:
             global_scout = self.path_handler.waypoints(
-                position, self.scout_points, heading, return_local = False
+                position, self.scout_points
             )
-            is_at_junction, junction = self.world.get_waypoint_junction(global_scout[14])
-            not_exit_junction, _ = self.world.get_waypoint_junction(global_scout[10])
+            is_at_junction, junction = self.virt_world.get_waypoint_junction(global_scout[14])
+            not_exit_junction, _ = self.virt_world.get_waypoint_junction(global_scout[10])
             is_exit_junction = not not_exit_junction
             turn_signal = self.turn_classifier.turning_type(is_at_junction, junction, is_exit_junction, global_scout)
         else:
@@ -436,6 +581,7 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
                     {
                         "exp_wp"     : ego_wp,
                         "midlane_wp" : mid_ego,
+                        "aux_wp"     : ego_branches,
                         "steer"      : steer,
                         "throttle"   : throttle,
                         "brake"      : brake,
@@ -532,6 +678,7 @@ def waypoint_heading(wp):
 def waypoints_between(entry_wp, exit_wp, step=1.0):
     """
     Returns a list of waypoints between entry and exit inside a junction.
+    Ensures inclusion of entry and exit waypoint
     
     entry_wp, exit_wp : carla.Waypoint
     step : float
@@ -556,10 +703,29 @@ def waypoints_between(entry_wp, exit_wp, step=1.0):
 
     return wps
 
+def carla_waypoints_to_np(waypoints):
+    """
+    Convert Carla waypoint or a list of waypoints to a NumPy array of locations.
+    
+    Args:
+        waypoints: A single Carla waypoint or an iterable of Carla waypoints.
+        
+    Returns:
+        numpy.ndarray: Array of shape (N, 3) with x, y, z locations.
+    """
+    # Check if input is a single waypoint (has 'transform' attribute)
+    if hasattr(waypoints, 'transform'):
+        wp_list = [waypoints]  # Wrap single waypoint in a list
+    else:
+        wp_list = list(waypoints)  # Assume iterable of waypoints
+    
+    arr = np.array([[getattr(wp.transform.location, dim) for dim in ['x', 'y', 'z']] for wp in wp_list])
+    return arr
+
 class OptimizePath:
     def __init__(self, world: World, step: float):
         self.log = Logger()
-        self.world = world
+        self.virt_world = world
 
         carla_map = world.world.get_map()
         self.network, self.nodes = self._build_detailed_graph(carla_map, step = step, epsilon = 0.1)

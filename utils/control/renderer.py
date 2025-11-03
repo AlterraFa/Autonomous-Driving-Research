@@ -1,5 +1,6 @@
 import pygame
 import numpy as np
+import cv2
 
 from utils.messages.message_handler import MessagingSubscribers
 
@@ -200,3 +201,167 @@ class HUD(MessagingSubscribers):
         spacing = 15
         text = self.font.render(f"{'Turn signal:':<{spacing}}{direction_str:>{self.max_string}}", True, (255, 255, 255))
         self.display.blit(text, (x, y + 1 * line_h))
+
+
+def draw_border(frame, border_thicc: int, border_color: tuple):
+    frame = cv2.copyMakeBorder(
+        frame,
+        top=border_thicc, bottom=border_thicc,
+        left=border_thicc, right=border_thicc,
+        borderType=cv2.BORDER_CONSTANT,
+        value=border_color
+    )
+    return frame
+
+def overlay_waypoints_on_map(map_img,
+                              waypoints,
+                              meters_span: tuple[float, float],
+                              scale: tuple[float, float], 
+                              color=(0, 255, 0),
+                              thickness=2,
+                              swap_axes: bool = False,
+                              flip_lat: bool = False,
+                              origin: str = "bottom_center",   # "bottom_center" or "center"
+                              draw_origin: bool = False):
+    """
+    Overlay waypoints on routed map.
+    meters_span:
+      - origin == "bottom_center": (forward_range, lateral_half_range)
+          forward in [0..forward_range] maps to image height
+      - origin == "center": (forward_half_range, lateral_half_range)
+          forward in [-fwd_half..+fwd_half] maps to image height
+    Waypoints default to [forward, lateral]. Set swap_axes=True if [lateral, forward].
+    """
+    if map_img is None or waypoints is None:
+        return map_img
+
+    # to numpy
+    try:
+        import torch
+        if isinstance(waypoints, torch.Tensor):
+            wp = waypoints.detach().cpu().numpy()
+        else:
+            wp = np.asarray(waypoints)
+    except Exception:
+        wp = np.asarray(waypoints)
+
+    if wp.ndim == 3:  # (B,N,2)
+        wp = wp[0]
+    if wp.ndim != 2 or wp.shape[1] < 2 or len(wp) == 0:
+        return map_img
+    
+    wp[:, 0] *= scale[0]
+    wp[:, 1] *= scale[1]
+
+    if swap_axes:
+        wp = wp[:, [1, 0]]
+
+    fwd = wp[:, 0].astype(np.float32)
+    lat = wp[:, 1].astype(np.float32)
+    if flip_lat:
+        lat = -lat
+
+    H, W = map_img.shape[:2]
+    fwd_span, lat_half = float(meters_span[0]), float(meters_span[1])
+
+    # scales and origin
+    if origin == "center":
+        # full height represents [-fwd_span .. +fwd_span]
+        px_per_m_fwd = H / max(2.0 * fwd_span, 1e-6)
+        cx, cy = W // 2, H // 2
+    else:  # "bottom_center"
+        # full height represents [0 .. fwd_span]
+        px_per_m_fwd = H / max(fwd_span, 1e-6)
+        cx, cy = W // 2, H - 1
+
+    px_per_m_lat = W / max(2.0 * lat_half, 1e-6)
+
+    xs = (cx + lat).astype(np.int32)
+    ys = (cy - fwd).astype(np.int32)
+    pts = np.stack([xs, ys], axis=1)
+
+    if len(pts) > 1:
+        cv2.polylines(map_img, [pts], False, color, thickness, cv2.LINE_AA)
+    for p in pts:
+        cv2.circle(map_img, tuple(p), 2, color, -1, cv2.LINE_AA)
+
+    if draw_origin:
+        cv2.drawMarker(map_img, (cx, cy), (0, 255, 255), cv2.MARKER_CROSS, 10, 1)
+
+    return map_img
+
+def overlay_gmm_on_map(map_img,
+                        weights,
+                        mu,
+                        sigma,
+                        scale: tuple[float, float],
+                        alpha: float = 0.2,
+                        n_std: float = 2.0,
+                        swap_axes: bool = False,
+                        flip_lat: bool = False,
+                        origin: str = "center"):
+    """
+    Fast overlay of a variable-K diagonal GMM onto the routed map.
+    Draws all rings for a component on a single temp image, then blends once.
+    """
+    if map_img is None:
+        return map_img
+
+    def to_np(x):
+        try:
+            import torch
+            if isinstance(x, torch.Tensor):
+                return x.detach().cpu().numpy()
+        except Exception:
+            pass
+        return np.asarray(x)
+
+    WTS = to_np(weights).reshape(-1)
+    MU  = to_np(mu)
+    SG  = to_np(sigma)
+
+    if MU.ndim == 4: MU = MU[0]
+    if SG.ndim == 4: SG = SG[0]
+    if MU.shape[0] != WTS.shape[0] and MU.shape[1] == WTS.shape[0]:
+        MU = np.transpose(MU, (1, 0, 2))
+        SG = np.transpose(SG, (1, 0, 2))
+    K = min(WTS.shape[0], MU.shape[0])
+
+    px_per_m_fwd, px_per_m_lat = float(scale[0]), float(scale[1])
+    H, W = map_img.shape[:2]
+    cx = W // 2
+    cy = H // 2 if origin == "center" else H - 1
+
+    wmax = float(np.max(WTS)) if np.max(WTS) > 0 else 1.0
+    ws = (WTS[:K] / wmax).clip(0.0, 1.0)
+
+    overlay = map_img.copy()
+    for k in range(K):
+        comp_color = (255, 255, 0)  # BGR
+
+        temp_ring = np.zeros_like(overlay, dtype=np.uint8)
+
+        for t in range(MU.shape[1]):
+            mu_kt = MU[k, t].astype(np.float32)
+            sg_kt = SG[k, t].astype(np.float32)
+            if swap_axes:
+                mu_kt = mu_kt[[1, 0]]
+                sg_kt = sg_kt[[1, 0]]
+            fwd, lat = float(mu_kt[0]), float(mu_kt[1])
+            if flip_lat:
+                lat = -lat
+            center = (int(cx + lat * px_per_m_lat),
+                      int(cy - fwd * px_per_m_fwd))
+            axes = (max(1, int(n_std * sg_kt[1] * px_per_m_lat)),
+                    max(1, int(n_std * sg_kt[0] * px_per_m_fwd)))
+
+            # Draw all rings for this (k, t) on temp_ring
+            for i, s in enumerate((1.0, 1.5, 2.0)):
+                # Draw directly, no per-ring blending
+                cv2.ellipse(temp_ring, center, (int(axes[0]*s), int(axes[1]*s)),
+                            0, 0, 360, comp_color, 2, cv2.LINE_AA)
+
+        # Blend once per component
+        overlay = cv2.addWeighted(overlay, 1.0, temp_ring, alpha * ws[k], 0)
+
+    return overlay

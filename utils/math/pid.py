@@ -17,5 +17,5 @@ def lateral_control(waypoints: np.ndarray, Ld: float, wheelbase: float, max_stee
 
 
     steer = np.clip(steer, -max_steer, max_steer)
-    normalized_steer = steer / max_steer * 1
+    normalized_steer = steer / max_steer * 1.8
     return normalized_steer

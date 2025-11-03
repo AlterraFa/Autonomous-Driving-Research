@@ -47,7 +47,9 @@ class Map:
         self.offset_x, self.offset_y = map_offset[0] * scale, map_offset[1] * scale
         self.scale = scale
         self.range = (range_[0] * self.scale, range_[1] * self.scale)
+        self.original_range = range_
         self.resize_to = resize_to
+        self.final_scale = (resize_to[0] / self.range[0] * self.scale, resize_to[1] / self.range[1] * self.scale)
 
         self.stored_entries = {}  # junction_id -> entry_wp
         self._wp_list = list(self.wp_dict.values())
@@ -102,7 +104,7 @@ class Map:
     
     def retrieve_map(self, coordinate, heading, display = False):
         """Instead of drawing on the larger self.map_image, we draw on the smaller cutout image and apply waypoints transformation"""
-        x, y, z = coordinate
+        x, y, _ = coordinate
         before_scale = np.array(coordinate)
 
         # ================ Retrieve Submap ======================
@@ -148,7 +150,7 @@ class Map:
             # Extract the waypoints using interpolation, globals only, locals waypoints embedded in waypoint code will mess up rotation and transformation
             # We don't need yaw, yaw = 0 is a dummy value        
             global_wp = self.path_handler.waypoints(
-                before_scale, self.offset_path, yaw = 0, return_local = False
+                before_scale, self.offset_path
             )
             
             if display:
@@ -165,7 +167,7 @@ class Map:
 
                 pts_final = pts_trans - np.array([x1f, y1f], dtype=float)   # (N,2)
 
-                self.draw_waypoints_lines(cutout, pts_final, color = (255, 0, 0), line_thickness = 3 * self.scale)
+                self.draw_waypoints_lines(cutout, pts_final, color = (255, 0, 0), line_thickness = 2 * self.scale)
                 
         if display:
             if hasattr(self, "path_handler"): # If we have path, return both
@@ -263,7 +265,10 @@ class Map:
                 i += 1
             else:
                 # insert full junction group metadata
-                group_meta = next(group_iter)
+                try:
+                    group_meta = next(group_iter)
+                except:
+                    break
                 if len(group_meta) > 0:
                     j_tree = cKDTree(group_meta[:, :2])
                 start_jid = jid

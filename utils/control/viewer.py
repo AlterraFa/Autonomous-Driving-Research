@@ -7,7 +7,7 @@ import gc
 
 from utils.control.world import World
 from utils.control.controller import Controller
-from utils.control.renderer import HUD
+from utils.control.renderer import HUD, draw_border, overlay_waypoints_on_map, overlay_gmm_on_map
 from utils.control.vehicle_control import Vehicle
 
 from utils.math.path import ReplayHandler, OptimizePath
@@ -32,70 +32,8 @@ from utils.messages.logger import Logger
 from typing import Optional
 from typing import Union, Dict
 from tqdm.auto import tqdm
+from collections import deque
         
-
-def generate_controller_doc(keybinds: dict, joybinds: dict) -> str:
-    """
-    Generate documentation string for Controller based on KEYBINDS and JOYBINDS.
-    """
-    import pygame
-
-    # Map pygame key constants to readable names
-    key_names = {k: pygame.key.name(k).upper() for k in keybinds.keys()}
-
-    doc = []
-    doc.append("Welcome to CARLA Manual Control (Custom Controller).\n")
-    doc.append("Controls can be provided via Keyboard or Joystick.")
-    doc.append("Joystick (if detected) is prioritized automatically.")
-    doc.append("If no joystick is found, keyboard input is used as fallback.\n")
-
-    doc.append("----------------------------------------")
-    doc.append("Keyboard Controls")
-    doc.append("----------------------------------------")
-    for k, func in keybinds.items():
-        doc.append(f"    {key_names[k]:<12} : {func.replace('toggle_', '').replace('_', ' ')}")
-
-    # Always include quit keys
-    doc.append(f"    {'K/ESC':<12} : quit program")
-
-    doc.append("\n----------------------------------------")
-    doc.append("Joystick Controls")
-    doc.append("----------------------------------------")
-    doc.append("Axes:")
-    doc.append("    Left Stick X : steer left / right (with deadzone and curve applied)")
-    doc.append("    RT (Right Trigger) : throttle")
-    doc.append("    LT (Left Trigger)  : brake\n")
-
-    doc.append("Hats (D-pad):")
-    doc.append("    Up           : switch to First Person view")
-    doc.append("    Down         : switch to Third Person view")
-    doc.append("    Left / Right : step camera left / right\n")
-
-    doc.append("Buttons:")
-    for btn, func in joybinds.items():
-        doc.append(f"    Button {btn:<3} : {func.replace('toggle_', '').replace('_', ' ')}")
-
-    doc.append("\n----------------------------------------")
-    doc.append("Modes")
-    doc.append("----------------------------------------")
-    doc.append("    • Autopilot and Model Autopilot are mutually exclusive.")
-    doc.append("      Enabling one disables the other automatically.\n")
-    doc.append("    • Regulate Speed mode maintains a constant velocity until disabled.\n")
-
-    doc.append("----------------------------------------")
-    doc.append("Notes")
-    doc.append("----------------------------------------")
-    doc.append("    • Deadzones:")
-    doc.append("        Stick deadzone   = 0.12")
-    doc.append("        Trigger deadzone = 0.05\n")
-    doc.append("    • Steering curve applied for smoother control:")
-    doc.append("        steer_curve = 3\n")
-    doc.append("    • Keyboard inputs are only active when Model Autopilot is OFF.")
-    doc.append("      In Model Autopilot mode, keys [W/A/D] send turn signal messages.")
-
-    return "\n".join(doc)
-
-Logger().INFO(generate_controller_doc(KEYBINDS, JOYBINDS))
 
 
 class CarlaViewer(MessagingSenders, MessagingSubscribers):
@@ -143,7 +81,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.controller = Controller()
         self.hud = HUD(display = self.display, fontName = "jetbrainsmononerdfontpropo", fontSize = 12, height = self.height, headless = headless)
         
-        self.map_processor  = Map(self.virt_world, (6, 4), map_offset = (100, 100), range_ = (50, 50), resize_to = (200, 200), scale = 3)
+        self.map_processor  = Map(self.virt_world, (4, 3), map_offset = (100, 100), range_ = (50, 50), resize_to = (200, 200), scale = 3)
         self.path_optimizer = OptimizePath(self.virt_world, step = 2.0) 
     
         
@@ -276,15 +214,6 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.send_manual_logging.send(self.ctrl['manual'])
         self.send_gear_logging.send(self.ctrl['gear'])
         
-    def draw_border(self, frame, border_thicc: int, border_color: tuple):
-        frame = cv2.copyMakeBorder(
-            frame,
-            top=border_thicc, bottom=border_thicc,
-            left=border_thicc, right=border_thicc,
-            borderType=cv2.BORDER_CONSTANT,
-            value=border_color
-        )
-        return frame
         
     # WARNING: REMEMBER TO CHECK COLOR CHANNEL
     def run(self, 
@@ -308,8 +237,8 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                 self.log.INFO("CREATING RANDOM PATH FOR MAP")
                 prev_loc = np.array([self.vehicle.get_location().x, self.vehicle.get_location().y])
                 extended_path = None
-                for _ in range(10):
-                    distant_nodes = self.path_optimizer.find_distant_nodes(prev_loc, np.random.randint(50, 200))
+                for _ in range(5):
+                    distant_nodes = self.path_optimizer.find_distant_nodes(prev_loc, np.random.randint(20, 200), max_distance = 200)
                     if distant_nodes:
                         rand_node = np.random.randint(0, len(distant_nodes))
                         fartest_id, farthes_distance, farthest_pos = distant_nodes[rand_node]
@@ -327,10 +256,11 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                     prev_loc = farthest_pos
                 self.map_processor.precompute_waypoints(extended_path)
 
-            logger    = TrajectoryBuffer(save_logging, min_dt_s = .2) if save_logging else None
+            logger    = TrajectoryBuffer(save_logging, min_dt_s = .4) if save_logging else None
             replayer  = ReplayHandler(replay_logging[0], self.virt_world, data_collect_dir, use_temporal_wp, midlane_waypoints, debug) if replay_logging else None
             inference = AsyncInference(model_path, device = 'cuda', batch_output = False) if model_path is not None else None
             pbar      = tqdm(total = replay_logging[1], unit = 'server second', desc = "Play duration") if replay_logging else None
+            gps_buffer = deque(maxlen = 50)
             # ================== INITIALIZING CLASSES =====================
 
             frame_id = 0
@@ -345,39 +275,33 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                     H, W = frame.shape
 
 
-                if frame is not None:
-                    if not self.headless:
-                        self.hud.draw_frame(frame)
-                        self.hud.draw_measurement()
-                        self.hud.draw_controls()
-                        self.hud.draw_logging()
 
+                location = self.sub_location.receive()
+                heading  = self.sub_heading.receive()
+                gps_buffer.append(location) # THIS DELAY ALSO CONFIRMS THAT THE MODEL IS TOO DEPENDANT ON ROUTED MAP
+                choose_delay = np.random.randint(0, min(10, len(gps_buffer)))
+                unrouted_map, old_map = self.map_processor.retrieve_map(
+                    # coordinate = location,
+                    coordinate = gps_buffer[choose_delay] + (np.random.randn(3) - .5) * .1,  # Introduce some noise to the GPS map 
+                    heading = heading, 
+                    display = self.controller.toggle_map or replayer is not None or self.override_render_map
+                )
+                if frame_id % 1 == 0:
+                    if old_map is not None:
+                        routed_map = old_map
+                elif old_map is None:
+                    routed_map = np.zeros([*self.map_processor.resize_to, 3])
 
-                    location = self.sub_location.receive()
-                    heading  = self.sub_heading.receive()
-                    unrouted_map, routed_map = self.map_processor.retrieve_map(
-                        coordinate = location, 
-                        heading = heading, 
-                        display = self.controller.toggle_map or replayer is not None or self.override_render_map
-                    )
-                    if self.controller.toggle_map:
-                        submap_h, submap_w, _ = routed_map.shape
-                        self.draw_frame(routed_map, (self.width - submap_w - 10, 0 + 10))
+                if "multi" in "".join(list(self.sensors_list.keys())):
+                    self.log.INFO("Multi camera sensor setup detected. Displaying it", once = True)
+                    sensor_tname = self.choosen_sensor.name.split(".")[-1]
+                    multi_tname  = "multi" + sensor_tname
                     
-                    if "multi" in "".join(list(self.sensors_list.keys())):
-                        self.log.INFO("Multi camera sensor setup detected. Displaying it", once = True)
-                        sensor_tname = self.choosen_sensor.name.split(".")[-1]
-                        multi_tname  = "multi" + sensor_tname
-                        
-                        if multi_tname in "".join(list(self.sensors_list.keys())):
-                            data = self.sensors_list[multi_tname].extract_data()
-                            multi_images_list = []
-                            for images in data.values():
-                                multi_images_list += [images]
-                            multi_images = np.hstack(multi_images_list)
-                            multi_images_border = self.draw_border(multi_images, 3, (255, 100, 200, 255))                
-                            multi_h, multi_w, _ = multi_images_border.shape
-                            self.hud.draw_frame(multi_images_border, (self.width - multi_w - 10, self.height - multi_h - 10))
+                    if multi_tname in "".join(list(self.sensors_list.keys())):
+                        data = self.sensors_list[multi_tname].extract_data()
+                        multi_images_list = []
+                        for images in data.values():
+                            multi_images_list += [images]
 
                     
                     
@@ -393,30 +317,77 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                                                     self.controller.model_autopilot)
                     
                 if logger: # In recording mode
-                    logger.update(self.sub_location.receive())
-                if replayer: # in replaying mode
-                    multi_images_list = list(data.values())   # e.g. [img1, img2, img3]
-                    multi_keys = [f"I{i+1}" for i in range(len(multi_images_list))]
+                    vehicle_transform = self.vehicle.get_transform()
+                    vehicle_location = vehicle_transform.location
+                    vehicle_rotation = vehicle_transform.rotation
 
+                    # Convert yaw from degrees to radians for math functions
+                    yaw_rad = np.radians(vehicle_rotation.yaw)
+
+                    # Distance from the center to the front of the car (adjust as per your vehicle)
+                    front_offset = 1.5  # meters
+
+                    # Calculate offset in x and y directions
+                    offset_x = front_offset * np.cos(yaw_rad)
+                    offset_y = front_offset * np.sin(yaw_rad)
+
+                    # Calculate front location coordinates
+                    front_location = np.array([
+                        vehicle_location.x + offset_x,
+                        vehicle_location.y + offset_y,
+                        vehicle_location.z  # same height as center
+                    ])
+                    logger.update(front_location)
+                if replayer: # in replaying mode
+
+                    # =========================== VENL ==========================
+                    # multi_images_list = list(data.values())   # e.g. [img1, img2, img3]
+                    # multi_keys = [f"I{i+1}" for i in range(len(multi_images_list))]
+                    # H, W, _    = frame.shape
+                    # x_top_left = 250; x_top_right = W - x_top_left
+                    # y_hor      = 390; y_bot         = 680
+                    # frame_cutout = frame[y_hor: y_bot, x_top_left: x_top_right]
+                    # frame_cutout = cv2.resize(frame_cutout, (multi_images_list[0].shape[1], multi_images_list[0].shape[0]))
+                    # image_kwargs = (
+                    #     {"I0": frame_cutout} | 
+                    #     {k: v for k, v in zip(multi_keys, multi_images_list)} | 
+                    #     {"MU": cv2.resize(unrouted_map, (50, 50)), "MR": cv2.resize(routed_map, (50, 50))}
+                    # )
+                    
+                    # =========================== Single VENL ==========================
                     H, W, _    = frame.shape
-                    x_top_left = 250; x_top_right = W - x_top_left
-                    y_hor      = 300; y_bot         = 680
+                    x_top_left = 150; x_top_right = W - x_top_left
+                    y_hor      = 370; y_bot       = 720
                     frame_cutout = frame[y_hor: y_bot, x_top_left: x_top_right]
-                    frame_cutout = cv2.resize(frame_cutout, (multi_images_list[0].shape[1], multi_images_list[0].shape[0]))
+                    frame_cutout = cv2.resize(frame_cutout, (400, 160))
                     image_kwargs = (
                         {"I0": frame_cutout} | 
-                        {k: v for k, v in zip(multi_keys, multi_images_list)} | 
                         {"MU": cv2.resize(unrouted_map, (50, 50)), "MR": cv2.resize(routed_map, (50, 50))}
                     )
 
                     replayer.step(**image_kwargs)
-
+                
 
                 if model_path and self.controller.model_autopilot: # in inference mode
                     
                     if frame_id % 1 == 0:
-                        # inp = inference.pytorch.preprocessor(**{"I0": frame})
-                        inp = inference.pytorch.preprocessor(I0 = frame, I1 = multi_images_list[0], I2 = multi_images_list[1], MU = unrouted_map, MR = routed_map)
+                         
+                        # CONCLUSION: MODEL IS HEAVILY RELYING ON ROUTED MAP, THE DATA IS TOO CLEAN
+                        frame_inp    = frame
+                        # I1_inp       = multi_images_list[0]
+                        # I2_inp       = multi_images_list[1]
+                        unrouted_inp = unrouted_map
+                        routed_inp   = routed_map
+
+                        # frame_inp    = np.zeros_like(frame)
+                        # I1_inp       = np.zeros_like(multi_images_list[0])
+                        # I2_inp       = np.zeros_like(multi_images_list[1])
+                        # unrouted_inp = np.zeros_like(unrouted_map)
+                        # routed_inp   = np.zeros_like(routed_map)
+
+                        # inp = inference.pytorch.preprocessor(**{"I0": frame}) # PilotNet preprocessor
+                        # inp = inference.pytorch.preprocessor(I0 = frame_inp, I1 = I1_inp, I2 = I2_inp, MU = unrouted_inp, MR = routed_inp) # VENL preprocessor
+                        inp = inference.pytorch.preprocessor(I0 = frame_inp, MU = unrouted_inp, MR = routed_inp) # SingleVENL preprocessor
                         inference.put(inp, None)
                         output = inference.get()
                         if output is not None:
@@ -430,16 +401,66 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                                 if len(output.shape) == 1:
                                     self.send_model_steer.send(float(output[0]))
                                 else:
-                                    norm_steer = lateral_control(output, Ld = 5, wheelbase = self.virt_vehicle.wheelbase, max_steer = self.virt_vehicle.max_steer)
+                                    norm_steer = lateral_control(output, Ld = 8, wheelbase = self.virt_vehicle.wheelbase, max_steer = self.virt_vehicle.max_steer)
                                     self.send_model_steer.send(norm_steer)
 
-                                    wp_canvas = draw_waypoints_canvas(output, canvas_size = (100, 100), scale = 5.0)
-                                    wp_canvas_h, wp_canvas_w, _ = wp_canvas.shape
-                                    self.hud.draw_frame(wp_canvas, (10, self.height - wp_canvas_h - 10))
                         
-                    frame_id += 1
-
                 
+                # ======================== RENDER ==========================
+                if not self.headless:
+                    self.hud.draw_frame(frame)
+                    self.hud.draw_measurement()
+                    self.hud.draw_controls()
+                    self.hud.draw_logging()
+
+                    if "multi_images_list" in locals(): # If there exist multi camera
+                        multi_images = np.hstack([draw_border(image, 3, (255, 100, 200, 255)) for image in multi_images_list])
+                        multi_h, multi_w, _ = multi_images.shape
+                        self.hud.draw_frame(multi_images, (self.width - multi_w - 10, self.height - multi_h - 10))
+
+
+                    if "output" in locals():
+                        if output is not None and self.controller.model_autopilot:
+                            try:
+                                if 'extra' in locals() and len(extra) == 3:
+                                    weights, muys, sigmas = extra
+                                    routed_map = overlay_gmm_on_map(
+                                        map_img = routed_map,
+                                        weights = weights.copy(), 
+                                        mu      = muys.copy(),
+                                        sigma   = sigmas.copy(),
+                                        scale       = self.map_processor.final_scale,   # (px/m_fwd, px/m_lat)
+                                        alpha       = 2.5,
+                                        n_std       = 1.0,
+                                        swap_axes   = True,         # match your [lat, fwd] convention
+                                        flip_lat    = False,
+                                        origin      = "center"
+                                    )
+                            finally: 
+                                ...
+
+                            routed_map = overlay_waypoints_on_map(
+                                map_img = routed_map,
+                                waypoints = output.copy(), 
+                                scale = self.map_processor.final_scale, 
+                                meters_span = self.map_processor.original_range,
+                                color=(0, 255, 0),
+                                thickness=2,
+                                swap_axes=True,  # set True if your waypoints are [lat, fwd]
+                                flip_lat=False,    # set True if lateral axis is mirrored
+                                origin = "center"
+                            )
+                            ...
+                            # wp_canvas = draw_waypoints_canvas(output, canvas_size = (100, 100), scale = self.map_processor.scale)
+                            # wp_canvas_h, wp_canvas_w, _ = wp_canvas.shape
+                            # self.hud.draw_frame(wp_canvas, (10, self.height - wp_canvas_h - 10))
+
+                    if self.controller.toggle_map and "routed_map" in locals():
+                        submap_h, submap_w, _ = routed_map.shape
+                        if old_map is None:
+                            routed_map = draw_border(routed_map, border_thicc = 3, border_color = (255, 255, 200, 100))
+                        self.hud.draw_frame(routed_map, (self.width - submap_w - 10, 0 + 10))
+                # ======================== RENDER ==========================
 
                 if replay_logging is not None and replay_logging[1] <= self.sub_server_runtime.receive():
                     self.log.INFO("Reached replay limit. Goodbye.")
@@ -454,20 +475,9 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                 if not self.headless:
                     pygame.display.flip()
                     if self.clock:
-                        # if self.server_fps > 0:
-                        #     if self.avg_server_fps == 0:
-                        #         self.avg_server_fps = self.server_fps
-                        #     else:
-                        #         self.avg_server_fps = (1 - self.alpha) * self.avg_server_fps + self.alpha * self.server_fps
-                        # frame_time = self.clock.tick(0)
-                        # target = min(self.fps, int(self.avg_server_fps)) if self.avg_server_fps > 0 else self.fps
-                        # if target > 0:
-                        #     target_dt = 1000.0 / target
-                        #     sleep_time = max(0, target_dt - frame_time)
-                        #     if sleep_time > 0:
-                        #         time.sleep(sleep_time / 1000.0)
                         self.clock.tick(self.fps)
 
+                frame_id += 1
 
 
         except KeyboardInterrupt:
@@ -477,7 +487,6 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
             self.log.ERROR("Viewer error", full_traceback = e)
             self.controller.running = False
         finally:
-            self.virt_vehicle.stop()
             self.close()
             if logger:
                 logger.finalize()
@@ -503,47 +512,66 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
             
         gc.collect()
 
-def draw_waypoints_canvas(waypoints: np.ndarray, canvas_size=(200, 200), scale=5.0, color=(0, 255, 0)):
+
+def generate_controller_doc(keybinds: dict, joybinds: dict) -> str:
     """
-    Draw waypoints on a blank canvas.
-    
-    Args:
-        waypoints: Array of waypoints in vehicle-local coordinates (N x 2)
-        canvas_size: (width, height) of the canvas
-        scale: Scaling factor for waypoint coordinates
-        color: Color of waypoint dots (BGR format)
-    
-    Returns:
-        np.ndarray: Canvas image with waypoints drawn
+    Generate documentation string for Controller based on KEYBINDS and JOYBINDS.
     """
-    canvas = np.zeros((canvas_size[1], canvas_size[0], 3), dtype=np.uint8)
-    
-    # Canvas center (vehicle position)
-    center_x, center_y = canvas_size[0] // 2, canvas_size[1] // 2
-    
-    # Draw vehicle position as a red dot
-    cv2.circle(canvas, (center_x, center_y), 3, (0, 0, 255), -1)
-    
-    # Draw waypoints
-    for wp in waypoints:
-        # Convert local coordinates to canvas coordinates
-        x = int(center_x + wp[0] * scale)
-        y = int(center_y - wp[1] * scale)  # Flip Y axis (canvas Y increases downward)
-        
-        # Check if point is within canvas bounds
-        if 0 <= x < canvas_size[0] and 0 <= y < canvas_size[1]:
-            cv2.circle(canvas, (x, y), 2, color, -1)
-    
-    # Draw connecting lines between waypoints
-    for i in range(len(waypoints) - 1):
-        x1 = int(center_x + waypoints[i][0] * scale)
-        y1 = int(center_y - waypoints[i][1] * scale)
-        x2 = int(center_x + waypoints[i+1][0] * scale)
-        y2 = int(center_y - waypoints[i+1][1] * scale)
-        
-        # Check bounds for both points
-        if (0 <= x1 < canvas_size[0] and 0 <= y1 < canvas_size[1] and
-            0 <= x2 < canvas_size[0] and 0 <= y2 < canvas_size[1]):
-            cv2.line(canvas, (x1, y1), (x2, y2), color, 1)
-    
-    return canvas
+    import pygame
+
+    # Map pygame key constants to readable names
+    key_names = {k: pygame.key.name(k).upper() for k in keybinds.keys()}
+
+    doc = []
+    doc.append("Welcome to CARLA Manual Control (Custom Controller).\n")
+    doc.append("Controls can be provided via Keyboard or Joystick.")
+    doc.append("Joystick (if detected) is prioritized automatically.")
+    doc.append("If no joystick is found, keyboard input is used as fallback.\n")
+
+    doc.append("----------------------------------------")
+    doc.append("Keyboard Controls")
+    doc.append("----------------------------------------")
+    for k, func in keybinds.items():
+        doc.append(f"    {key_names[k]:<12} : {func.replace('toggle_', '').replace('_', ' ')}")
+
+    # Always include quit keys
+    doc.append(f"    {'K/ESC':<12} : quit program")
+
+    doc.append("\n----------------------------------------")
+    doc.append("Joystick Controls")
+    doc.append("----------------------------------------")
+    doc.append("Axes:")
+    doc.append("    Left Stick X : steer left / right (with deadzone and curve applied)")
+    doc.append("    RT (Right Trigger) : throttle")
+    doc.append("    LT (Left Trigger)  : brake\n")
+
+    doc.append("Hats (D-pad):")
+    doc.append("    Up           : switch to First Person view")
+    doc.append("    Down         : switch to Third Person view")
+    doc.append("    Left / Right : step camera left / right\n")
+
+    doc.append("Buttons:")
+    for btn, func in joybinds.items():
+        doc.append(f"    Button {btn:<3} : {func.replace('toggle_', '').replace('_', ' ')}")
+
+    doc.append("\n----------------------------------------")
+    doc.append("Modes")
+    doc.append("----------------------------------------")
+    doc.append("    • Autopilot and Model Autopilot are mutually exclusive.")
+    doc.append("      Enabling one disables the other automatically.\n")
+    doc.append("    • Regulate Speed mode maintains a constant velocity until disabled.\n")
+
+    doc.append("----------------------------------------")
+    doc.append("Notes")
+    doc.append("----------------------------------------")
+    doc.append("    • Deadzones:")
+    doc.append("        Stick deadzone   = 0.12")
+    doc.append("        Trigger deadzone = 0.05\n")
+    doc.append("    • Steering curve applied for smoother control:")
+    doc.append("        steer_curve = 3\n")
+    doc.append("    • Keyboard inputs are only active when Model Autopilot is OFF.")
+    doc.append("      In Model Autopilot mode, keys [W/A/D] send turn signal messages.")
+
+    return "\n".join(doc)
+
+Logger().INFO(generate_controller_doc(KEYBINDS, JOYBINDS))
