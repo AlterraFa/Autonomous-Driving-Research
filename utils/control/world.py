@@ -77,6 +77,18 @@ class World:
             return False, None
         return False, None
 
+    def get_multi_junctions(self, waypoints: np.ndarray):
+        junctions_metadata = []; cached_id = []
+        for wp in waypoints:
+            loc = carla.Location(*wp)
+            carla_wp = self.map.get_waypoint(loc)
+            if carla_wp.is_junction:
+                junction = carla_wp.get_junction()
+                if junction.id not in excluded_junctions and junction.id not in cached_id:
+                    junctions_metadata += [junction]
+                    cached_id += [junction.id]
+        return junctions_metadata
+
     def get_segments_from_points(self, seg_type: Literal["junction", "road"], locations: np.ndarray):
         """
         Returns a dictionary of junction_id -> list of waypoints (locations) inside that junction.
