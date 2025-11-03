@@ -48,19 +48,6 @@ class Vehicle(MessagingSubscribers):
         self.throttle_filter = OnlineLowPassFilter(2.0, fps, 2)
         self.brake_filter    = OnlineLowPassFilter(2.0, fps, 2)
 
-        self._stop = threading.Event()
-        self._lock = threading.Lock()
-        self.tl_thread = threading.Thread(target = self._poll_traffic_light, daemon = True); self.tl_state = None
-        self.tl_thread.start()
-        self.ts_thread = threading.Thread(target = self._poll_traffic_sign, daemon = True); self.ts_events = []
-        self.ts_thread.start()
-        self.junction_thread = threading.Thread(target = self._poll_junction, daemon = True); self.junctions = {}
-        self.junction_thread.start()
-        self.waypoint_thread = threading.Thread(target = self._poll_waypoint, daemon = True); self.waypoint = None
-        self.waypoint_thread.start()
-        self.location_thread = threading.Thread(target = self._poll_location, daemon = True); self.location = carla.Location(x = 0, y = 0, z = 0)
-        self.location_thread.start()
-        self.threads = [self.tl_thread, self.ts_thread, self.junction_thread, self.waypoint_thread, self.location_thread]
         
         self.prev_loc = self.vehicle.get_transform().location
 
@@ -68,11 +55,6 @@ class Vehicle(MessagingSubscribers):
         self.wheelbase = 3.047080078125
         
         
-    def stop(self):
-        self._stop.set()
-        for thread in self.threads:
-            if thread.is_alive(): thread.join(timeout = 1.0)
-
     def set_autopilot(self, enable: bool):
         self.vehicle.set_autopilot(enable)
         self._autopilot = enable

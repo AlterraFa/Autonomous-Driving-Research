@@ -487,7 +487,6 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
             self.log.ERROR("Viewer error", full_traceback = e)
             self.controller.running = False
         finally:
-            self.virt_vehicle.stop()
             self.close()
             if logger:
                 logger.finalize()
