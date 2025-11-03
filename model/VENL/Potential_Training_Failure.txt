@@ -1,9 +1,0 @@
-- Saving is corrupted or wrong in ReplayHandler
-- Ego waypoint location is wrong4
-- RGB (Pygame) or BGR (Opencv) format mismatch
-
-- The overall waypoint output is wrong
-    - Using L1, L2 reg on weights regularization when K is small (K = 3 currently)
-    - Model is overfitting to expert waypoints (Fix is maybe to use lane centered waypoints) (EDIT: This was the issue)
-    - target_spread is too large or small (Will need tuning)
-- Model keep driving on to curbs (potentially because of PurePursuit)
