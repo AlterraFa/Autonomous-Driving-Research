@@ -7,14 +7,12 @@ import argparse
 import pygame
 import re
 
-from utils.spawn.actor_spawner import Spawn, VehicleClass as VClass
+from utils.spawn.actor_spawner import Spawn
 from utils.spawn.sensor_spawner import (
     SemanticSegmentation as SemSeg, 
     RGB,
     GNSS,
     IMU, 
-    Depth,
-    CarlaLabel as Clabel
 )
 from utils.spawn.multicam import MultiCamera
 from utils.math.path import ReplayHandler
@@ -70,16 +68,8 @@ def main(args):
     spawner = Spawn(virt_world.world, virt_world.tm)
     spawner.despawn_vehicles()
     rgb_sensor      = RGB(virt_world.world)
-    # semantic_sensor = SemSeg(virt_world.world, convert_to = partial(SemSeg.SemanticData.to_image))
     gnss_sensor     = GNSS(virt_world.world)
     imu_sensor      = IMU(virt_world.world)
-    # depth_sensor    = Depth(virt_world.world, convert_to = partial(Depth.DepthMap.to_log, invert = False, max_depth = 100))
-    multi_rgb       = MultiCamera(virt_world.world, RGB, quantity = 2)
-    # Set this first
-    multi_rgb.set_attribute("image_size_x", value = 200)
-    multi_rgb.set_attribute("image_size_y", value = 80)
-    multi_rgb.set_attribute("fov", value = 60)
-    
         
 
     duration = get_recording_duration(path_2_recording)
@@ -94,11 +84,8 @@ def main(args):
     game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync, headless = args.headless)
     game_viewer.init_sensor({
         rgb_sensor     : None, 
-        # semantic_sensor: None, 
         gnss_sensor    : None, 
         imu_sensor     : None, 
-        # depth_sensor   : None,
-        multi_rgb      : {'x' : 0, 'y': [-0.25, .25], 'z': 2, 'pitch': -20, 'yaw': [-30, 30], 'roll': [-5, 5]}
     })
     game_viewer.run(replay_logging = [path_2_waypoints, duration], use_temporal_wp = args.temporal, data_collect_dir = dataset_dir, debug = args.debug, model_path = args.model_path)
 

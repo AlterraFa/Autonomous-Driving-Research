@@ -13,9 +13,6 @@ def lateral_control(waypoints: np.ndarray, Ld: float, wheelbase: float, max_stee
     phi = np.atan2(target_x, target_y)
     steer = np.degrees(np.atan2(2 * wheelbase * np.sin(phi), np.sqrt(target_x ** 2 + target_y ** 2)))
 
-    # print(xs(Ld), ys(Ld), steer)
-
-
     steer = np.clip(steer, -max_steer, max_steer)
-    normalized_steer = steer / max_steer * 1.8
+    normalized_steer = steer / max_steer * 1.2
     return normalized_steer

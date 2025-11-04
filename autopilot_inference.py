@@ -45,15 +45,15 @@ def main(args):
     spawner.spawn_single_vehicle(bp_id = "vehicle.dodge.charger_2020", exclude = [VClass.Large, VClass.Medium, VClass.Tiny], autopilot = False)
 
     rgb_sensor      = RGB(virt_world.world)
-    semantic_sensor = SemSeg(virt_world.world, convert_to = partial(SemSeg.SemanticData.to_image))
+    # semantic_sensor = SemSeg(virt_world.world, convert_to = partial(SemSeg.SemanticData.to_image))
     gnss_sensor     = GNSS(virt_world.world)
     imu_sensor      = IMU(virt_world.world)
-    depth_sensor    = Depth(virt_world.world, convert_to = partial(Depth.DepthMap.to_log, invert = False, max_depth = 100))
-    multi_rgb       = MultiCamera(virt_world.world, RGB, quantity = 2)
-    # Set this first
-    multi_rgb.set_attribute("image_size_x", value = 200)
-    multi_rgb.set_attribute("image_size_y", value = 80)
-    multi_rgb.set_attribute("fov", value = 60)
+    # depth_sensor    = Depth(virt_world.world, convert_to = partial(Depth.DepthMap.to_log, invert = False, max_depth = 100))
+    # multi_rgb       = MultiCamera(virt_world.world, RGB, quantity = 2)
+    # # Set this first
+    # multi_rgb.set_attribute("image_size_x", value = 200)
+    # multi_rgb.set_attribute("image_size_y", value = 80)
+    # multi_rgb.set_attribute("fov", value = 60)
     
     controlling_vehicle = Vehicle(spawner.single_vehicle, virt_world.world)
     
@@ -64,7 +64,7 @@ def main(args):
             gnss_sensor    : None, 
             imu_sensor     : None, 
             # depth_sensor   : None,
-            multi_rgb      : {'x' : 0, 'y': [-0.25, .25], 'z': 2, 'pitch': -20, 'yaw': [-30, 30], 'roll': [-5, 5]}
+            # multi_rgb      : {'x' : 0, 'y': [-0.25, .25], 'z': 2, 'pitch': -20, 'yaw': [-30, 30], 'roll': [-5, 5]}
         })
     game_viewer.run(model_path = args.model_path)
     
