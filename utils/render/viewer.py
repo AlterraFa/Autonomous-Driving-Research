@@ -7,12 +7,12 @@ import gc
 
 from utils.control.world import World
 from utils.control.controller import Controller
-from utils.control.renderer import HUD, draw_border, overlay_waypoints_on_map, overlay_gmm_on_map
+from utils.render.hud import HUD, draw_border, overlay_waypoints_on_map, overlay_gmm_on_map
 from utils.control.vehicle_control import Vehicle
 
 from utils.math.path import ReplayHandler, OptimizePath
 from utils.math.world_map import Map
-from utils.math.pid import lateral_control
+from utils.control.pid import lateral_control
 from utils.math.coordinate_transform import local_2_global
 
 from utils.spawn.sensor_spawner import *

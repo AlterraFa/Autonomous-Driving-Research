@@ -21,7 +21,7 @@ from utils.math.path import ReplayHandler
 
 from utils.control.world import World
 from utils.control.vehicle_control import Vehicle
-from utils.control.viewer import CarlaViewer
+from utils.render.viewer import CarlaViewer
 from utils.messages.logger import Logger
 
 def get_recording_duration(log_path: str) -> float:
