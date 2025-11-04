@@ -223,18 +223,22 @@ class VENL(nn.Module):
     def postprocessor(raw_out: dict, data):
         return tuple([output[0] for output in raw_out.values()])
 
-    def preprocessor(self, I0: torch.Tensor, I1: torch.Tensor, I2: torch.Tensor, MU: torch.Tensor, MR: torch.Tensor):
+    def preprocessor(self, **kwargs):
+        # Sanity check
+        missing_keys = [key for key in self.input_metadata.keys() if key not in kwargs]
+        if missing_keys:
+            self.log.ERROR(f"Missing keys: {missing_keys}", exit_code = 2)
 
-        H, W, _    = I0.shape
+        H, W, _    = kwargs['I0'].shape
         x_top_left = 250; x_top_right = W - x_top_left
         y_hor      = 390; y_bot         = 680
-        I0 = I0[y_hor: y_bot, x_top_left: x_top_right]
+        I0 = kwargs['I0'][y_hor: y_bot, x_top_left: x_top_right]
         I0 = cv2.resize(I0, (self.input_metadata["I0"][3], self.input_metadata["I0"][2]))[..., :3]
-        I1 = I1[..., :3]
-        I2 = I2[..., :3]
+        I1 = kwargs['I1'][..., :3]
+        I2 = kwargs['I2'][..., :3]
 
-        MU = cv2.resize(MU, (self.input_metadata["MU"][3], self.input_metadata["MU"][2]))[..., None]
-        MR = cv2.resize(MR, (self.input_metadata["MR"][3], self.input_metadata["MR"][2]))[..., ::-1]
+        MU = cv2.resize(kwargs['MU'], (self.input_metadata["MU"][3], self.input_metadata["MU"][2]))[..., None]
+        MR = cv2.resize(kwargs['MR'], (self.input_metadata["MR"][3], self.input_metadata["MR"][2]))[..., ::-1]
 
         return (I0, I1, I2, MU, MR)
 

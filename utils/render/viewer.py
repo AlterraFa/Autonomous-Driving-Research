@@ -371,23 +371,16 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                 if model_path and self.controller.model_autopilot: # in inference mode
                     
                     if frame_id % 1 == 0:
-                         
-                        # CONCLUSION: MODEL IS HEAVILY RELYING ON ROUTED MAP, THE DATA IS TOO CLEAN
-                        frame_inp    = frame
-                        # I1_inp       = multi_images_list[0]
-                        # I2_inp       = multi_images_list[1]
-                        unrouted_inp = unrouted_map
-                        routed_inp   = routed_map
+                        input_metadata = {
+                            "I0": frame,
+                            "MU": unrouted_map,
+                            "MR": routed_map,
+                        }
+                        if "multi_images_list" in locals(): 
+                            for idx, image in enumerate(multi_images_list):
+                                input_metadata[f"I{idx + 1}"] = image
 
-                        # frame_inp    = np.zeros_like(frame)
-                        # I1_inp       = np.zeros_like(multi_images_list[0])
-                        # I2_inp       = np.zeros_like(multi_images_list[1])
-                        # unrouted_inp = np.zeros_like(unrouted_map)
-                        # routed_inp   = np.zeros_like(routed_map)
-
-                        # inp = inference.pytorch.preprocessor(**{"I0": frame}) # PilotNet preprocessor
-                        # inp = inference.pytorch.preprocessor(I0 = frame_inp, I1 = I1_inp, I2 = I2_inp, MU = unrouted_inp, MR = routed_inp) # VENL preprocessor
-                        inp = inference.pytorch.preprocessor(I0 = frame_inp, MU = unrouted_inp, MR = routed_inp) # SingleVENL preprocessor
+                        inp = inference.pytorch.preprocessor(**input_metadata) # VENL preprocessor
                         inference.put(inp, None)
                         output = inference.get()
                         if output is not None:
@@ -450,10 +443,6 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                                 flip_lat=False,    # set True if lateral axis is mirrored
                                 origin = "center"
                             )
-                            ...
-                            # wp_canvas = draw_waypoints_canvas(output, canvas_size = (100, 100), scale = self.map_processor.scale)
-                            # wp_canvas_h, wp_canvas_w, _ = wp_canvas.shape
-                            # self.hud.draw_frame(wp_canvas, (10, self.height - wp_canvas_h - 10))
 
                     if self.controller.toggle_map and "routed_map" in locals():
                         submap_h, submap_w, _ = routed_map.shape

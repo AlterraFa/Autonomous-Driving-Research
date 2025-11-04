@@ -2,22 +2,15 @@ import os, sys
 root = os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
 sys.path.insert(0, root)
 
-import re
 import carla
 import argparse
-import importlib
 import pygame
-import torch
-from functools import partial
 
 from utils.spawn.actor_spawner import Spawn, VehicleClass as VClass
 from utils.spawn.sensor_spawner import (
-    SemanticSegmentation as SemSeg, 
     RGB,
     GNSS,
     IMU, 
-    Depth,
-    CarlaLabel as Clabel
 )
 from utils.spawn.multicam import MultiCamera
 
@@ -45,10 +38,8 @@ def main(args):
     spawner.spawn_single_vehicle(bp_id = "vehicle.dodge.charger_2020", exclude = [VClass.Large, VClass.Medium, VClass.Tiny], autopilot = False)
 
     rgb_sensor      = RGB(virt_world.world)
-    semantic_sensor = SemSeg(virt_world.world, convert_to = partial(SemSeg.SemanticData.to_image))
     gnss_sensor     = GNSS(virt_world.world)
     imu_sensor      = IMU(virt_world.world)
-    depth_sensor    = Depth(virt_world.world, convert_to = partial(Depth.DepthMap.to_log, invert = False, max_depth = 100))
     multi_rgb       = MultiCamera(virt_world.world, RGB, quantity = 2)
     # Set this first
     multi_rgb.set_attribute("image_size_x", value = 200)
@@ -60,10 +51,8 @@ def main(args):
     game_viewer = CarlaViewer(virt_world, controlling_vehicle, args.width, args.height, sync = args.sync)
     game_viewer.init_sensor({
             rgb_sensor     : None, 
-            # semantic_sensor: None, 
             gnss_sensor    : None, 
-            imu_sensor     : None, 
-            # depth_sensor   : None,
+            imu_sensor     : None,
             multi_rgb      : {'x' : 0, 'y': [-0.25, .25], 'z': 2, 'pitch': -20, 'yaw': [-30, 30], 'roll': [-5, 5]}
         })
     game_viewer.run(model_path = args.model_path)

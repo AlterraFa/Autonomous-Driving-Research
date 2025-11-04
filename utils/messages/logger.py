@@ -65,7 +65,7 @@ class Logger(Console):
         if "ERROR" not in Logger._enabled_levels:
             return
         def log_func(message, full_traceback):
-            self.print(f"{self.current_timestamp} [color(249)][[/][color(196)]ERROR[/]]   [[purple]{self.class_name}[/][color(249)]]:[/] {message}")
+            self.print(f"{self.current_timestamp} [color(249)][[/][b][color(196)]ERROR[/][/]]   [[purple]{self.class_name}[/][color(249)]]:[/] {message}")
             if full_traceback:
                 self.print(f"[red]Exception:[/] {full_traceback}")
                 self.print("".join(traceback.format_exception(type(full_traceback), full_traceback, full_traceback.__traceback__)))
