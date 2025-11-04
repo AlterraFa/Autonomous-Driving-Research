@@ -278,10 +278,9 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
 
                 location = self.sub_location.receive()
                 heading  = self.sub_heading.receive()
-                gps_buffer.append(location) # THIS DELAY ALSO CONFIRMS THAT THE MODEL IS TOO DEPENDANT ON ROUTED MAP
+                gps_buffer.append(location)
                 choose_delay = np.random.randint(0, min(10, len(gps_buffer)))
                 unrouted_map, old_map = self.map_processor.retrieve_map(
-                    # coordinate = location,
                     coordinate = gps_buffer[choose_delay] + (np.random.randn(3) - .5) * .1,  # Introduce some noise to the GPS map 
                     heading = heading, 
                     display = self.controller.toggle_map or replayer is not None or self.override_render_map
@@ -340,31 +339,19 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                     logger.update(front_location)
                 if replayer: # in replaying mode
 
-                    # =========================== VENL ==========================
-                    # multi_images_list = list(data.values())   # e.g. [img1, img2, img3]
-                    # multi_keys = [f"I{i+1}" for i in range(len(multi_images_list))]
-                    # H, W, _    = frame.shape
-                    # x_top_left = 250; x_top_right = W - x_top_left
-                    # y_hor      = 390; y_bot         = 680
-                    # frame_cutout = frame[y_hor: y_bot, x_top_left: x_top_right]
-                    # frame_cutout = cv2.resize(frame_cutout, (multi_images_list[0].shape[1], multi_images_list[0].shape[0]))
-                    # image_kwargs = (
-                    #     {"I0": frame_cutout} | 
-                    #     {k: v for k, v in zip(multi_keys, multi_images_list)} | 
-                    #     {"MU": cv2.resize(unrouted_map, (50, 50)), "MR": cv2.resize(routed_map, (50, 50))}
-                    # )
-                    
-                    # =========================== Single VENL ==========================
+                    multi_images_list = list(data.values())   # e.g. [img1, img2, img3]
+                    multi_keys = [f"I{i+1}" for i in range(len(multi_images_list))]
                     H, W, _    = frame.shape
-                    x_top_left = 150; x_top_right = W - x_top_left
-                    y_hor      = 370; y_bot       = 720
+                    x_top_left = 250; x_top_right = W - x_top_left
+                    y_hor      = 390; y_bot         = 680
                     frame_cutout = frame[y_hor: y_bot, x_top_left: x_top_right]
-                    frame_cutout = cv2.resize(frame_cutout, (400, 160))
+                    frame_cutout = cv2.resize(frame_cutout, (multi_images_list[0].shape[1], multi_images_list[0].shape[0]))
                     image_kwargs = (
                         {"I0": frame_cutout} | 
+                        {k: v for k, v in zip(multi_keys, multi_images_list)} | 
                         {"MU": cv2.resize(unrouted_map, (50, 50)), "MR": cv2.resize(routed_map, (50, 50))}
                     )
-
+                    
                     replayer.step(**image_kwargs)
                 
 
@@ -372,10 +359,9 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                     
                     if frame_id % 1 == 0:
                          
-                        # CONCLUSION: MODEL IS HEAVILY RELYING ON ROUTED MAP, THE DATA IS TOO CLEAN
                         frame_inp    = frame
-                        # I1_inp       = multi_images_list[0]
-                        # I2_inp       = multi_images_list[1]
+                        I1_inp       = multi_images_list[0]
+                        I2_inp       = multi_images_list[1]
                         unrouted_inp = unrouted_map
                         routed_inp   = routed_map
 
@@ -385,9 +371,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                         # unrouted_inp = np.zeros_like(unrouted_map)
                         # routed_inp   = np.zeros_like(routed_map)
 
-                        # inp = inference.pytorch.preprocessor(**{"I0": frame}) # PilotNet preprocessor
-                        # inp = inference.pytorch.preprocessor(I0 = frame_inp, I1 = I1_inp, I2 = I2_inp, MU = unrouted_inp, MR = routed_inp) # VENL preprocessor
-                        inp = inference.pytorch.preprocessor(I0 = frame_inp, MU = unrouted_inp, MR = routed_inp) # SingleVENL preprocessor
+                        inp = inference.pytorch.preprocessor(I0 = frame_inp, I1 = I1_inp, I2 = I2_inp, MU = unrouted_inp, MR = routed_inp) # VENL preprocessor
                         inference.put(inp, None)
                         output = inference.get()
                         if output is not None:
@@ -429,15 +413,15 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                                         weights = weights.copy(), 
                                         mu      = muys.copy(),
                                         sigma   = sigmas.copy(),
-                                        scale       = self.map_processor.final_scale,   # (px/m_fwd, px/m_lat)
+                                        scale       = self.map_processor.final_scale,
                                         alpha       = 2.5,
                                         n_std       = 1.0,
-                                        swap_axes   = True,         # match your [lat, fwd] convention
+                                        swap_axes   = True,
                                         flip_lat    = False,
                                         origin      = "center"
                                     )
                             finally: 
-                                ...
+                                pass
 
                             routed_map = overlay_waypoints_on_map(
                                 map_img = routed_map,
