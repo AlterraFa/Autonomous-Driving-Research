@@ -7,6 +7,7 @@ The model was evaluated on unseen environments — it was **not trained** on eit
 |:-----------------:|:--------------------:|
 | <img src="./media/Town01_WithMap.gif" width="100%"> | <img src="./media/Town02_WithMapV2.gif" width="100%"> |
 
+Full demonstration videos are available in the [media](./media/) directory
 
 ## ACKNOWLEDGEMENTS  
 
