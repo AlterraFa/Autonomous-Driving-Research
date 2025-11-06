@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import numpy as np
 
 from tqdm.auto import tqdm
-from model.VENL.model import VENL
+from model.SingleVENL.model import SingleVENL
 
 from torch import optim
 from torch.utils.data import DataLoader
@@ -39,7 +39,7 @@ target_std = torch.tensor(venl_config["target_std"])
 target_sep = torch.tensor(venl_config["target_sep"])
 
 
-def single_epoch_training(model: VENL, loader: DataLoader, optimizer: optim):
+def single_epoch_training(model: SingleVENL, loader: DataLoader, optimizer: optim):
     model.train()
     device = next(model.parameters()).device
 
@@ -170,7 +170,7 @@ def single_epoch_training(model: VENL, loader: DataLoader, optimizer: optim):
     return trainMetrics
 
 
-def single_epoch_val(model: VENL, loader: DataLoader):
+def single_epoch_val(model: SingleVENL, loader: DataLoader):
     model.eval()
     device = next(model.parameters()).device
 
