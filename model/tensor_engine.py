@@ -4,14 +4,19 @@ import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
 
-import os
+import os, sys
 import time
+import inspect
 import warnings
 warnings.filterwarnings(
     "ignore",
     message=".*legacy TorchScript-based ONNX export.*",
     category=DeprecationWarning,
 )
+
+root_dir = os.path.dirname(os.path.dirname(__file__))
+sys.path.append(root_dir)
+
 
 from tqdm.auto import tqdm
 from rich import print
@@ -24,8 +29,6 @@ class TensorRTHelper:
         self.input_names = ["img"]
         self.output_names = ["preds"]
 
-        # self.d_in  = None
-        # self.d_out = None
         self.d_ins  = []
         self.d_outs = []
 
@@ -48,27 +51,18 @@ class TensorRTHelper:
         self.log.WARNING(f"Preparing engine bindings. TRT {trt.__version__}")
         self.stream = cuda.Stream()
 
-        if hasattr(self.engine, "get_tensor_shape"):
-            self.uses_io_tensors = True
-            names = [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
-            modes = {n: self.engine.get_tensor_mode(n) for n in names}
-            self.input_names  = [n for n in names if modes[n] == trt.TensorIOMode.INPUT]
-            self.output_names = [n for n in names if modes[n] == trt.TensorIOMode.OUTPUT]
+        names = [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
+        modes = {n: self.engine.get_tensor_mode(n) for n in names}
+        self.input_names  = [n for n in names if modes[n] == trt.TensorIOMode.INPUT]
+        self.output_names = [n for n in names if modes[n] == trt.TensorIOMode.OUTPUT]
 
-            # keep your preferred names if present
-            if self.input_names not in self.input_names and self.input_names:
-                self.input_names = self.input_names
-            if self.output_names not in self.output_names and self.output_names:
-                self.output_names = self.output_names
-            self.log.CUSTOM("SUCCESS", "Binding completed")
-            return
-
-        self.log.WARNING(f"Preparing engine bindings. Fall back to TRT legacy version {trt.__version__}")
-        self.uses_io_tensors = False
-        self.bindings = [None] * self.engine.num_bindings
-        self.input_idx  = self.engine.get_binding_index(self.input_names)
-        self.output_idx = self.engine.get_binding_index(self.output_names)
+        # keep your preferred names if present
+        if self.input_names not in self.input_names and self.input_names:
+            self.input_names = self.input_names
+        if self.output_names not in self.output_names and self.output_names:
+            self.output_names = self.output_names
         self.log.CUSTOM("SUCCESS", "Binding completed")
+        return
 
     def _np_dtype_from_trt(self, dt):
         return {
@@ -83,65 +77,49 @@ class TensorRTHelper:
     def _alloc_io(self, *inp_arr: np.ndarray):
         """Memory allocations for engine input and output on GPU"""
         
-        if self.uses_io_tensors: # Newer TRT
-            if hasattr(self.context, "set_optimization_profile_async"):
-                self.context.set_optimization_profile_async(0, self.stream.handle)
+        if hasattr(self.context, "set_optimization_profile_async"):
+            self.context.set_optimization_profile_async(0, self.stream.handle)
 
-            # Allocation for input
-            for idx, (name, inp) in enumerate(zip(self.input_names, inp_arr)):
-                self.context.set_input_shape(name, inp.shape)
-                in_bytes = int(inp.nbytes)
-                # Allocate if infer first time
-                if idx + 1 > len(self.d_ins):
-                    self.d_ins      += [cuda.mem_alloc(in_bytes)]
-                    self.d_ins_size += [in_bytes]
+        # Allocation for input
+        for idx, (name, inp) in enumerate(zip(self.input_names, inp_arr)):
+            self.context.set_input_shape(name, inp.shape)
+            in_bytes = int(inp.nbytes)
+            # Allocate if infer first time
+            if idx + 1 > len(self.d_ins):
+                self.d_ins      += [cuda.mem_alloc(in_bytes)]
+                self.d_ins_size += [in_bytes]
 
-                elif self.d_ins_size[idx] < in_bytes:
-                    self.d_ins[idx].free()
-                    self.d_ins[idx]      = cuda.mem_alloc(in_bytes)
-                    self.d_ins_size[idx] = in_bytes
-                self.context.set_tensor_address(name, self.d_ins[idx])
+            elif self.d_ins_size[idx] < in_bytes:
+                self.d_ins[idx].free()
+                self.d_ins[idx]      = cuda.mem_alloc(in_bytes)
+                self.d_ins_size[idx] = in_bytes
+            self.context.set_tensor_address(name, self.d_ins[idx])
 
-            # Allocation for output
-            out_shapes = {}
-            for name in self.output_names:
-                shp = tuple(self.context.get_tensor_shape(name)) # get output shape
-                dt_trt = self.engine.get_tensor_dtype(name) # get output data type
-                dt_np  = self._np_dtype_from_trt(dt_trt) # Convert data type to numpy
-                nbytes = int(int(np.prod(shp)) * np.dtype(dt_np).itemsize) # compute amount of bytes needed
+        # Allocation for output
+        out_shapes = {}
+        for name in self.output_names:
+            shp = tuple(self.context.get_tensor_shape(name)) # get output shape
+            dt_trt = self.engine.get_tensor_dtype(name) # get output data type
+            dt_np  = self._np_dtype_from_trt(dt_trt) # Convert data type to numpy
+            nbytes = int(int(np.prod(shp)) * np.dtype(dt_np).itemsize) # compute amount of bytes needed
 
-                need_new = (
-                    name not in self.out_ptrs or
-                    self.out_shapes.get(name) != shp or
-                    self.out_dtypes.get(name) != dt_np
-                ) 
-                if need_new:
-                    if name in self.out_ptrs and self.out_ptrs[name] is not None:
-                        self.out_ptrs[name].free() # Free the pointers from previous inference
-                    self.out_ptrs[name] = cuda.mem_alloc(int(nbytes))
-                    self.out_shapes[name] = shp
-                    self.out_dtypes[name] = dt_np
+            need_new = (
+                name not in self.out_ptrs or
+                self.out_shapes.get(name) != shp or
+                self.out_dtypes.get(name) != dt_np
+            ) 
+            if need_new:
+                if name in self.out_ptrs and self.out_ptrs[name] is not None:
+                    self.out_ptrs[name].free() # Free the pointers from previous inference
+                self.out_ptrs[name] = cuda.mem_alloc(int(nbytes))
+                self.out_shapes[name] = shp
+                self.out_dtypes[name] = dt_np
 
-                self.context.set_tensor_address(name, int(self.out_ptrs[name]))
-                out_shapes[name] = shp
+            self.context.set_tensor_address(name, int(self.out_ptrs[name]))
+            out_shapes[name] = shp
 
-            return out_shapes
+        return out_shapes
 
-        # self.context.set_binding_shape(self.input_idx, shape)
-        # out_shape = tuple(self.context.get_binding_shape(self.output_idx))
-        # in_bytes  = int(inp.nbytes)
-        # out_elems = int(np.prod(out_shape))
-        # out_bytes = int(out_elems * np.dtype(self.out_dtype).itemsize)
-        # if self.last_io_shape != (shape, out_shape):
-        #     if self.d_in is not None:  self.d_in.free()
-        #     if self.d_out is not None: self.d_out.free()
-        #     self.d_in  = cuda.mem_alloc(in_bytes)
-        #     self.d_out = cuda.mem_alloc(out_bytes)
-        #     self.last_io_shape = (shape, out_shape)
-        # self.bindings[self.input_idx]  = int(self.d_in)
-        # self.bindings[self.output_idx] = int(self.d_out)
-        # return {self.output_names: out_shape}
-    
     @staticmethod
     def dims_to_tuple(d):
         try:
@@ -293,24 +271,16 @@ class ImageTensorRTInference(TensorRTHelper):
         out_shapes = self._alloc_io(*inp_imgs)
         for idx, inp in enumerate(inp_imgs):
             cuda.memcpy_htod_async(self.d_ins[idx], np.ascontiguousarray(inp), self.stream)
-        if self.uses_io_tensors:
-            ok = self.context.execute_async_v3(self.stream.handle)
-        else:
-            ok = self.context.execute_async_v2(self.bindings, self.stream.handle)
+        ok = self.context.execute_async_v3(self.stream.handle)
         if not ok:
             raise RuntimeError("ImageTensorRT execution failed")
         self.stream.synchronize()
 
         outs = {}
-        if self.uses_io_tensors:
-            for name, shp in out_shapes.items():
-                host = np.empty(shp, dtype=self.out_dtypes[name])
-                cuda.memcpy_dtoh(host, self.out_ptrs[name])
-                outs[name] = host
-        # else:
-        #     out = np.empty(next(iter(out_shapes.values())), dtype=self.out_dtype)
-        #     cuda.memcpy_dtoh(out, self.d_out)
-        #     outs[self.output_names] = out
+        for name, shp in out_shapes.items():
+            host = np.empty(shp, dtype=self.out_dtypes[name])
+            cuda.memcpy_dtoh(host, self.out_ptrs[name])
+            outs[name] = host
         
         for name in self.output_names:
             outs.get(name)
@@ -368,9 +338,39 @@ class ImageTensorRTExport(TensorRTHelper):
             if not hasattr(model, "input_metadata"):
                 self.log.ERROR("The model does not have `input_metadata`")
             self.net = model
+    
+    def inspect_input(self):
+        self.log.INFO("Analyzing model forward signature to determine input order...")
+        
+        sig = inspect.signature(self.net.forward)
+        
+        dummy_inp = []
+        self.input_names = []
+        
+        for param_name, param in sig.parameters.items():
+            if param_name == 'self':
+                continue
+            
+            if param_name in self.net.input_metadata:
+                shape = self.net.input_metadata[param_name]
+                
+                self.log.INFO(f"Mapping forward arg '{param_name}' -> shape {shape}")
+                
+                device = next(self.net.parameters()).device
+                tensor = torch.zeros(shape).to(device)
+                
+                dummy_inp.append(tensor)
+                self.input_names.append(param_name)
+            else:
+                if param.default != inspect.Parameter.empty:
+                    self.log.WARNING(f"Argument '{param_name}' not in input_metadata, using default value.")
+                    continue
+                else:
+                    self.log.ERROR(f"Model forward expects '{param_name}', but it is missing from input_metadata!", exit_code=15)
 
     def export_onnx(self, onnx_path="model.onnx",
-                    opset=13, dynamic=True):
+                    opset=13, dynamic=True, dynamo=False):
+        
 
         dynamic_axes = None
         if dynamic:
@@ -378,11 +378,10 @@ class ImageTensorRTExport(TensorRTHelper):
             dynamic_axes = {name: {0: "batch"} for name in self.net.input_metadata.keys()}
 
         dummy_inp        = []
-        self.input_names = []
-        for key, value in self.net.input_metadata.items():
-            dummy_inp        += [torch.zeros(value)]
-            self.input_names += [key]
-        
+        self.input_names = list(inspect.signature(self.net.forward).parameters.keys())
+        for name in self.input_names:
+            dummy_inp   += [torch.zeros(self.net.input_metadata[name])]
+            
         # Check if there is an output name in the model.
         if not hasattr(self.net, "output_names"):
             self.log.WARNING("The model does not have `output_names`. This is optional.")
@@ -398,6 +397,7 @@ class ImageTensorRTExport(TensorRTHelper):
                 opset_version = opset,
                 do_constant_folding = True,
                 dynamic_axes = dynamic_axes,
+                dynamo = dynamo
             )
         except Exception as e:
             self.log.ERROR("Export failed", exit_code = 13, full_traceback = e)
@@ -427,14 +427,18 @@ class ImageTensorRTExport(TensorRTHelper):
                 config.set_flag(trt.BuilderFlag.INT8)
             elif quantize_type.upper() == "TF32" and getattr(builder, "platform_has_tf32", False):
                 config.set_flag(trt.BuilderFlag.TF32)
+            elif quantize_type.upper() == "BF16" and getattr(builder, "platfrom_has_fast_bf16", False):
+                config.set_flag(trt.BuilderFlag.BF16)
             self.log.INFO(f"Quantizing to {quantize_type.upper()} precision.")
 
 
-            with open(onnx_path, "rb") as f:
-                if not parser.parse(f.read()):
-                    for i in range(parser.num_errors):
-                        print(parser.get_error(i))
-                    self.log.ERROR("Failed to parse ONNX.", exit_code = 13)
+            # with open(onnx_path, "rb") as f:
+            if not parser.parse_from_file(onnx_path):
+                for i in range(parser.num_errors):
+                    error_obj = parser.get_error(i)
+                    error_msg = error_obj.desc() 
+                    print(f"TRT Error [{i}]: {error_msg}")
+                self.log.ERROR("Failed to parse ONNX.", exit_code = 13)
                     
 
             self.log.INFO("Optimizing profile. This might take some time...")
@@ -488,7 +492,8 @@ class ImageTensorRTExport(TensorRTHelper):
                          min_batch = 1,
                          opt_batch = 1, 
                          max_batch = 1,
-                         workspace_gb = 1.0, 
+                         workspace_gb = 1.0,
+                         dynamo = False, 
                          device = 'cpu'):
         if hasattr(self, "weights_path") == False:
             if weights_path is None: self.log.ERROR("No weights path specified", exit_code = 15)
@@ -504,9 +509,11 @@ class ImageTensorRTExport(TensorRTHelper):
         onnx_path   = base + ".onnx"
         engine_path = base + ".engine"
         
+        if dynamo:
+            self.log.WARNING(f"Using dynamo for ONNX tracing (This mode is experimental. Requires high opset version)")        
 
         self.load_model_from_checkpoint(weights_path, device = device)
-        self.export_onnx(onnx_path = onnx_path, opset = opset, dynamic = dynamic)
+        self.export_onnx(onnx_path = onnx_path, opset = opset, dynamic = dynamic, dynamo = dynamo)
         self.build_engine(onnx_path, engine_path, quantize_type = quantize_type, min_batch = min_batch, opt_batch = opt_batch, max_batch = max_batch, workspace_gb = workspace_gb)
         return onnx_path, engine_path
 
@@ -542,11 +549,22 @@ if __name__ == "__main__":
         help="Choose precision quantization if supported by TensorRT (FP32, FP16, INT8, TF32)"
     )
     parser.add_argument(
+        "--onnx-opset",
+        default = 13,
+        type = int,
+        help = "Specify onnx opset version"
+    )
+    parser.add_argument(
         "--test-iter",
         "-iter",
         type = int,
         default = 1,
         help="Number of iteration during speed up testing"
+    )
+    parser.add_argument(
+        "--dynamo",
+        action = "store_true",
+        help = "Enable dynamo for ONNX export (Experimental: requires newer ONNX opsets)."
     )
     
     args = parser.parse_args()
@@ -562,6 +580,10 @@ if __name__ == "__main__":
             f"Invalid format for --batch '{args.batch}'. "
             "Expected format: 'min.opt.max' (e.g., 1.4.8)."
         )
+        
+        
+    torch.backends.fp32_precision = "tf32"
+    torch.backends.cudnn.fp32_precision = "tf32"
     
     # --- Call exporter ---
     exporter = ImageTensorRTExport()
@@ -572,7 +594,9 @@ if __name__ == "__main__":
         max_batch=max_batch,
         workspace_gb=args.workspace_gb, 
         quantize_type=args.quantize,
-        device = 'cpu'
+        opset=args.onnx_opset,
+        dynamo=args.dynamo,
+        device='cpu',
     )
     exporter.net = exporter.net.to('cuda')
     

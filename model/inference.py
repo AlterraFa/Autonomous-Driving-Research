@@ -29,11 +29,11 @@ class ModelLoader:
     
     def _extract_class(self, path: str):
         """
-        Extract the class object from a checkpoint path.
+        Extract the class object from a checkpoint path by searching python files
+        recursively in directories from the checkpoint up to the 'model' root.
 
         Args:
             path (str): Path to checkpoint file 
-                        (e.g. 'model/PilotNet/PilotNetExperiment/run5/best_PilotNetStatic_run5.pt')
 
         Returns:
             type: Class object found in the project structure
@@ -41,38 +41,99 @@ class ModelLoader:
         self.log.DEBUG(f"Automatically finding module for the specified model")
         
         fname = os.path.basename(path)
-        match = re.search(r"best_(.+?)_run\d+\.(?:pt|engine)$", fname)
+        match = re.search(r"best_(.+?)(?:_run\d+)?\.(?:pt|engine)$", fname)
         if not match:
             raise ValueError(f"Could not parse class name from filename: {fname}")
         class_name = match.group(1)
 
-        dir_path = os.path.dirname(path)
-        while dir_path and os.path.basename(dir_path) != "model":
-            dir_path = os.path.dirname(dir_path)
-
-        if not dir_path:
-            self.log.ERROR("Could not find [bold][i]'model.py'[/][/] file in path", exit_code = 12)
-
-
-        rel_path = os.path.relpath(os.path.dirname(path), dir_path)  
-        parts = rel_path.split(os.sep)
-
-        candidate_modules = []
-        for i in range(len(parts)):
-            subpath = ".".join(parts[:i+1])
-            candidate_modules.append(f"model.{subpath}.model")
-        candidate_modules.append("model")  # fallback
-
-        for module_path in candidate_modules:
-            try:
-                module = importlib.import_module(module_path)
-                if hasattr(module, class_name) and inspect.isclass(getattr(module, class_name)):
-                    self.log.INFO(f"Found module with class: [bold]{class_name}[/] in [bold]{module_path}[/] module")
-                    return getattr(module, class_name)
-            except ModuleNotFoundError:
-                continue
+        abs_ckpt_path = os.path.abspath(path)
+        cwd = os.getcwd() 
         
-        self.log.ERROR(f"Could not find class [bold]{class_name}[/] in any of: {candidate_modules}", exit_code = 12)
+        current_search_dir = os.path.dirname(abs_ckpt_path)
+        
+        
+        while True:
+            for root, dirs, files in os.walk(current_search_dir):
+                
+                if '__pycache__' in dirs: dirs.remove('__pycache__')
+                if '.git' in dirs: dirs.remove('.git')
+                if '.vscode' in dirs: dirs.remove('.vscode')
+
+                for py_file in files:
+                    if not py_file.endswith(".py"):
+                        continue
+
+                    full_file_path = os.path.join(root, py_file)
+                    
+                    try:
+                        rel_path = os.path.relpath(full_file_path, cwd)
+                        
+                        if rel_path.startswith(".."):
+                            continue
+                            
+                        module_path = os.path.splitext(rel_path)[0].replace(os.sep, ".")
+                        
+                        module = importlib.import_module(module_path)
+                        
+                        if hasattr(module, class_name) and inspect.isclass(getattr(module, class_name)):
+                            found_class = getattr(module, class_name)
+                            self.log.INFO(f"Found class [bold]{class_name}[/] in [bold]{module_path}[/]")
+                            return found_class
+                            
+                    except (ImportError, AttributeError, Exception):
+                        continue
+
+            if os.path.basename(current_search_dir) == "model":
+                break
+            
+            parent_dir = os.path.dirname(current_search_dir)
+            if parent_dir == current_search_dir:
+                break
+            current_search_dir = parent_dir
+        self.log.ERROR(f"Could not find class [bold]{class_name}[/] in directories up to 'model' root.", exit_code=12)
+
+    def _extract_yaml(self, path: str) -> str:
+        """
+        Extract the path to ANY .yaml configuration file from a checkpoint path 
+        by searching recursively in directories from the checkpoint up to the 'model' root.
+        
+        It returns the first .yaml file found, prioritizing files closest to the checkpoint.
+
+        Args:
+            path (str): Path to checkpoint file 
+
+        Returns:
+            str: Absolute path to the found yaml file
+        """
+        self.log.DEBUG(f"Automatically finding any configuration file for the specified model")
+        
+        abs_ckpt_path = os.path.abspath(path)
+        current_search_dir = os.path.dirname(abs_ckpt_path)
+        
+        while True:
+            for root, dirs, files in os.walk(current_search_dir):
+                
+                if '__pycache__' in dirs: dirs.remove('__pycache__')
+                if '.git' in dirs: dirs.remove('.git')
+                if '.vscode' in dirs: dirs.remove('.vscode')
+
+                for file in files:
+                    if file.endswith(".yaml") or file.endswith(".yml"):
+                        full_file_path = os.path.join(root, file)
+                        self.log.INFO(f"Found config [bold]{file}[/] in [bold]{root}[/]")
+                        return full_file_path
+
+            if os.path.basename(current_search_dir) == "model":
+                break
+            
+            parent_dir = os.path.dirname(current_search_dir)
+            if parent_dir == current_search_dir:
+                break
+            
+            current_search_dir = parent_dir
+
+        self.log.ERROR(f"Could not find any .yaml file in directories up to 'model' root.", exit_code=12)
+
 
 class AsyncInference:
     def __init__(self, path, device = "cpu", batch_output = False, **model_kwargs):
@@ -124,12 +185,13 @@ class AsyncInference:
                         output = self.pytorch(*inp, processor_data)
                     else:
                         output = self.pytorch(*inp)
+                
                     if isinstance(output, torch.Tensor):
                         # Single tensor output
                         if self.batch_output == True:
-                            output = output.detach().cpu().numpy()
-                        else:
                             output = output.detach().cpu().numpy()[0]
+                        else:
+                            output = output.detach().cpu().numpy()[0, 0]
                     elif isinstance(output, (tuple, list)):
                         # Multiple tensor outputs (tuple or list)
                         if self.batch_output:
@@ -170,17 +232,9 @@ class AsyncInference:
                 inp_img, extra_data = data
                 
                 if isinstance(inp_img, (torch.Tensor, np.ndarray, cv2.Mat)):
-                    inp = torch.from_numpy(np.ascontiguousarray(inp_img)).float()
-                    inp = inp.permute(2, 0, 1).unsqueeze(0) / 255.0
-                    inp = inp.detach().cpu().numpy().astype(np.float32)
-                    inp = np.ascontiguousarray(inp)
-                    inp = [inp]
+                    inp = [np.ascontiguousarray(inp_img)]
                 else:
-                    inp = []
-                    for img in inp_img:
-                        inp_tmp = torch.from_numpy(np.ascontiguousarray(img)).float()
-                        inp_tmp = inp_tmp.permute(2, 0, 1).unsqueeze(0).to(non_blocking=True) / 255.0
-                        inp += [np.ascontiguousarray(inp_tmp)]
+                    inp = [np.ascontiguousarray(img) for img in inp_img]
 
                 if not isinstance(extra_data, (torch.Tensor, np.ndarray, cv2.Mat)):
                     processor_data = extra_data
@@ -258,6 +312,8 @@ class AsyncInference:
         name, ext = os.path.splitext(fname)
         
         model_class = ModelLoader()._extract_class(path)
+        cfg_path    = ModelLoader()._extract_yaml(path)
+        if cfg_path is not None: model_class.config_path = cfg_path
         
         pt_path = basepath + "/" + name + ".pt"
 
