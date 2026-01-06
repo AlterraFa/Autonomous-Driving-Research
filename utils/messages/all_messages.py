@@ -49,7 +49,7 @@ class Heading(Enum):
     Queue = "General"
     Owner = "HUD"
     msgID = 6
-    msgType = (float, int, np.ndarray, torch.Tensor)
+    msgType = (float, int)
     default = 0.0
 
 class Accel(Enum):
@@ -184,7 +184,7 @@ class ModelSteer(Enum):
     msgType = (float, )
     default = None
 
-class ModelThrottle(Enum):
+class ModelSpeed(Enum):
     Queue = "General"
     Owner = "Model"
     msgID = 42

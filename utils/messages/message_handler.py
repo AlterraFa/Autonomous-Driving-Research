@@ -92,7 +92,7 @@ class MessagingSubscribers:
 
         # Model
         self.sub_model_steer     = MessageSubscriber(ModelSteer)
-        self.sub_model_throttle  = MessageSubscriber(ModelThrottle)
+        self.sub_model_speed  = MessageSubscriber(ModelSpeed)
         self.sub_model_brake     = MessageSubscriber(ModelBrake)
         self.sub_model_autopilot_logging = MessageSubscriber(ModelAutopilot)
 
@@ -143,7 +143,7 @@ class MessagingSenders:
 
         # Model
         self.send_model_steer    = MessageSender(ModelSteer)
-        self.send_model_throttle = MessageSender(ModelThrottle)
+        self.send_model_speed    = MessageSender(ModelSpeed)
         self.send_model_brake    = MessageSender(ModelBrake)
         self.send_model_autopilot_logging = MessageSender(ModelAutopilot)
 

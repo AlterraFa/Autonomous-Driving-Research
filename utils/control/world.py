@@ -3,16 +3,14 @@ script_path = os.path.abspath(__file__)
 folder = os.path.dirname(script_path)
 parent = os.path.dirname(folder)
 
-import ast
+import toml
 import carla
 import numpy as np
-import configparser
 from utils.messages.logger import Logger
 from typing import Literal
 
-config = configparser.ConfigParser()
-config.read(parent + "/../config/config.ini")
-excluded_junctions = ast.literal_eval(config.get("TrafficManager", "excluded_junctions"))
+conf = toml.load(parent + "/../config/config.toml")
+excluded_junctions = conf["TrafficManager"]["excluded_junctions"]
 
 class World:
     def __init__(self, client: carla.Client, tm_port: int, delta = 0.05):

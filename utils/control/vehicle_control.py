@@ -1,13 +1,26 @@
+import os, sys
+import toml
+script_path = os.path.abspath(__file__)
+folder = os.path.dirname(script_path)
+parent = os.path.dirname(folder)
+
 import carla
 import numpy as np
-import threading
-import time
-import math
 
 from traceback import print_exc
 from scipy.signal import butter, lfilter, lfilter_zi
-from scipy.interpolate import interp1d
 from utils.messages.message_handler import MessagingSubscribers
+from utils.others.others import get_nested_config
+
+conf = toml.load(os.path.join(parent, "../config/config.toml"))
+decay     = conf["Vehicle"]['decay']
+max_steer = conf["Vehicle"]['Physics']['max_steer']
+wheelbase = conf["Vehicle"]['Physics']['wheelbase']
+fs        = conf["Vehicle"]['ControlFilter']['fs']
+x0        = conf["Vehicle"]['ControlFilter']['x0']
+Kp        = conf["Vehicle"]['VelocityRegulator']['Kp']
+Ki        = conf["Vehicle"]['VelocityRegulator']['Ki']
+Kd        = conf["Vehicle"]['VelocityRegulator']['Kd']
 
 class OnlineLowPassFilter:
     def __init__(self, cutoff, fs, order=2, x0=0.0):
@@ -43,16 +56,14 @@ class Vehicle(MessagingSubscribers):
         self.reverse        = False
         self.regulate_speed = False
 
-        self.decay = 0.2
-        
-        self.throttle_filter = OnlineLowPassFilter(2.0, fps, 2)
-        self.brake_filter    = OnlineLowPassFilter(2.0, fps, 2)
+        self.throttle_filter = OnlineLowPassFilter(fs, fps, x0)
+        self.brake_filter    = OnlineLowPassFilter(fs, fps, x0)
 
         
         self.prev_loc = self.vehicle.get_transform().location
 
-        self.max_steer = 70
-        self.wheelbase = 3.047080078125
+        self.max_steer = max_steer
+        self.wheelbase = wheelbase
         
         
     def set_autopilot(self, enable: bool):
@@ -113,14 +124,11 @@ class Vehicle(MessagingSubscribers):
         }
     
     def _regulate_speed_PID(self):
-        limit = self.vehicle.get_speed_limit()
+        model_speed = self.sub_model_speed.receive()
+        limit = self.vehicle.get_speed_limit() if model_speed is None else model_speed
         current_v = self.get_velocity(False)
 
         error = limit - current_v  
-
-        Kp = 0.1
-        Ki = 0.05
-        Kd = 0.05
 
         dt = self.world.get_settings().fixed_delta_seconds or 0.05
 
@@ -167,16 +175,16 @@ class Vehicle(MessagingSubscribers):
                 self.throttle = min(0.0, self.throttle + 0.03)
 
         if steer == 0:   # ease steering back toward 0
-            if abs(self.steer) <= self.decay:
+            if abs(self.steer) <= decay:
                 self.steer = 0.0   # snap to neutral
             elif self.steer > 0:
-                self.steer -= self.decay
+                self.steer -= decay
             elif self.steer < 0:
-                self.steer += self.decay
+                self.steer += decay
 
         if brake == 0:   # ease brake back toward 0
             if self.brake > 0:
-                self.brake = max(0.0, self.brake - self.decay)
+                self.brake = max(0.0, self.brake - decay)
 
     def _joystick(self):
         throttle   = self.sub_throttle.receive()
@@ -217,12 +225,7 @@ class Vehicle(MessagingSubscribers):
                 
         if using_model:
             steer = self.sub_model_steer.receive()
-            throttle = self.sub_model_throttle.receive()
-            brake = self.sub_model_brake.receive()
-            
             if steer is not None: self.steer = steer
-            if throttle is not None: self.throttle = throttle
-            if brake is not None: self.brake = brake
 
         self._clamp_ctrl()
 
@@ -234,287 +237,3 @@ class Vehicle(MessagingSubscribers):
                                                         manual_gear_shift = False,
                                                         gear = 0))
     
-    def _poll_location(self, hz: float = 10.0, move_thresh_m = 1.0):
-        period = 1 / hz
-        last_loc = None
-        while not self._stop.is_set():
-            t0 = time.time()
-            try:
-                curr_loc = self.vehicle.get_location()
-                if last_loc is not None and curr_loc.distance(last_loc) < move_thresh_m:
-                    dt = time.time() - t0
-                    if dt < period:
-                        time.sleep(period - dt)
-                    continue
-                else:
-                    last_loc = curr_loc
-                
-                with self._lock: self.location = last_loc
-            except:
-                print_exc()
-
-            dt = time.time() - t0
-            if dt < period: time.sleep(period - dt)
-        
-    def _poll_traffic_light(self, hz: float = 10.0):
-        period = 1 / hz
-        while not self._stop.is_set():
-            t0 = time.time()
-            try:
-                tl = self.vehicle.get_traffic_light()
-                if tl is None:
-                    self.tl_state = None
-                else:
-                    self.tl_state = tl.get_state()
-            except:
-                print_exc()
-
-            dt = time.time() - t0
-            if dt < period: time.sleep(period - dt)
-            
-            
-    @staticmethod
-    def format_waypoint(wp: carla.Waypoint):
-        if wp is None:
-            return None
-        tr = wp.transform
-        return {
-            "road_id": wp.road_id,
-            "section_id": wp.section_id,
-            "lane_id": wp.lane_id,
-            "s": wp.s,  # longitudinal position along road
-            "location": {
-                "x": round(tr.location.x, 2),
-                "y": round(tr.location.y, 2),
-                "z": round(tr.location.z, 2),
-            },
-            "rotation": {
-                "yaw": round(tr.rotation.yaw, 1),
-                "pitch": round(tr.rotation.pitch, 1),
-                "roll": round(tr.rotation.roll, 1),
-            }
-        }
-
-    
-    def _poll_traffic_sign(self, lookahead_m = 60.0, hz: float = 10.0, move_thresh_m: float = 2.0):
-        period = 1 / hz
-        last_loc = None
-        while not self._stop.is_set():
-            t0 = time.time()
-            try:
-                wp  = self.map.get_waypoint(self.vehicle.get_location(), project_to_road = True,
-                                            lane_type = carla.LaneType.Driving)
-
-
-                if last_loc is not None and wp.transform.location.distance(last_loc) < move_thresh_m:
-                    dt = time.time() - t0
-                    if dt < period:
-                        time.sleep(period - dt)
-                    continue
-                last_loc = wp.transform.location
-                
-                stops    = wp.get_landmarks_of_type(lookahead_m, carla.LandmarkType.StopSign, stop_at_junction = False)
-                yields   = wp.get_landmarks_of_type(lookahead_m, carla.LandmarkType.YieldSign, stop_at_junction = False)
-
-                lms = list(stops) + list(yields)
-                
-                events = []
-                for lm in lms:
-                    try:
-                        lm_wp = self.map.get_waypoint(
-                            lm.transform.location,
-                            project_to_road=True,
-                            lane_type=carla.LaneType.Driving
-                        )
-                    except Exception:
-                        lm_wp = None
-                    
-                    d = getattr(lm, "distance", float("nan"))
-                    if np.isnan(d) and lm_wp is not None:
-                        d = wp.transform.location.distance(lm_wp.transform.location)
-                    
-                    events.append({
-                        "type": lm.type,
-                        "id": lm.id,
-                        "distance": d,
-                        "waypoint": lm_wp
-                    })
-                
-                events.sort(key = lambda e: e["distance"])
-                with self._lock: self.ts_events = events
-
-                
-            except Exception:
-                time.sleep(period)
-                
-            dt = time.time() - t0
-            if dt < period: time.sleep(period - dt)
-            
-    def _poll_waypoint(self, hz: float = 10.0, move_thresh_m: float = 2.0):
-        period = 1 / hz
-        last_loc = None
-        self.waypoint = None
-        while not self._stop.is_set():
-            t0 = time.time() 
-            try:
-                wp = self.map.get_waypoint(
-                    self.vehicle.get_location(),
-                    project_to_road = True,
-                    lane_type = carla.LaneType.Driving
-                )
-                
-                if last_loc is not None and wp.transform.location.distance(last_loc) < move_thresh_m:
-                    dt = time.time() - t0
-                    if dt < period: time.sleep(period - dt)
-                    continue
-                last_loc = wp.transform.location
-
-                with self._lock: self.waypoint = wp
-
-            except:
-                ...
-
-            dt = time.time() - t0
-            if dt < period: time.sleep(period - dt)
-
-            
-    def _poll_junction(self, lookahead_m = 5.0, hz: float = 10.0, move_thresh_m: float = 2.0):
-        period = 1 / hz
-        last_loc = None
-        while not self._stop.is_set():
-            t0 = time.time() 
-            try:
-                wp = self.map.get_waypoint(
-                    self.vehicle.get_location(),
-                    project_to_road = True,
-                    lane_type = carla.LaneType.Driving
-                )
-                
-                if last_loc is not None and wp.transform.location.distance(last_loc) < move_thresh_m:
-                    dt = time.time() - t0
-                    if dt < period: time.sleep(period - dt)
-                    continue
-                last_loc = wp.transform.location
-                
-                jsx = self.find_upcoming_junctions(
-                    lookahead_m = lookahead_m, 
-                    step_m = 2.0,
-                    fov_half_deg = 30,
-                    max_junctions = 10
-                ) 
-                
-                with self._lock:  self.junctions = jsx
-                
-            except:
-                ...
-
-            dt = time.time() - t0
-            if dt < period: time.sleep(period - dt)
-            
-    def find_upcoming_junctions(self,
-                            lookahead_m: float = 120.0,
-                            step_m: float = 2.0,
-                            fov_half_deg: float = 30.0,
-                            max_junctions: int = 10):
-        """
-        March forward along the current lane, collecting distinct junctions ahead.
-        Filters by forward FOV (±fov_half_deg) relative to vehicle heading.
-        Returns a list sorted by distance.
-        """
-        ego_loc = self.vehicle.get_location()
-        ego_pos2 = _vec2(ego_loc)
-        ego_dir2 = _forward2(self.vehicle.get_transform())
-
-        wp = self.map.get_waypoint(ego_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
-        if wp is None:
-            return []
-
-        total = 0.0
-        seen = set()
-        found = []
-
-        prev_dir = _forward2(wp.transform)
-
-        if wp.is_junction:
-            j = wp.get_junction()
-            if j and j.id not in seen:
-                center = j.bounding_box.location
-                vec_to_center = _vec2(center) - ego_pos2
-                ang = _angle_deg(ego_dir2, vec_to_center)
-                if ang <= fov_half_deg:
-                    d = float(np.linalg.norm(vec_to_center))
-                    found.append({
-                        "junction_id": j.id,
-                        "distance_m": round(d, 2),
-                        "angle_deg": round(ang, 1),
-                        "center": (round(center.x, 2), round(center.y, 2), round(center.z, 2)),
-                        "bbox_extents": (round(j.bounding_box.extent.x, 2), round(j.bounding_box.extent.y, 2), round(j.bounding_box.extent.z, 2)),
-                        "entry_waypoint": self.format_waypoint(wp)
-                    })
-                    seen.add(j.id)
-
-        steps = int(max(1, math.ceil(lookahead_m / max(step_m, 0.2))))
-        cur_wp = wp
-        for _ in range(steps):
-            nxt_wp = _next_along(cur_wp, step_m, prev_dir)
-            if nxt_wp is None:
-                break
-            prev_dir = _forward2(nxt_wp.transform)
-
-            total += step_m
-            cur_wp = nxt_wp
-
-            if cur_wp.is_junction:
-                j = cur_wp.get_junction()
-                if j and j.id not in seen:
-                    center = j.bounding_box.location
-                    vec_to_center = _vec2(center) - ego_pos2
-                    ang = _angle_deg(ego_dir2, vec_to_center)
-
-                    if ang <= fov_half_deg:
-                        d = float(np.linalg.norm(vec_to_center))
-                        found.append({
-                            "junction_id": j.id,
-                            "distance_m": round(d, 2),
-                            "angle_deg": round(ang, 1),
-                            "center": (round(center.x, 2), round(center.y, 2), round(center.z, 2)),
-                            "bbox_extents": (round(j.bounding_box.extent.x, 2), round(j.bounding_box.extent.y, 2), round(j.bounding_box.extent.z, 2)),
-                            "entry_waypoint": self.format_waypoint(cur_wp)
-                        })
-                        seen.add(j.id)
-                        if len(found) >= max_junctions:
-                            break
-
-        found.sort(key=lambda e: e["distance_m"])
-        return found
-
-def _vec2(loc: carla.Location):
-    return np.array([loc.x, loc.y], dtype=np.float32)
-
-def _forward2(tr: carla.Transform):
-    f = tr.get_forward_vector()
-    return np.array([f.x, f.y], dtype=np.float32)
-
-def _angle_deg(u: np.ndarray, v: np.ndarray, eps: float = 1e-8) -> float:
-    nu = u / (np.linalg.norm(u) + eps)
-    nv = v / (np.linalg.norm(v) + eps)
-    c = float(np.clip(np.dot(nu, nv), -1.0, 1.0))
-    return math.degrees(math.acos(c))
-
-def _pick_straightest(prev_dir: np.ndarray, candidates: list[carla.Waypoint]) -> carla.Waypoint:
-    """Choose candidate whose heading deviates least from prev_dir."""
-    best = None
-    best_ang = 1e9
-    for wp in candidates:
-        ang = _angle_deg(prev_dir, _forward2(wp.transform))
-        if ang < best_ang:
-            best, best_ang = wp, ang
-    return best
-
-def _next_along(current_wp: carla.Waypoint, step: float, prev_dir: np.ndarray) -> carla.Waypoint | None:
-    nxt = current_wp.next(step)
-    if not nxt:
-        return None
-    if len(nxt) == 1:
-        return nxt[0]
-    return _pick_straightest(prev_dir, nxt)

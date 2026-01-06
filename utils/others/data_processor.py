@@ -1,3 +1,9 @@
+import os, sys
+import toml
+script_path = os.path.abspath(__file__)
+folder = os.path.dirname(script_path)
+parent = os.path.dirname(folder)
+
 import cv2
 import time
 import numpy as np
@@ -8,6 +14,8 @@ from typing import Dict, Any
 
 from utils.messages.logger import Logger
 
+conf = toml.load(os.path.join(parent, "../config/config.toml"))
+quality = conf['Picture']['quality']
 class TrajectoryBuffer:
     def __init__(self, save_dir: str, init_cap = 8192, dist_thresh_m = 0, min_dt_s = 0.05):
         self.log = Logger()
@@ -79,6 +87,7 @@ class CarlaDatasetCollector:
         
         self.saver = AsyncSaver()
         self.time_start = time.time()
+        self.encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
 
     def maybe_save(
         self,
@@ -115,17 +124,13 @@ class CarlaDatasetCollector:
         saved_files = {}
         for key in self._image_keys:
             img = images[key]
-            fname = f"{key}/{self.sample_idx:06d}_{key}.png"
+            fname = f"{key}/{self.sample_idx:06d}_{key}.jpg"
             fpath = self.img_dir / fname
-            # push to that saver’s queue
-            if len(img.shape) == 3:
-                self._savers[key].save(
-                    cv2.imwrite, str(fpath), cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                )
-            else:
-                self._savers[key].save(
-                    cv2.imwrite, str(fpath), img
-                )
+            img_copy = img.copy() 
+            # self._savers[key].save(
+            #     cv2.imwrite, str(fpath), img_copy, self.encode_param
+            # )
+            cv2.imwrite(str(fpath), img_copy, self.encode_param)
             saved_files[key] = str(fpath.relative_to(self.save_dir))
 
 
@@ -137,7 +142,6 @@ class CarlaDatasetCollector:
 
         np.save(self.meta_dir / f"{self.sample_idx:06d}.npy", meta, allow_pickle=True)
 
-        self.log.DEBUG(f"Saved sample → {self.sample_idx + 1} samples")
         self.sample_idx += 1
         return True
     

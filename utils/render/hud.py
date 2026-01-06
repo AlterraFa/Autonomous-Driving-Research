@@ -136,7 +136,7 @@ class HUD(MessagingSubscribers):
             self._render_line(label, value, idx)
 
     def draw_controls(self, x=10, y=330):
-        line_h = 20
+        line_h = self.text_height
         bar_w, bar_h = 150, 10
         bar_x = x + 100
 
@@ -197,7 +197,7 @@ class HUD(MessagingSubscribers):
         else:
             direction_str = "N/A"
 
-        line_h = 20
+        line_h = self.text_height
         spacing = 15
         text = self.font.render(f"{'Turn signal:':<{spacing}}{direction_str:>{self.max_string}}", True, (255, 255, 255))
         self.display.blit(text, (x, y + 1 * line_h))

@@ -13,9 +13,35 @@ def lateral_control(waypoints: np.ndarray, Ld: float, wheelbase: float, max_stee
     phi = np.atan2(target_x, target_y)
     steer = np.degrees(np.atan2(2 * wheelbase * np.sin(phi), np.sqrt(target_x ** 2 + target_y ** 2)))
 
-    # print(xs(Ld), ys(Ld), steer)
-
-
     steer = np.clip(steer, -max_steer, max_steer)
-    normalized_steer = steer / max_steer * 1.8
+    normalized_steer = steer / max_steer * 1.5
     return normalized_steer
+
+def longitudinal_speed(waypoints, num_waypoints_to_average=3, time_step=0.2):
+    """
+    Calculates a smoother target speed by averaging over several waypoints.
+
+    :param waypoints: A list or numpy array of [x, y] waypoints.
+    :param num_waypoints_to_average: The number of waypoints to look ahead for averaging.
+    :param time_step: The time interval between each predicted waypoint.
+    :return: The target speed in meters per second (m/s).
+    """
+    if waypoints is None or len(waypoints) < 2:
+        return 0.0
+
+    num_to_consider = min(len(waypoints) - 1, num_waypoints_to_average)
+
+    path_length = 0.0
+    for i in range(num_to_consider):
+        p1 = waypoints[i]
+        p2 = waypoints[i+1]
+        path_length += np.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+        
+    total_time = num_to_consider * time_step
+
+    if total_time == 0:
+        return 0.0
+
+    target_speed_ms = path_length / total_time
+    
+    return target_speed_ms

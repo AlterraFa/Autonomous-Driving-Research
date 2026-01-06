@@ -1,23 +1,25 @@
+import os, sys
+import toml
+from datetime import datetime
+import csv
+script_path = os.path.abspath(__file__)
+folder = os.path.dirname(script_path)
+parent = os.path.dirname(folder)
+
 import pygame
 import numpy as np
 import time
-import cv2
 import gc
+import line_profiler
 
 
 from utils.control.world import World
 from utils.control.controller import Controller
 from utils.render.hud import HUD, draw_border, overlay_waypoints_on_map, overlay_gmm_on_map
 from utils.control.vehicle_control import Vehicle
-
-from utils.math.path import ReplayHandler, OptimizePath
-from utils.math.world_map import Map
-from utils.control.pid import lateral_control
-from utils.math.coordinate_transform import local_2_global
+from utils.control.pid import lateral_control, longitudinal_speed
 
 from utils.spawn.sensor_spawner import *
-from utils.others.data_processor import TrajectoryBuffer
-from model.inference import AsyncInference
 from config.enum import (
     CameraView,
     JOYBINDS, 
@@ -33,14 +35,38 @@ from typing import Optional
 from typing import Union, Dict
 from tqdm.auto import tqdm
 from collections import deque
+
+from model.inference import AsyncInference
+from utils.others.data_processor import TrajectoryBuffer
+from utils.math.world_map import Map
+from utils.math.path import ReplayHandler, OptimizePath
+from utils.math.path import PathHandler
+
         
+conf = toml.load(os.path.join(parent, "../config/config.toml"))
+
+
+path_conf = conf.get("RandPath", {})
+MIN_DISTANT_NODE = path_conf.get("min_distant_node", 20)
+MAX_DISTANT_NODE = path_conf.get("max_distant_node", 500)
+PATH_ITER        = path_conf.get("path_iter", 5)
+
+gps_conf = conf.get("GPS", {})
+MAX_GPS_DELAY = gps_conf.get("max_gps_delay", 60)
+MIN_GPS_DELAY = gps_conf.get("min_gps_delay", 10)
+
+ui_conf = conf.get("UI", {})
+FONT_SIZE = ui_conf.get("font_size", 12)
+FONT_NAME = ui_conf.get("font_name", "arial")
+
+offset_conf = conf.get("Offsets", {})
+front_vehicle_offset = conf.get("front_vehicle_offset", 1.5)
 
 
 class CarlaViewer(MessagingSenders, MessagingSubscribers):
     override_render_map = False
 
-
-    def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, headless = False, sync: bool = False, fps: int = 70):
+    def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, headless = False, sync: bool = False, fps: int = 70, duration: tuple = None):
         self.log = Logger() 
         MessagingSenders.__init__(self)
         MessagingSubscribers.__init__(self)
@@ -58,9 +84,9 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.server_fps = self.fps; 
         self.client_start = time.time()
         self.server_start = self.world.get_snapshot().timestamp.elapsed_seconds
+        self.duration = duration
 
         self.avg_server_fps = 0.0
-        self.alpha = 0.05  # smoothing factor, adjust as needed
 
         self.virt_vehicle = vehicle
         self.vehicle      = vehicle.vehicle
@@ -70,6 +96,7 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
 
         self.display: Optional[pygame.Surface] = None
         self.clock: Optional[pygame.time.Clock] = None
+        self.world_clock: Optional[pygame.time.Clock] = None
 
         self.init_win()
 
@@ -79,11 +106,27 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.camera_keys = []
         
         self.controller = Controller()
-        self.hud = HUD(display = self.display, fontName = "jetbrainsmononerdfontpropo", fontSize = 12, height = self.height, headless = headless)
+        self.hud = HUD(display = self.display, fontName = "jetbrainsmononerdfontpropo", fontSize = FONT_SIZE, height = self.height, headless = headless)
         
-        self.map_processor  = Map(self.virt_world, (4, 3), map_offset = (100, 100), range_ = (50, 50), resize_to = (200, 200), scale = 3)
-        self.path_optimizer = OptimizePath(self.virt_world, step = 2.0) 
-    
+        
+        self.traj_logger   : TrajectoryBuffer = None
+        self.replayer      : ReplayHandler    = None
+        self.inference     : AsyncInference   = None
+        self.pbar          : tqdm             = None
+        self.map_processor : Map              = None
+        self.path_optimizer: OptimizePath     = None 
+        self.gps_buffer    : deque            = deque(maxlen = MAX_GPS_DELAY)
+        
+        self.collision = InfractionManager(self.virt_world.world, self.virt_vehicle.vehicle)
+        
+        
+
+    def attach_plugins(self, **plugins):
+        for name, value in plugins.items():
+            if hasattr(self, name):
+                setattr(self, name, value)
+            else:
+                self.log.ERROR(f"Not able to use plugin {name}. It is not a predefined attribute")
         
     def init_sensor(self, sensors_metadata: dict):
         """Lazy initialize sensors"""
@@ -136,12 +179,14 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                                                pygame.HWSURFACE | pygame.DOUBLEBUF)
         pygame.display.set_caption(title)
         self.clock = pygame.time.Clock()
+        self.world_clock = pygame.time.Clock()
 
     def step_world(self) -> None:
         if self.sync:
             self.world.tick()
         else:
             self.world.wait_for_tick()
+            
             
     def change_view_all(self, view_name: str):
         for camera_name in self.camera_keys:
@@ -214,77 +259,68 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.send_manual_logging.send(self.ctrl['manual'])
         self.send_gear_logging.send(self.ctrl['gear'])
         
+    def generate_randpath(self):
+        self.log.INFO("CREATING RANDOM PATH FOR MAP")
+        prev_loc = np.array([self.vehicle.get_location().x, self.vehicle.get_location().y])
+        extended_path = None
+        for _ in range(PATH_ITER):
+            while True:
+                distant_nodes = self.path_optimizer.find_distant_nodes(prev_loc, np.random.randint(MIN_DISTANT_NODE, MAX_DISTANT_NODE), max_distance = MAX_DISTANT_NODE)
+                if distant_nodes:
+                    rand_node = np.random.randint(0, len(distant_nodes))
+                    fartest_id, farthes_distance, farthest_pos = distant_nodes[rand_node]
+                    break
+
+            farthest_pos = np.array(list(farthest_pos))
+            nodes, path_coor = self.path_optimizer.plan_path(
+                prev_loc, 
+                farthest_pos
+            )
+            path_coor = np.hstack([path_coor, np.zeros((path_coor.shape[0], 1))])
+            if extended_path is None:
+                extended_path = path_coor
+            else:
+                extended_path = np.vstack([extended_path, path_coor])
+            prev_loc = farthest_pos
+        return extended_path
         
     # WARNING: REMEMBER TO CHECK COLOR CHANNEL
-    def run(self, 
-            model_path = None,
-            save_logging: str = None, 
-            use_temporal_wp: bool = False, 
-            data_collect_dir: str = None, 
-            replay_logging: str = None, 
-            debug = False) -> None:
+    def run(self) -> None:
 
         try:
             self.virt_vehicle.set_autopilot(self.controller.autopilot) # First init for autopilot
             
-            # ================== INITIALIZING CLASSES =====================
-            midlane_waypoints = None
-            if replay_logging is not None:
-                self.log.INFO("REPLAYING PATH FOR MAP")
-                trajectories = np.load(replay_logging[0])
-                midlane_waypoints = self.map_processor.precompute_waypoints(trajectories)
-            else:
-                self.log.INFO("CREATING RANDOM PATH FOR MAP")
-                prev_loc = np.array([self.vehicle.get_location().x, self.vehicle.get_location().y])
-                extended_path = None
-                for _ in range(5):
-                    distant_nodes = self.path_optimizer.find_distant_nodes(prev_loc, np.random.randint(20, 200), max_distance = 200)
-                    if distant_nodes:
-                        rand_node = np.random.randint(0, len(distant_nodes))
-                        fartest_id, farthes_distance, farthest_pos = distant_nodes[rand_node]
+            if self.replayer is None:
+                random_path = self.generate_randpath()
+                midlane_wp = self.map_processor.precompute_waypoints(random_path)
+                path_handler = PathHandler(midlane_wp, extrapolate = False)
 
-                    farthest_pos = np.array(list(farthest_pos))
-                    nodes, path_coor = self.path_optimizer.plan_path(
-                        prev_loc, 
-                        farthest_pos
-                    )
-                    path_coor = np.hstack([path_coor, np.zeros((path_coor.shape[0], 1))])
-                    if extended_path is None:
-                        extended_path = path_coor
-                    else:
-                        extended_path = np.vstack([extended_path, path_coor])
-                    prev_loc = farthest_pos
-                self.map_processor.precompute_waypoints(extended_path)
-
-            logger    = TrajectoryBuffer(save_logging, min_dt_s = .4) if save_logging else None
-            replayer  = ReplayHandler(replay_logging[0], self.virt_world, data_collect_dir, use_temporal_wp, midlane_waypoints, debug) if replay_logging else None
-            inference = AsyncInference(model_path, device = 'cuda', batch_output = False) if model_path is not None else None
-            pbar      = tqdm(total = replay_logging[1], unit = 'server second', desc = "Play duration") if replay_logging else None
-            gps_buffer = deque(maxlen = 50)
-            # ================== INITIALIZING CLASSES =====================
+                # current_time = datetime.now().strftime("%Y_%m_%d|%H_%M_%S")
+                # np.save(f"store/PilotNet_path_{current_time}", random_path)
 
             frame_id = 0
             while True if self.headless else self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
                 self.step_world()
-                self.data_bus(replay_logging != None)
+                self.data_bus(self.replayer != None)
                 
                 frame = self.choosen_sensor.extract_data()
-                try:
-                    H, W, _ = frame.shape
-                except:
-                    H, W = frame.shape
-
 
 
                 location = self.sub_location.receive()
                 heading  = self.sub_heading.receive()
-                gps_buffer.append(location) # THIS DELAY ALSO CONFIRMS THAT THE MODEL IS TOO DEPENDANT ON ROUTED MAP
-                choose_delay = np.random.randint(0, min(10, len(gps_buffer)))
+
+                # self.collision.tick()
+                # dist_travelled, _, deviation, completion = path_handler.project(location)
+                # print(f"Distance travelled: {dist_travelled:.2f}", f"Deviation: {deviation:.2f}", f"Route Completion: {completion * 100:.2f}%", end = '\r')
+                # with open(f"store/PilotNet_{current_time}.txt", "a") as f:
+                #     f.write(f"{dist_travelled}, {deviation}, {completion * 100}, {location}\n")
+                
+                self.gps_buffer.append(location) # THIS DELAY ALSO CONFIRMS THAT THE MODEL IS TOO DEPENDANT ON ROUTED MAP
+                choose_delay = np.random.randint(0, min(MIN_GPS_DELAY, len(self.gps_buffer)))
                 unrouted_map, old_map = self.map_processor.retrieve_map(
-                    # coordinate = location,
-                    coordinate = gps_buffer[choose_delay] + (np.random.randn(3) - .5) * .1,  # Introduce some noise to the GPS map 
+                    coordinate = self.gps_buffer[choose_delay] + (np.random.randn(3) - .5) * .1,  # Introduce some noise to the GPS map 
                     heading = heading, 
-                    display = self.controller.toggle_map or replayer is not None or self.override_render_map
+                    display = self.controller.toggle_map or self.replayer is not None or self.override_render_map
                 )
                 if frame_id % 1 == 0:
                     if old_map is not None:
@@ -316,76 +352,53 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                                                     self.controller.has_joystick, 
                                                     self.controller.model_autopilot)
                     
-                if logger: # In recording mode
+                if self.traj_logger: # In recording mode
                     vehicle_transform = self.vehicle.get_transform()
                     vehicle_location = vehicle_transform.location
                     vehicle_rotation = vehicle_transform.rotation
 
-                    # Convert yaw from degrees to radians for math functions
                     yaw_rad = np.radians(vehicle_rotation.yaw)
 
-                    # Distance from the center to the front of the car (adjust as per your vehicle)
-                    front_offset = 1.5  # meters
-
-                    # Calculate offset in x and y directions
+                    front_offset = front_vehicle_offset  # meters
                     offset_x = front_offset * np.cos(yaw_rad)
                     offset_y = front_offset * np.sin(yaw_rad)
 
-                    # Calculate front location coordinates
                     front_location = np.array([
                         vehicle_location.x + offset_x,
                         vehicle_location.y + offset_y,
                         vehicle_location.z  # same height as center
                     ])
-                    logger.update(front_location)
-                if replayer: # in replaying mode
+                    self.traj_logger.update(front_location)
+                if self.replayer: # in replaying mode
 
-                    # =========================== VENL ==========================
-                    # multi_images_list = list(data.values())   # e.g. [img1, img2, img3]
-                    # multi_keys = [f"I{i+1}" for i in range(len(multi_images_list))]
-                    # H, W, _    = frame.shape
-                    # x_top_left = 250; x_top_right = W - x_top_left
-                    # y_hor      = 390; y_bot         = 680
-                    # frame_cutout = frame[y_hor: y_bot, x_top_left: x_top_right]
-                    # frame_cutout = cv2.resize(frame_cutout, (multi_images_list[0].shape[1], multi_images_list[0].shape[0]))
-                    # image_kwargs = (
-                    #     {"I0": frame_cutout} | 
-                    #     {k: v for k, v in zip(multi_keys, multi_images_list)} | 
-                    #     {"MU": cv2.resize(unrouted_map, (50, 50)), "MR": cv2.resize(routed_map, (50, 50))}
-                    # )
-                    
-                    # =========================== Single VENL ==========================
-                    H, W, _    = frame.shape
-                    x_top_left = 150; x_top_right = W - x_top_left
-                    y_hor      = 370; y_bot       = 720
-                    frame_cutout = frame[y_hor: y_bot, x_top_left: x_top_right]
-                    frame_cutout = cv2.resize(frame_cutout, (400, 160))
+                    frame_cutout = frame
                     image_kwargs = (
-                        {"I0": frame_cutout} | 
-                        {"MU": cv2.resize(unrouted_map, (50, 50)), "MR": cv2.resize(routed_map, (50, 50))}
+                        {"I0": frame_cutout} |
+                        {"MU": unrouted_map, "MR": routed_map[:, :, ::-1]} 
                     )
 
-                    replayer.step(**image_kwargs)
+                    self.replayer.step(**image_kwargs)
+                    
                 
 
-                if model_path and self.controller.model_autopilot: # in inference mode
+                if self.inference and self.controller.model_autopilot: # in inference mode
                     
                     if frame_id % 1 == 0:
                         input_metadata = {
                             "I0": frame,
-                            "MU": unrouted_map,
-                            "MR": routed_map,
+                            # "MU": unrouted_map,
+                            # "MR": routed_map,
                         }
                         if "multi_images_list" in locals(): 
                             for idx, image in enumerate(multi_images_list):
                                 input_metadata[f"I{idx + 1}"] = image
 
-                        inp = inference.pytorch.preprocessor(**input_metadata) # VENL preprocessor
-                        inference.put(inp, None)
-                        output = inference.get()
+                        inp = self.inference.pytorch.preprocessor(**input_metadata) # VENL preprocessor
+                        self.inference.put(inp, self.sub_turn_signal.receive())
+                        output = self.inference.get()
                         if output is not None:
                             if not isinstance(output, tuple): # the model has no extra information
-                                if isinstance(output, float): # if output is just steering
+                                if isinstance(output, (float, np.float32)): # if output is just steering
                                     self.send_model_steer.send(float(output))
                                 else: # output is waypoints
                                     ...
@@ -394,11 +407,13 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                                 if len(output.shape) == 1:
                                     self.send_model_steer.send(float(output[0]))
                                 else:
-                                    norm_steer = lateral_control(output, Ld = 8, wheelbase = self.virt_vehicle.wheelbase, max_steer = self.virt_vehicle.max_steer)
+                                    norm_steer = lateral_control(output, Ld = 10, wheelbase = self.virt_vehicle.wheelbase, max_steer = self.virt_vehicle.max_steer)
+                                    speed = longitudinal_speed(output, 6, 0.04)
+                                    self.send_model_speed.send(float(speed))
                                     self.send_model_steer.send(norm_steer)
 
                         
-                
+            
                 # ======================== RENDER ==========================
                 if not self.headless:
                     self.hud.draw_frame(frame)
@@ -451,14 +466,14 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                         self.hud.draw_frame(routed_map, (self.width - submap_w - 10, 0 + 10))
                 # ======================== RENDER ==========================
 
-                if replay_logging is not None and replay_logging[1] <= self.sub_server_runtime.receive():
+                if self.replayer is not None and self.duration <= self.sub_server_runtime.receive():
                     self.log.INFO("Reached replay limit. Goodbye.")
                     break
                 else:
-                    if pbar is not None: # Not in data collect mode
+                    if self.pbar is not None: # Not in data collect mode
                         elapsed = round(self.sub_server_runtime.receive(), 1)                    
-                        pbar.n  = min(elapsed, replay_logging[1])
-                        pbar.refresh()
+                        self.pbar.n  = min(elapsed, self.duration)
+                        self.pbar.refresh()
 
 
                 if not self.headless:
@@ -477,10 +492,18 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
             self.controller.running = False
         finally:
             self.close()
-            if logger:
-                logger.finalize()
-            if inference is not None:
-                inference.stop()
+            if self.traj_logger:
+                self.traj_logger.finalize()
+            if self.inference is not None:
+                self.inference.stop()
+                
+            final_scr = self.collision.get_infraction_rate()
+            print(f"----------------------------------------------------")
+            print(f"Evaluation Run Finished.")
+            print(f"Total Off-Road Infractions: {self.collision.infraction_count}")
+            print(f"Total Distance Driven: {self.collision.total_distance / 1000.0:.2f} km")
+            print(f"Final Off-Road Infraction Rate: {final_scr:.2f} infractions / 1k km")
+            print(f"----------------------------------------------------")
 
     def close(self) -> None:
         
@@ -489,8 +512,8 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
 
         for name, sensor in list(self.sensors_list.items()):
             sensor.destroy()
-        self.virt_world.factory_reset()
-        self.world.wait_for_tick()
+        # self.event.set()
+        # self.step_world_th.join()
 
         try:
             if pygame.get_init():
@@ -564,3 +587,101 @@ def generate_controller_doc(keybinds: dict, joybinds: dict) -> str:
     return "\n".join(doc)
 
 Logger().INFO(generate_controller_doc(KEYBINDS, JOYBINDS))
+
+
+class InfractionManager:
+    """
+    A comprehensive manager to detect off-road infractions.
+    
+    This class tracks two types of events that constitute an "off-road" infraction:
+    1.  Hard collisions with static objects (walls, poles, buildings).
+    2.  Driving over a curb onto a non-drivable surface (sidewalk, grass).
+    
+    The final score is reported as a combined rate of these events per kilometer.
+    """
+    def __init__(self, world: carla.World, vehicle: carla.Actor):
+        """
+        Initializes the manager and attaches the necessary sensors to the vehicle.
+        
+        :param world: The CARLA world object.
+        :param vehicle: The vehicle actor to monitor.
+        """
+        self.world = world
+        self.vehicle = vehicle
+        
+        # --- 1. Initialize trackers ---
+        self.infraction_count = 0
+        self.total_distance = 0.0
+        self.last_location = vehicle.get_location()
+
+        # --- 2. Attach sensors and register callbacks ---
+        bp_library = world.get_blueprint_library()
+
+        # Collision Sensor for hard impacts
+        collision_bp = bp_library.find('sensor.other.collision')
+        self.collision_sensor = world.spawn_actor(collision_bp, carla.Transform(), attach_to=self.vehicle)
+        self.collision_sensor.listen(self._on_collision)
+
+        # Lane Invasion Sensor for driving over curbs/sidewalks
+        lane_bp = bp_library.find('sensor.other.lane_invasion')
+        self.lane_sensor = world.spawn_actor(lane_bp, carla.Transform(), attach_to=self.vehicle)
+        self.lane_sensor.listen(self._on_lane_invasion)
+
+        print("OffRoadInfractionManager initialized and sensors attached.")
+
+    def _on_collision(self, event: carla.CollisionEvent):
+        """
+        Callback executed by CARLA upon a physical collision.
+        Counts collisions with static objects only.
+        """
+        other_actor = event.other_actor
+        
+        # We only care about hitting static parts of the world.
+        if 'vehicle' not in other_actor.type_id and 'pedestrian' not in other_actor.type_id:
+            self.infraction_count += 1
+            print(f"Off-Road Infraction: Collision with static object ({other_actor.type_id}).")
+
+    def _on_lane_invasion(self, event: carla.LaneInvasionEvent):
+        """
+        Callback executed by CARLA upon crossing a lane marking.
+        Counts infractions for driving over curbs onto sidewalks.
+        """
+        for marking in event.crossed_lane_markings:
+            # A 'Curb' marking separates a drivable lane from a non-drivable sidewalk/grass area.
+            if marking.type == carla.LaneMarkingType.Curb:
+                self.infraction_count += 1
+                print("Off-Road Infraction: Drove over a curb.")
+
+    def tick(self):
+        """
+        This function must be called at every simulation step to track distance.
+        """
+        current_location = self.vehicle.get_location()
+        # Add distance traveled since the last tick (in meters)
+        self.total_distance += current_location.distance(self.last_location)
+        self.last_location = current_location
+
+    def get_infraction_rate(self) -> float:
+        """
+        Calculates the final normalized score.
+        
+        :return: The total number of off-road infractions per 1000 kilometers.
+        """
+        distance_km = self.total_distance / 1000.0
+        
+        if distance_km == 0:
+            return 0.0  # Avoid division by zero on very short or stationary runs
+
+        # Normalize the total infraction count by the distance
+        rate = self.infraction_count / distance_km
+        return rate
+        
+    def destroy_sensors(self):
+        """
+        Cleans up and destroys the attached sensors. Call this at the end of an evaluation.
+        """
+        if self.collision_sensor and self.collision_sensor.is_alive:
+            self.collision_sensor.destroy()
+        if self.lane_sensor and self.lane_sensor.is_alive:
+            self.lane_sensor.destroy()
+        print("Infraction manager sensors destroyed.")

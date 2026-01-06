@@ -8,7 +8,7 @@ from utils.math.path import _find_entry_clusters, _find_exit, waypoints_between,
 from scipy.spatial import cKDTree
 
 class Map:
-    def __init__(self, world: World, rect_dim: tuple, map_offset: tuple = (0, 0), range_ = (50, 50), resize_to = (200, 200), scale: int = 10, ):
+    def __init__(self, world: World, rect_dim: tuple = (1, 1), map_offset: tuple = (0, 0), range_ = (50, 50), resize_to = (200, 200), scale: int = 10, invert_color = False):
         self.log = Logger()
         self.world = world
 
@@ -56,7 +56,7 @@ class Map:
         self._wps = np.array([[wp.transform.location.x, wp.transform.location.y] for wp in self._wp_list])
         self._tree = cKDTree(self._wps)
 
-        self._render_map()
+        self._render_map(invert = invert_color)
         
     def precompute_waypoints(self, trajectories: np.ndarray):
         
@@ -91,7 +91,7 @@ class Map:
         pts = np.array(waypoints, dtype=np.int32).reshape((-1, 1, 2))
         cv2.polylines(image, [pts], isClosed=False, color=color, thickness=line_thickness, lineType=cv2.LINE_AA)
     
-    def _render_map(self):
+    def _render_map(self, invert):
         
         # Create the map_image with padding to avoid going out of range
         self.map_image = np.zeros((int(self.new_max_y + self.offset_x * 2), int(self.max_x + self.offset_y * 2), 3), dtype = np.uint8)
@@ -100,7 +100,10 @@ class Map:
         self.map_image = cv2.GaussianBlur(self.map_image, (3, 3), sigmaX = 0) 
         kernel         = np.ones((3,3), np.uint8)
         self.map_image = cv2.morphologyEx(self.map_image, cv2.MORPH_CLOSE, kernel)
-
+        
+        if invert:
+            self.map_image = 255 - self.map_image
+            
     
     def retrieve_map(self, coordinate, heading, display = False):
         """Instead of drawing on the larger self.map_image, we draw on the smaller cutout image and apply waypoints transformation"""
@@ -130,11 +133,11 @@ class Map:
                             [-sin_t, cos_t, sin_t * cx + (1 - cos_t) * cy]])
 
             # Much faster because overhead offload to GPU
-            # rotated = cv2.warpAffine(cutout, M, (cutout.shape[1], cutout.shape[0]))
-            gpu_img = cv2.cuda_GpuMat()
-            gpu_img.upload(cutout)
-            rotated = cv2.cuda.warpAffine(gpu_img, M, (cutout.shape[1], cutout.shape[0]))
-            rotated = rotated.download()
+            rotated = cv2.warpAffine(cutout, M, (cutout.shape[1], cutout.shape[0]))
+            # gpu_img = cv2.cuda_GpuMat()
+            # gpu_img.upload(cutout)
+            # rotated = cv2.cuda.warpAffine(gpu_img, M, (cutout.shape[1], cutout.shape[0]))
+            # rotated = rotated.download()
 
             # one precise crop
             x1f, x2f = max(0, cx - w // 2), min(rotated.shape[1], cx + w // 2)
