@@ -49,19 +49,13 @@ class CarlaDatasetLoader:
         if image is None:
             raise FileNotFoundError(f"Image not found: {img_path}")
 
-        # Handle grayscale automatically → (H, W, 1)
         if len(image.shape) == 2:
-            image = image[..., None]  # Add channel dimension
+            image = image[..., None]
 
-        # Convert BGR → RGB only if it's color
-        elif image.shape[2] == 3:
-            image = image[:, :, ::-1]
-
-        # Downsize if requested
         if self.downsize_ratio != 1:
             H, W = image.shape[:2]
             image = cv2.resize(image, (W // self.downsize_ratio, H // self.downsize_ratio))
-            if image.ndim == 2:  # Resize can drop channel dim
+            if image.ndim == 2:
                 image = image[..., None]
 
         return image
@@ -75,12 +69,12 @@ class CarlaDatasetLoader:
 
         # Determine the base dataset directory from the metadata file path
         # meta_file structure: /path/to/dataset/metadata/xxxxx.npy
-        dataset_base = meta_file.parent.parent  # Go up from metadata/ to dataset root
+        dataset_base = meta_file.parent.parent
 
         if self.images_key is None:
             self.log.WARNING("Single input detected", once=True)
             img_file = dataset_base / meta["img_file"]
-            image = self.read_image(str(img_file))[:, :, ::-1]
+            image = self.read_image(str(img_file))
             if self.downsize_ratio != 1:
                 H, W, _ = image.shape
                 image = cv2.resize(image, (W // self.downsize_ratio, H // self.downsize_ratio))
@@ -95,7 +89,7 @@ class CarlaDatasetLoader:
             inp_images = {}
             for key_name in self.images_key:
                 img_file = dataset_base / meta["img_file"][key_name]
-                image = self.read_image(str(img_file))[:, :, ::-1]  # Inverted color channel
+                image = self.read_image(str(img_file))
                 if self.downsize_ratio != 1:
                     H, W, _ = image.shape
                     image = cv2.resize(image, (W // self.downsize_ratio, H // self.downsize_ratio))
@@ -114,21 +108,13 @@ class CarlaDatasetLoader:
 
     @classmethod
     def collate_fn(cls, batch):
-        """
-        Collate function supporting both single- and multi-input image cases.
-        - Single input: data["image"] -> (H, W, C)
-        - Multi input:  data["image"] -> dict[str, np.ndarray]
-        """
-
         first_item = batch[0]["images"]
 
-        # --- Single-input case ---
         if isinstance(first_item, np.ndarray):
             images = torch.stack([
                 torch.from_numpy(np.ascontiguousarray(data["images"])) for data in batch
             ]).permute(0, 3, 1, 2) / 255.0 # Normalize 
 
-        # --- Multi-input case ---
         elif isinstance(first_item, dict):
             images = {}
             input_keys = list(first_item.keys())
