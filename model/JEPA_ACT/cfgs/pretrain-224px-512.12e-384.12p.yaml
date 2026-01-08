@@ -1,0 +1,120 @@
+common: &common_settings
+  patch_size: 16
+  tubelet_size: 2
+  crop_size: 224
+  fps: 2
+  nclips: 3
+
+loader_setup: &loader_settings
+  num_workers: 4
+  persistent_workers: true
+  pin_mem: true
+
+train:
+  <<: *common_settings
+  <<: *loader_settings
+  batch_size: 8
+  allow_clip_overlap: true
+  random_jiggle: true
+  datasets:
+    - name: "bdd100k"
+      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/model/JEPA_ACT/data_bdd100k.csv"
+      fpcs: 16
+    - name: "carla"
+      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/model/JEPA_ACT/data_CARLA.csv"
+      fpcs: 16
+    - name: "bdd100k_val"
+      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/model/JEPA_ACT/data_bdd100k_val.csv"
+      fpcs: 16
+
+val:
+  <<: *common_settings
+  <<: *loader_settings
+  batch_size: 8
+  allow_clip_overlap: true
+  random_jiggle: false
+  datasets:
+    - name: "bdd100k"
+      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/model/JEPA_ACT/data_bdd100k.csv"
+      fpcs: 16
+data_aug:
+  auto_augment: false
+  motion_shift: false # -- This was changed
+  random_resize_aspect_ratio:
+  - 0.75
+  - 1.35
+  random_resize_scale:
+  - 0.7 # -- Originally 0.3
+  - 1.0
+  reprob: 0.0
+loss:
+  loss_exp: 2.0
+mask:
+- aspect_ratio:
+  - 0.75
+  - 1.5
+  full_complement: false
+  max_keep: null
+  max_temporal_keep: 1.0
+  num_blocks: 8
+  spatial_scale:
+  - 0.15
+  - 0.15
+  temporal_scale:
+  - 1.0
+  - 1.0
+- aspect_ratio:
+  - 0.75
+  - 1.5
+  full_complement: false
+  max_keep: null
+  max_temporal_keep: 1.0
+  num_blocks: 2
+  spatial_scale:
+  - 0.7
+  - 0.7
+  temporal_scale:
+  - 1.0
+  - 1.0
+meta:
+  dtype: bfloat16
+  save_every_freq: 2
+  seed: 239
+  use_sdpa: true
+model:
+  enc_dim: 512
+  enc_head: 8
+  enc_depth: 12
+  enc_dropout: 0.0
+  enc_attn_dropout: 0.0
+  enc_droppath: 0.0
+
+  pred_depth: 12
+  pred_embed_dim: 384
+  pred_num_heads: 12
+  pred_dropout: 0.0
+  pred_attn_dropout: 0.0
+  pred_droppath: 0.0
+
+  uniform_power: true
+  use_silu: true
+  use_activation_checkpointing: true
+  use_mask_tokens: true
+  use_rope: true
+  zero_init_mask_tokens: true
+  compile_model: false
+optimization:
+  ema:
+  - 0.99925
+  - 0.99925
+  epochs: 100
+  final_lr: 0.00000925
+  ipe: 150
+  start_lr: 0.00075
+  betas: [0.9, 0.995]
+  weight_decay: 0.04  
+  final_weight_decay: 0.0001
+checkpoint:
+  patience: 300
+  min_delta: 0.0001
+  load_model: false

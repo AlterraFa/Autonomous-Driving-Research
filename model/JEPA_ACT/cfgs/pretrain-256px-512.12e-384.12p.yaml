@@ -1,0 +1,100 @@
+data:
+  datasets:
+  - /mnt/HyperStorage_ntfs/Coding/Autonomous/model/JEPA_ACT/data_bdd100k.csv
+  - /mnt/HyperStorage_ntfs/Coding/Autonomous/model/JEPA_ACT/data_CARLA.csv
+  batch_size: 8
+  crop_size: 256
+  patch_size: 16
+  dataset_fpcs:
+  - 16
+  - 16
+  tubelet_size: 2
+  fps: 4
+  num_workers: 8
+  persistent_workers: true
+  pin_mem: true
+  allow_clip_overlap: true
+  nclips: 2
+  random_jiggle: true
+  train_fract: 0.8
+  val_fract: 0.2
+data_aug:
+  auto_augment: false
+  motion_shift: true # -- This was changed
+  random_resize_aspect_ratio:
+  - 0.75
+  - 1.35
+  random_resize_scale:
+  - 0.7 # -- Originally 0.3
+  - 1.0
+  reprob: 0.0
+loss:
+  loss_exp: 1.0
+mask:
+- aspect_ratio:
+  - 0.75
+  - 1.5
+  full_complement: false
+  max_keep: null
+  max_temporal_keep: 1.0
+  num_blocks: 8
+  spatial_scale:
+  - 0.15
+  - 0.15
+  temporal_scale:
+  - 1.0
+  - 1.0
+- aspect_ratio:
+  - 0.75
+  - 1.5
+  full_complement: false
+  max_keep: null
+  max_temporal_keep: 1.0
+  num_blocks: 2
+  spatial_scale:
+  - 0.7
+  - 0.7
+  temporal_scale:
+  - 1.0
+  - 1.0
+meta:
+  dtype: bfloat16
+  save_every_freq: 50
+  seed: 239
+  use_sdpa: true
+model:
+  enc_dim: 512
+  enc_head: 8
+  enc_depth: 12
+  enc_dropout: 0.1
+  enc_attn_dropout: 0.1
+  enc_droppath: 0.0
+
+  pred_depth: 12
+  pred_embed_dim: 384
+  pred_num_heads: 12
+  pred_dropout: 0.1
+  pred_attn_dropout: 0.1
+  pred_droppath: 0.0
+
+  uniform_power: true
+  use_silu: true
+  use_activation_checkpointing: true
+  use_mask_tokens: true
+  use_rope: true
+  zero_init_mask_tokens: true
+  compile_model: true
+optimization:
+  ema:
+  - 0.99925
+  - 0.99925
+  epochs: 300
+  final_lr: 0.000525
+  ipe: 15
+  start_lr: 0.001
+  betas: [0.9, 0.995]
+  weight_decay: 0.04  
+  final_weight_decay: 0.0007
+checkpoint:
+  patience: 20
+  min_delta: 0.0001
