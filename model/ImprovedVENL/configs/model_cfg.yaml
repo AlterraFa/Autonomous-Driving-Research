@@ -1,0 +1,114 @@
+
+train:
+  datasets:
+    - path: "data/ImprovedVENL/recording_20251019_161905_best_temporal"
+      load_size: -1
+    - path: "data/ImprovedVENL/recording_20251025_142727_best_temporal"
+      load_size: -1
+    - path: "data/ImprovedVENL/recording_20251029_203531_extra_temporal"
+      load_size: -1
+    - path: "data/ImprovedVENL/recording_20251029_140108_extra_temporal"
+      load_size: -1
+    
+
+  batch_size: 64
+  shuffle: true
+
+val:
+  datasets: [] 
+  batch_size: 64
+  split_ratio: 0.2
+
+loader_setup:
+  num_workers: 8
+  persistent_workers: true
+  pin_mem: true
+  ram_caching: true
+
+data_aug:
+  color_jitter: 0.1
+  color_distortion: true
+  gaussian_blur: true
+  normalization: [[0.485, 0.456, 0.406], [0.229, 0.224, 0.225]]
+  crop:
+    - 0.2
+    - 1.0
+    - 0.1
+    - 0.9
+meta:
+  dtype: "bfloat16"
+  seed: 45
+  use_sdpa: true
+  do_compile: false
+
+optim:
+  initLR: 7.5e-4
+  targetLR: 1.0e-7
+  initWD: 0.002
+  targetWD: 0.0001
+  epochs: 200
+  betas: [0.9, 0.995]
+
+model:
+  input_metadata:
+    I0: [1, 3, 224, 224]   # (Batch, Channels, Height, Width)
+    MU: [1, 1, 128, 128]
+    MR: [1, 3, 128, 128]
+  patch_sizes: [16, 16, 16]
+  output_names: ["waypoint", "weights", "muy", "sigma"]
+  components: 3
+  num_waypoints: 6
+  depth: 4
+  embed_dim: 512
+  num_heads: 8
+  mlp_ratio: 4
+  qkv_bias: true
+  qk_scale: null
+  act_layer: "nn.SiLU"
+  norm_layer: "nn.LayerNorm"
+  use_gru: true
+  drop: 0.25
+  attn_drop: 0.05
+  drop_path: 0.01
+  drop_route: 0.25
+  drop_all: 0.0
+  use_sdpa: true
+  use_rope: true
+  use_cls: false
+  use_gradient_ckpt: true
+
+
+
+
+loss_contrib:
+  mse       :  1.0
+  lat       :  5.0
+  lon       :  2.0
+  dir       :  0.5
+  nll       :  1.0
+  std_reg   :  0.5
+  entropy   :  0.01   # negative to maximize entropy. But not too much to enforce uniformity
+  l1_gmm    :  0.0
+  l2_gmm    :  0.0
+  l1_model  :  0.0
+  l2_model  :  0.0001
+
+loss_reg:
+  l1: 1e-3
+  l2: 1e-3
+  l1_weight: 1e-3
+  l2_weight: 1e-4
+  target_std: [0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
+  target_sep: [0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
+
+loss_args:
+  huber_delta: 0.5
+  pad_value: 0.0
+
+checkpoints:
+  save_best_only: true
+  mode: "min"
+  save_weights_only: true
+  frequency: 10
+  patience: 50
+  min_delta: 1.0e-4
