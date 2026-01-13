@@ -3,6 +3,12 @@ import numpy as np
 import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit
+import yaml
+import resource
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 import os, sys
 import time
@@ -23,7 +29,7 @@ from rich import print
 from utils.messages.logger import Logger
 if not hasattr(np, "float"): np.float = np.float64
 
-class TensorRTHelper:
+class TensorRTCore:
     def __init__(self, *args, **kwargs):
         self.log = Logger()
         self.input_names = ["img"]
@@ -51,16 +57,12 @@ class TensorRTHelper:
         self.log.WARNING(f"Preparing engine bindings. TRT {trt.__version__}")
         self.stream = cuda.Stream()
 
+        # -- Extract I/O name
         names = [self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)]
         modes = {n: self.engine.get_tensor_mode(n) for n in names}
         self.input_names  = [n for n in names if modes[n] == trt.TensorIOMode.INPUT]
         self.output_names = [n for n in names if modes[n] == trt.TensorIOMode.OUTPUT]
 
-        # keep your preferred names if present
-        if self.input_names not in self.input_names and self.input_names:
-            self.input_names = self.input_names
-        if self.output_names not in self.output_names and self.output_names:
-            self.output_names = self.output_names
         self.log.CUSTOM("SUCCESS", "Binding completed")
         return
 
@@ -96,7 +98,7 @@ class TensorRTHelper:
             self.context.set_tensor_address(name, self.d_ins[idx])
 
         # Allocation for output
-        out_shapes = {}
+        self.out_shapes = {}
         for name in self.output_names:
             shp = tuple(self.context.get_tensor_shape(name)) # get output shape
             dt_trt = self.engine.get_tensor_dtype(name) # get output data type
@@ -116,9 +118,8 @@ class TensorRTHelper:
                 self.out_dtypes[name] = dt_np
 
             self.context.set_tensor_address(name, int(self.out_ptrs[name]))
-            out_shapes[name] = shp
+            self.out_shapes[name] = shp
 
-        return out_shapes
 
     @staticmethod
     def dims_to_tuple(d):
@@ -225,7 +226,7 @@ class TensorRTHelper:
         return inputs, outputs
 
 
-class ImageTensorRTInference(TensorRTHelper):
+class ImageTensorRTInference(TensorRTCore):
     def __init__(self, logger_severity=trt.Logger.WARNING):
         super().__init__(self)
         self.logger = trt.Logger(logger_severity)
@@ -242,6 +243,7 @@ class ImageTensorRTInference(TensorRTHelper):
         self.out_shapes = {}
         self.out_dtypes = {}
         self.log = Logger()
+        self.allocated = False
 
 
     def load_engine(self, engine_path: str):
@@ -267,8 +269,9 @@ class ImageTensorRTInference(TensorRTHelper):
         for idx, imgs in enumerate(inp_imgs):
             if not isinstance(imgs, np.ndarray):
                 raise TypeError(f"Please convert to input of type {type(imgs)} index {idx} to np.ndarray via tensor.detach().cpu().numpy()")
-
-        out_shapes = self._alloc_io(*inp_imgs)
+        if not self.allocated:
+            self._alloc_io(*inp_imgs)
+            self.allocated = True
         for idx, inp in enumerate(inp_imgs):
             cuda.memcpy_htod_async(self.d_ins[idx], np.ascontiguousarray(inp), self.stream)
         ok = self.context.execute_async_v3(self.stream.handle)
@@ -277,7 +280,7 @@ class ImageTensorRTInference(TensorRTHelper):
         self.stream.synchronize()
 
         outs = {}
-        for name, shp in out_shapes.items():
+        for name, shp in self.out_shapes.items():
             host = np.empty(shp, dtype=self.out_dtypes[name])
             cuda.memcpy_dtoh(host, self.out_ptrs[name])
             outs[name] = host
@@ -290,7 +293,7 @@ class ImageTensorRTInference(TensorRTHelper):
         return outs
 
 
-class ImageTensorRTExport(TensorRTHelper):
+class ImageTensorRTExport(TensorRTCore):
     def __init__(self, logger_severity=trt.Logger.WARNING):
         super().__init__(self)
         self.logger = trt.Logger(logger_severity)
@@ -320,14 +323,21 @@ class ImageTensorRTExport(TensorRTHelper):
         # WARNING: I need to change this to support Pytorch<2 for Jetson Nano
         try:
             state_dict = torch.load(path, map_location=self.device)
+            self.log.INFO("Loaded the model as `state dict`")
+            yaml_path = ModelLoader()._extract_yaml(path)
             if isinstance(state_dict, dict):
-                model = cls(**model_kwargs)
+
+                required_kwargs = ModelLoader()._extract_argvals(cls, yaml_path)
+                print(required_kwargs)
+                model = cls(**required_kwargs, **model_kwargs)
+
                 model.load_state_dict(state_dict)
                 model.to(self.device).eval()
                 if not hasattr(model, "input_metadata"):
                     self.log.ERROR("The model does not have `input_metadata`", exit_code = 12)
                 self.net = model
-        except Exception:
+        except Exception as e:
+            self.log.ERROR(f"Something went wrong", full_traceback = e )
             torch.serialization.add_safe_globals([cls]) if hasattr(torch.serialization, "add_safe_global") else None
             # Torch < 2.0 does not have weights_only arg
             if "weights_only" in torch.load.__code__.co_varnames:
@@ -338,6 +348,9 @@ class ImageTensorRTExport(TensorRTHelper):
             if not hasattr(model, "input_metadata"):
                 self.log.ERROR("The model does not have `input_metadata`")
             self.net = model
+            self.log.INFO("Loaded the model as `object`")
+        except Exception as e:
+            self.log.ERROR(f"Failed to compile model {e}")
     
     def inspect_input(self):
         self.log.INFO("Analyzing model forward signature to determine input order...")
@@ -429,6 +442,8 @@ class ImageTensorRTExport(TensorRTHelper):
                 config.set_flag(trt.BuilderFlag.TF32)
             elif quantize_type.upper() == "BF16" and getattr(builder, "platfrom_has_fast_bf16", False):
                 config.set_flag(trt.BuilderFlag.BF16)
+            else:
+                quantize_type = "FP32"
             self.log.INFO(f"Quantizing to {quantize_type.upper()} precision.")
 
 
@@ -443,6 +458,7 @@ class ImageTensorRTExport(TensorRTHelper):
 
             self.log.INFO("Optimizing profile. This might take some time...")
             profile = builder.create_optimization_profile()
+            # -- Optimize each input to the model
             for name in self.input_names:
                 base_shape = list(self.net.input_metadata[name])  # e.g. (1, 3, 150, 270)
 
@@ -476,9 +492,9 @@ class ImageTensorRTExport(TensorRTHelper):
             with open(engine_path, "wb") as f:
                 f.write(engine.serialize())
 
-            self.engine  = engine
-            self.context = engine.create_execution_context()
-            self._prepare_bindings()
+            # self.engine  = engine
+            # self.context = engine.create_execution_context()
+            # self._prepare_bindings()
         
         except Exception as e:
             self.log.ERROR("Export failed.", full_traceback = e, exit_code = 14)

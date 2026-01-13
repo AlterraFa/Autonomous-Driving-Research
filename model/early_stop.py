@@ -9,7 +9,8 @@ class EarlyStopping:
                  freq: int = 0, 
                  path: str = "checkpoint.pt",
                  mode: str = "min",
-                 verbose: bool = False):
+                 verbose: bool = False, 
+                 weights_only =  False):
         self.patience  = patience
         self.min_delta = min_delta
         self.path      = path
@@ -17,6 +18,7 @@ class EarlyStopping:
         self.counter   = 1
         self.best_loss = None
         self.early_stop = False
+        self.weights_only = weights_only
         
         basename = os.path.basename(path)
         self.parent_folder = os.path.dirname(path)
@@ -75,4 +77,4 @@ class EarlyStopping:
         }
         
         torch.save(checkpoint, self.parent_folder + "/checkpoint.pt")
-        torch.save(model, path)
+        torch.save(model.state_dict() if self.weights_only else model, path)

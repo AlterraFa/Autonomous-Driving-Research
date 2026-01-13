@@ -364,6 +364,7 @@ class TrainingLogger:
                 # Convert dict to tuple of tensors (preserving insertion order)
                 input_sample = tuple(input_sample.values())
             
+            model.eval()
             self.writer.add_graph(model, input_sample)
             self.writer.flush()
         except Exception as e:
