@@ -167,6 +167,10 @@ class CarlaDatasetLoader:
         
 
         # -- other control metadata are batched as usual
+        for c in controls:
+            for k, v in c.items():
+                if v is None:
+                    print(True, k)
         clean_controls = [{k: torch.as_tensor(v, dtype = torch.float32) for k, v in c.items() if k != "aux_wp"} for c in controls]
         batched_controls = torch.utils.data.default_collate(clean_controls)
         
