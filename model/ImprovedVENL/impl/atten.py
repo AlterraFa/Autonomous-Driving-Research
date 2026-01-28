@@ -103,16 +103,17 @@ class RoPEAttention(nn.Module):
         
         return row_ids, col_ids
         
-    def forward(self, x):
+    def forward(self, x, use_cls):
         B, N, C = x.shape
         # -- (2, B, num_heads, tokens, dim_per_head)
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        num_patches = self.grid_size * self.grid_size
-        
-        q_cls = q[:, :, num_patches:, :]
-        k_cls = k[:, :, num_patches:, :]
+        if use_cls:
+            num_patches = self.grid_size * self.grid_size
+            
+            q_cls = q[:, :, num_patches:, :]
+            k_cls = k[:, :, num_patches:, :]
 
         
         mask = torch.arange(N, device = x.device, dtype = torch.long)
@@ -137,8 +138,9 @@ class RoPEAttention(nn.Module):
             q = torch.cat([qh, qw], dim = 3)
             k = torch.cat([kh, kw], dim = 3)
 
-        q[:, :, num_patches:, :] = q_cls
-        k[:, :, num_patches:, :] = k_cls
+        if use_cls:
+            q[:, :, num_patches:, :] = q_cls
+            k[:, :, num_patches:, :] = k_cls
             
 
         # -- When using tensorrt please fucking use sdpa

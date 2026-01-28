@@ -189,13 +189,13 @@ class Block(nn.Module):
         else:
             self.mlp = MLP(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, x1, x2 = None):
+    def forward(self, x1, x2 = None, use_cls = False):
         if "cross" in self.attn._get_name().lower():
             if x2 is None: 
                 raise ValueError("Another tensor must be specifed when using cross attention")
-            y = self.attn(self.norm11(x1), self.norm12(x2))
+            y = self.attn(self.norm11(x1), self.norm12(x2), use_cls)
         else:
-            y = self.attn(self.norm11(x1))
+            y = self.attn(self.norm11(x1), use_cls)
         x1 = x1 + self.drop_path(y)
         x1 = x1 + self.drop_path(self.mlp(self.norm2(x1)))
         return x1
@@ -260,6 +260,9 @@ def trunc_normal_(tensor, mean=0.0, std=1.0, a=-2.0, b=2.0):
     # type: (Tensor, float, float, float, float) -> Tensor
     return _no_grad_trunc_normal_(tensor, mean, std, a, b)
 
+    
+
+
 class GatedAttentionPooling(nn.Module):
     def __init__(self, feature_dim = 512, hidden_dim=128):
         super().__init__()
@@ -277,18 +280,23 @@ class GatedAttentionPooling(nn.Module):
         return weighted_features
     
 class SpatialFeatureExtractor(nn.Module):
-    def __init__(self, num_queries=6, feature_dim = 512, hidden_dim=256):
+    def __init__(self, num_queries=6, feature_dim = 512, hidden_dim=256, use_sdpa = False):
+        from .cross import CrossAttention
         super().__init__()
         self.waypoint_queries = nn.Parameter(torch.randn(1, num_queries, hidden_dim))
         self.proj = nn.Linear(feature_dim, hidden_dim)
-        self.cross_attn = nn.MultiheadAttention(hidden_dim, num_heads=8, batch_first=True)
+        self.cross_attn = CrossAttention(
+            embed_dim = hidden_dim,
+            num_heads = 8,
+            use_sdpa = use_sdpa
+        )
         
     def forward(self, z):
         B = z.shape[0]
         z_proj = self.proj(z)
         queries = self.waypoint_queries.expand(B, -1, -1)
         
-        out, _ = self.cross_attn(queries, z_proj, z_proj)
+        out = self.cross_attn(queries, z_proj)
         return out
 
 
@@ -298,7 +306,7 @@ class GRU_WP(nn.Module):
         
         self.encoder = nn.Linear(feature_dim, hidden_size)
         self.layer_norm = nn.LayerNorm(hidden_size)
-        self.gru_cell = nn.GRUCell(input_size = 2 + feature_dim, hidden_size = hidden_size)
+        self.gru_cell = nn.GRUCell(input_size = 2, hidden_size = hidden_size)
         self.decoder  = nn.Linear(hidden_size, 2)
         self.num_waypoints = num_waypoints
         
@@ -313,9 +321,8 @@ class GRU_WP(nn.Module):
         current_wp = torch.zeros((B, 2), device = x.device)
         for i in range(self.num_waypoints):
             
-            gru_input = torch.concat([current_wp, x], dim = -1)
             
-            out = self.gru_cell(gru_input, out)
+            out = self.gru_cell(current_wp, out)
             delta_wp = self.decoder(out)
             current_wp += delta_wp
             waypoints[:, i, :] = current_wp
@@ -350,13 +357,13 @@ class GRU_Gaussian(nn.Module):
         # Handle both cls_token input (B, feature_dim) and SpatialFeatureExtractor input (B, num_components, feature_dim)
         if x.dim() == 2:
             # cls_token case: (B, feature_dim)
-            out = self.encoder(x)
-            out = self.layer_norm(out)
+            ctx = self.encoder(x)
+            out = self.layer_norm(ctx)
         elif x.dim() == 3:
             # SpatialFeatureExtractor case: (B, num_components, feature_dim)
             # Use mean pooling across components to get a single vector per batch
-            out = x.mean(dim=1)  # (B, feature_dim)
-            out = self.component_encoder(out)  # (B, feature_dim) -> (B, hidden_size)
+            ctx = x.mean(dim=1)  # (B, feature_dim)
+            out = self.component_encoder(ctx)  # (B, feature_dim) -> (B, hidden_size)
             out = self.component_layer_norm(out)
         else:
             raise ValueError(f"Expected 2D or 3D input, got {x.dim()}D input")

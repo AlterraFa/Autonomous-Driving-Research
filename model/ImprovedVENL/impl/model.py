@@ -98,7 +98,7 @@ class ImprovedVENL(nn.Module):
             self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim), requires_grad = True)
         else:
             self.log.WARNING("Using Spatial and Gated attention pooling")
-            self.pooling_uncertain = SpatialFeatureExtractor(num_queries = components, feature_dim=embed_dim, hidden_dim=embed_dim)
+            self.pooling_uncertain = SpatialFeatureExtractor(num_queries = components if use_cls else 1, feature_dim=embed_dim, hidden_dim=embed_dim, use_sdpa = use_sdpa)
             self.pooling_certain   = GatedAttentionPooling(feature_dim=embed_dim, hidden_dim=hidden_dim)
 
         if not self.use_rope:
@@ -175,11 +175,7 @@ class ImprovedVENL(nn.Module):
             
         self.init_std = init_std
 
-        # Apply weight initialization explicitly to avoid bound-method signature issues
-        for module in self.modules():
-            self._init_weights(module)
-
-        self._rescale_blocks()
+        # self._rescale_blocks()
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -261,45 +257,53 @@ class ImprovedVENL(nn.Module):
         
         if self.use_gradient_ckpt:
             out = torch.utils.checkpoint.checkpoint(
-                self.cross_uncertain, patch_I0, patch_MU, use_reentrant = False
+                self.cross_uncertain, patch_I0, patch_MU, use_cls = self.use_cls, use_reentrant = False
             )
         else: 
-            out = self.cross_uncertain(patch_I0, patch_MU)
+            out = self.cross_uncertain(patch_I0, patch_MU, use_cls = self.use_cls)
+            
         
 
         for blk in self.uncertain_blocks:
             if self.use_gradient_ckpt:
                 out = torch.utils.checkpoint.checkpoint(
-                    blk, out, use_reentrant = False
+                    blk, out, use_cls = self.use_cls, use_reentrant = False
                 )
             else: 
-                out = blk(out)
+                out = blk(out, use_cls = self.use_cls)
         if self.use_cls:
             uncertain_embed = out[:, -1, :]
         else:
             uncertain_embed = self.pooling_uncertain(out)
 
+
+
+
         if self.use_gradient_ckpt:
             out = torch.utils.checkpoint.checkpoint(
-                self.cross_certain, out, patch_MR, use_reentrant = False
+                self.cross_certain, out, patch_MR, use_cls = self.use_cls, use_reentrant = False
             )
         else: 
-            out = self.cross_certain(out, patch_MR)
+            out = self.cross_certain(out, patch_MR, use_cls = self.use_cls)
 
         for blk in self.certain_blocks:
             if self.use_gradient_ckpt:
                 out = torch.utils.checkpoint.checkpoint(
-                    blk, out, use_reentrant = False
+                    blk, out, use_cls = self.use_cls, use_reentrant = False
                 )
             else: 
-                out = blk(out)
+                out = blk(out, use_cls = self.use_cls)
+                
+                
         if self.use_cls:
             certain_embed = out[:, -1, :]
         else:
             certain_embed = self.pooling_certain(out)
             
-        
-        gmm_out = self.gmm_head(uncertain_embed)
+        if self.use_cls:
+            gmm_out = self.gmm_head(uncertain_embed)
+        else:
+            gmm_out = self.gmm_head(uncertain_embed).squeeze(1)
         determ_out = self.determ_head(certain_embed)
         
         
@@ -367,7 +371,7 @@ class ImprovedVENL(nn.Module):
                 crop = crop,
             )
 
-        I0 = torch.flip(self.main_norm(kwargs['I0'][..., :3])[None, ...], dims = [1])
+        I0 = torch.flip(self.main_norm(kwargs['I0'][..., :3])[None, ...], dims = [0])
         MU = self.aux_norm(kwargs['MU'][..., None])[None, ...]
         MR = torch.flip(self.aux_norm(kwargs['MR'])[None, ...], dims = [1])
 
@@ -431,24 +435,28 @@ if __name__ == "__main__":
     with open(yaml_path, "r") as f:
         args = yaml.safe_load(f)
     
-    model_cfg = args['model']
-    input_metadata = model_cfg.get('input_metadata', {})
-    patch_sizes = model_cfg.get('patch_sizes', [16, 16, 16])
-    output_names = model_cfg.get('output_names', ["waypoint", "weights", "muy", "sigma"])
-    components = model_cfg.get('components', 6)
-    num_waypoints = model_cfg.get('num_waypoints', 6)
-    depth = model_cfg.get('depth', 5)
-    embed_dim = model_cfg.get('embed_dim', 512)
-    num_heads = model_cfg.get('num_heads', 8)
-    mlp_ratio = model_cfg.get('mlp_ratio', 4)
-    qkv_bias = model_cfg.get('qkv_bias', True)
-    qk_scale = model_cfg.get('qk_scale', None)
-    drop = model_cfg.get('drop', 0.0)
-    attn_drop = model_cfg.get('attn_drop', 0.0)
-    drop_path = model_cfg.get('drop_path', 0.0)
-    drop_route = model_cfg.get('drop_route', 0.0)
-    drop_all = model_cfg.get('drop_all', 0.0)
-    use_rope = model_cfg.get('use_rope', True)
+
+    model_cfg         = args['model']
+    input_metadata    = model_cfg.get('input_metadata', {})
+    patch_sizes       = model_cfg.get('patch_sizes', [16, 16, 16])
+    output_names      = model_cfg.get('output_names', ["waypoint", "weights", "muy", "sigma"])
+    components        = model_cfg.get('components', 6)
+    num_waypoints     = model_cfg.get('num_waypoints', 6)
+    depth             = model_cfg.get('depth', 5)
+    embed_dim         = model_cfg.get('embed_dim', 512)
+    num_heads         = model_cfg.get('num_heads', 8)
+    mlp_ratio         = model_cfg.get('mlp_ratio', 4)
+    qkv_bias          = model_cfg.get('qkv_bias', True)
+    qk_scale          = model_cfg.get('qk_scale', None)
+    act_layer         = model_cfg.get("act_layer", "nn.GELU")
+    use_gru           = model_cfg.get('use_gru', False) 
+    drop              = model_cfg.get('drop', 0.0)
+    attn_drop         = model_cfg.get('attn_drop', 0.0)
+    drop_path         = model_cfg.get('drop_path', 0.0)
+    drop_route        = model_cfg.get('drop_route', 0.0)
+    drop_all          = model_cfg.get('drop_all', 0.0)
+    use_rope          = model_cfg.get('use_rope', True)
+    use_cls           = model_cfg.get('use_cls', True)
     use_gradient_ckpt = model_cfg.get('use_gradient_ckpt', True)
     
     model = ImprovedVENL(
@@ -464,17 +472,17 @@ if __name__ == "__main__":
         qkv_bias=qkv_bias,
         qk_scale=qk_scale,
         drop=drop,
+        act_layer=act_layer,
         attn_drop=attn_drop,
+        use_gru=use_gru,
         drop_path=drop_path,
         drop_route=drop_route,
         drop_all=drop_all,
         use_sdpa=True,
-        use_rope=False,
-        use_gradient_ckpt=use_gradient_ckpt,
-        use_gru = True
+        use_rope=use_rope,
+        use_cls=True,
+        use_gradient_ckpt=use_gradient_ckpt
     )
-    
-
     device = torch.device("cuda")
 
     

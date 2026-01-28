@@ -114,7 +114,7 @@ class CrossRoPEAttention(nn.Module):
         
         return row_ids, col_ids
         
-    def forward(self, x1, x2):
+    def forward(self, x1, x2, use_cls):
         B2, N2, C2 = x2.shape
         # -- (2, B, num_heads, tokens, dim_per_head)
         kv = self.kv(x2).reshape(B2, N2, 2, self.num_heads, C2 // self.num_heads).permute(2, 0, 3, 1, 4)
@@ -124,18 +124,16 @@ class CrossRoPEAttention(nn.Module):
         q = self.q(x1).reshape(B1, N1, self.num_heads, C1 // self.num_heads).permute(0, 2, 1, 3)
 
         grid_k_tensor = torch.sqrt(torch.tensor(N2, dtype=x2.dtype, device=x2.device))
-        grid_k = int(torch.round(grid_k_tensor).item()) if not torch.jit.is_tracing() else self.grid_size
-
-        # patch tokens assumed to form a grid of size grid_k x grid_k; clamp to sequence length
-        num_patches = min(grid_k * grid_k, N1)
-
-        q_cls = q[:, :, num_patches:, :]
+        grid_k = int(torch.round(grid_k_tensor).item())
+        if use_cls:
+            num_patches = min(self.grid_size * self.grid_size, N1)
+            q_cls = q[:, :, num_patches:, :]
 
         # integer positions for patch tokens
         mask_1 = torch.arange(N1, device=x1.device, dtype=torch.long)
         mask_2 = torch.arange(N2, device=x2.device, dtype=torch.long)
         
-        row_ids1, col_ids1 = self.separate_position(mask_1, grid_k, grid_k)
+        row_ids1, col_ids1 = self.separate_position(mask_1)
         row_ids2, col_ids2 = self.separate_position(mask_2, grid_k, grid_k)
         
         # Apply RoPE to height and width position dimensions
@@ -156,7 +154,8 @@ class CrossRoPEAttention(nn.Module):
             q_final = torch.cat([qh, qw], dim = 3)
             k_final = torch.cat([kh, kw], dim = 3)
         
-        q[:, :, num_patches:, :] = q_cls
+        if use_cls:
+            q[:, :, num_patches:, :] = q_cls
 
         if self.use_sdpa:
             with sdpa_kernel(_USABLE_BACKENDS):
