@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import numpy as np
 import cv2
 
+from argparse import ArgumentParser
 from torch.utils.data import DataLoader
 from torch import optim
 
@@ -42,6 +43,8 @@ def load_checkpoint(
     map_location=None
 ):
     """Load model checkpoint and optimizer state."""
+    from glob import glob
+    
     basename = "checkpoint.pt"
     meta_path = os.path.join(checkpoint_dir, basename)
     if not os.path.exists(meta_path):
@@ -52,12 +55,13 @@ def load_checkpoint(
     start_epoch = meta.get("epoch", 0)
 
     prefix = "best_" if prefer_best else "last_"
-    model_path = os.path.join(checkpoint_dir, f"{prefix}{basename}")
+    extname = ".pt"
+    model_path = glob(os.path.join(checkpoint_dir, f"{prefix}*{extname}"))[0]
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Missing {model_path}")
 
     loaded_model = torch.load(model_path, map_location=map_location)
-    model.load_state_dict(loaded_model.state_dict())
+    model.load_state_dict(loaded_model)
     
     if optimizer is not None and meta.get("optimizer_state_dict") is not None:
         optimizer.load_state_dict(meta["optimizer_state_dict"])
@@ -66,6 +70,8 @@ def load_checkpoint(
 
 
 def main(args, yaml_path):
+
+
     
     # ================================================= #
     #              DATA CONFIGURATION
@@ -157,6 +163,7 @@ def main(args, yaml_path):
     pad_value    = loss_args.get('pad_value', 0.0)
     target_std   = loss_args.get('target_std', [0.6, 0.8, 1.0, 1.2, 1.4, 1.6])
     target_sep   = loss_args.get('target_sep', [0.6, 0.8, 1.0, 1.2, 1.4, 1.6])
+    wp_coeff     = loss_args.get('wp_coeff', [1.0, 1.1, 1.2, 1.3, 1.4, 1.5])
     
     
     # ================================================= #
@@ -216,16 +223,9 @@ def main(args, yaml_path):
         use_sdpa=use_sdpa,
         use_rope=use_rope,
         use_cls=use_cls,
-        use_gradient_ckpt=use_gradient_ckpt
+        use_gradient_ckpt=use_gradient_ckpt,
+        init_std=0.05   
     )
-    
-    model = model.to(device)
-    logger.INFO(f"Model initialized with {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M parameters")
-    
-    if do_compile:
-        logger.INFO("Compiling model")
-        model.compile()
-        logger.CUSTOM("SUCCESS", "Model compiling was a success")
     
     
     # ================================================= #
@@ -275,11 +275,13 @@ def main(args, yaml_path):
     loss_compute = NavLoss(
         model,
         delta = huber_delta,
+        wp_coeff = wp_coeff,
         loss_coeffs = loss_contrib,
         target_sep = target_sep,
         target_std = target_std,
         device = device,
-        pad_value = pad_value
+        pad_value = pad_value,
+        enabled_losses = ["soft_dtw", "nll", "std_reg", "l1_model", "l2_model"]
     )
 
     # ================================================= #
@@ -301,7 +303,7 @@ def main(args, yaml_path):
     map_normal_transform  = Normalization(
         size = input_metadata['MU'][2:]
     )
-    
+
     optimizer = optim.AdamW(model.parameters(), lr = init_lr, betas = betas, weight_decay = init_wd)
     lr_scheduler = CosineSchedule(
         optimizer, 
@@ -315,9 +317,39 @@ def main(args, yaml_path):
         T_max = int(epochs * len(train_loader)), 
         final_wd = target_wd
     )
+
+    earlystop = EarlyStopping(
+        patience, 
+        min_delta, 
+        freq = frequency, 
+        path = f"{log_dir}/run{run}/weights/{model._get_name()}.pt", 
+        mode = mode, 
+        verbose = False,
+        weights_only = True
+    )
     
-    log_dir = f"{FOLDER_DIR}/Experiment/"
-    run = get_next_run(log_dir)
+    if argument.cont_train:
+        logger.INFO(f"Continuing training from run {run-1}")
+        model, optimizer, current_epochs, score = load_checkpoint(model, optimizer, os.path.join(os.path.dirname(yaml_path), "weights"))
+        for _ in range(current_epochs):
+            for _ in range(len(train_loader)):
+                lr_scheduler.step()
+                wd_scheduler.step()
+        earlystop.best_loss = score
+
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to("cuda")
+    
+    
+    model = model.to(device)
+    logger.INFO(f"Model initialized with {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M parameters")
+    
+    if do_compile:
+        logger.INFO("Compiling model")
+        model.compile()
+        logger.CUSTOM("SUCCESS", "Model compiling was a success")
     log_stats = TrainingLogger(
         log_dir = log_dir,
         epochs  = epochs,
@@ -329,15 +361,6 @@ def main(args, yaml_path):
         input_sample = [torch.zeros(shape, device = device) for shape in input_metadata.values()]
     )
     os.system(f"cp {yaml_path} {os.path.join(log_dir, f'run{run}')}")
-    earlystop = EarlyStopping(
-        patience, 
-        min_delta, 
-        freq = frequency, 
-        path = f"{log_dir}/run{run}/weights/{model._get_name()}.pt", 
-        mode = mode, 
-        verbose = False,
-        weights_only = True
-    )
     
     def to_device(img_batch, controls_batch):
         img_batch      = {name: img_batch[name].to(device) for name in img_batch.keys()}
@@ -423,7 +446,18 @@ def main(args, yaml_path):
             )
 
 if __name__ == "__main__":
-    yaml_path = os.path.join(FOLDER_DIR, "configs/model_cfg.yaml")
+    log_dir = f"{FOLDER_DIR}/Experiment/"
+    run = get_next_run(log_dir)
+
+    parser = ArgumentParser()
+    parser.add_argument("--cont_train", action = "store_true")
+    argument = parser.parse_args()
+    
+    if argument.cont_train:
+        yaml_path = os.path.join(log_dir, f'run{run-1}/model_cfg.yaml')
+    else:
+        yaml_path = os.path.join(FOLDER_DIR, "configs/model_cfg.yaml")
+
     
     if not os.path.exists(yaml_path):
         logger.ERROR(f"Config file not found: {yaml_path}")
