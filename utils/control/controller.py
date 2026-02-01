@@ -2,12 +2,21 @@ import pygame
 
 from config.enum import JoyControl, JOYBINDS, KEYBINDS
 from utils.messages.logger import Logger
-from utils.messages.message_handler import MessagingSenders
+from utils.messages.message_handler import MessageSender
+from utils.messages.all_messages import (
+    Throttle,
+    Steer,
+    Brake,
+    Reverse,
+    Handbrake,
+    RegulateSpeed,
+    TurnSignal,
+)
 
-class Controller(MessagingSenders):
+class Controller:
     def __init__(self):
         self.log = Logger()
-        MessagingSenders.__init__(self)
+        self._init_transmitter()
         pygame.joystick.init()
 
         self.has_joystick = pygame.joystick.get_count() > 0
@@ -42,6 +51,15 @@ class Controller(MessagingSenders):
         self.hand_brake = False
         self.regulate_speed = False
         
+    def _init_transmitter(self):
+        """Initialize all message senders for controller."""
+        self.send_throttle        = MessageSender(Throttle)
+        self.send_steer           = MessageSender(Steer)
+        self.send_brake           = MessageSender(Brake)
+        self.send_reverse         = MessageSender(Reverse)
+        self.send_handbrake       = MessageSender(Handbrake)
+        self.send_regulate_speed  = MessageSender(RegulateSpeed)
+        self.send_turn_signal     = MessageSender(TurnSignal)
         
     def _apply_deadzone(self, x: float, dz: float) -> float:
         if abs(x) < dz:

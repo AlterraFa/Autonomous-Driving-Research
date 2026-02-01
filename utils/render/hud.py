@@ -2,7 +2,7 @@ import pygame
 import numpy as np
 import cv2
 
-from utils.messages.message_handler import MessagingSubscribers, MessageSubscriber
+from utils.messages.message_handler import MessageSubscriber
 from utils.messages.all_messages import (
     ServerFps,
     ClientFps,

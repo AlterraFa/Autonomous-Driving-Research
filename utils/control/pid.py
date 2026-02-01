@@ -1,6 +1,8 @@
+import time
 import numpy as np
 from scipy.interpolate import interp1d
 
+nowtime = time.time()
 
 def lateral_control(waypoints: np.ndarray, Ld: float, wheelbase: float, max_steer: float):
     padded_wp = np.r_[np.zeros((1, 2)), waypoints]
@@ -14,7 +16,7 @@ def lateral_control(waypoints: np.ndarray, Ld: float, wheelbase: float, max_stee
     steer = np.degrees(np.atan2(2 * wheelbase * np.sin(phi), np.sqrt(target_x ** 2 + target_y ** 2)))
 
     steer = np.clip(steer, -max_steer, max_steer)
-    normalized_steer = steer / max_steer * 1.5
+    normalized_steer = steer / max_steer * 1.2
     return normalized_steer
 
 def longitudinal_speed(waypoints, num_waypoints_to_average=3, time_step=0.2):
@@ -26,6 +28,7 @@ def longitudinal_speed(waypoints, num_waypoints_to_average=3, time_step=0.2):
     :param time_step: The time interval between each predicted waypoint.
     :return: The target speed in meters per second (m/s).
     """
+    global nowtime
     if waypoints is None or len(waypoints) < 2:
         return 0.0
 
@@ -43,5 +46,8 @@ def longitudinal_speed(waypoints, num_waypoints_to_average=3, time_step=0.2):
         return 0.0
 
     target_speed_ms = path_length / total_time
+    
+    if target_speed_ms < 10:
+        target_speed_ms = 10
     
     return target_speed_ms

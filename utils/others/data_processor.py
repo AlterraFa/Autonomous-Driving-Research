@@ -110,7 +110,6 @@ class CarlaDatasetCollector:
         # lock image keys on first run
         if not hasattr(self, "_image_keys"):
             self._image_keys = list(images.keys())
-            self.log.DEBUG("Initializing SAVERS thread", once = True)
             self._savers = {}
             for key in self._image_keys:
                 saver_dir = self.img_dir / key

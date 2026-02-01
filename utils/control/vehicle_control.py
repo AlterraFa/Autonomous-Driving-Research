@@ -9,7 +9,16 @@ import numpy as np
 
 from traceback import print_exc
 from scipy.signal import butter, lfilter, lfilter_zi
-from utils.messages.message_handler import MessagingSubscribers
+from utils.messages.message_handler import MessageSubscriber
+from utils.messages.all_messages import (
+    Throttle,
+    Steer,
+    Brake,
+    Reverse,
+    Handbrake,
+    ModelSpeed,
+    ModelSteer,
+)
 from utils.others.others import get_nested_config
 
 conf = toml.load(os.path.join(parent, "../config/config.toml"))
@@ -33,9 +42,10 @@ class OnlineLowPassFilter:
         y, self.zi = lfilter(self.b, self.a, [x], zi=self.zi)
         return y[0]
 
-class Vehicle(MessagingSubscribers):
+
+class Vehicle:
     def __init__(self, vehicle: carla.Vehicle, world: carla.World, fps = 70):
-        MessagingSubscribers.__init__(self)
+        self._init_transmitter()
         
         self.vehicle = vehicle
         self.world = world
@@ -64,7 +74,16 @@ class Vehicle(MessagingSubscribers):
 
         self.max_steer = max_steer
         self.wheelbase = wheelbase
-        
+    
+    def _init_transmitter(self):
+        """Initialize all message subscribers for vehicle control."""
+        self.sub_throttle   = MessageSubscriber(Throttle)
+        self.sub_steer      = MessageSubscriber(Steer)
+        self.sub_brake      = MessageSubscriber(Brake)
+        self.sub_reverse    = MessageSubscriber(Reverse)
+        self.sub_handbrake  = MessageSubscriber(Handbrake)
+        self.sub_model_speed = MessageSubscriber(ModelSpeed)
+        self.sub_model_steer = MessageSubscriber(ModelSteer)
         
     def set_autopilot(self, enable: bool):
         self.vehicle.set_autopilot(enable)
