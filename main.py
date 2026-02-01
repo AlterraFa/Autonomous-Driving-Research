@@ -1,4 +1,5 @@
 import os, sys
+import time
 import resource
 root = os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
 sys.path.insert(0, root)
@@ -12,14 +13,20 @@ import datetime
 import re
 import numpy as np
 import line_profiler
+from utils.messages.logger import Logger
+logger = Logger()
 
-from utils.spawn.actor_spawner import Spawn, VehicleClass as VClass
+from utils.spawn.actor_spawner import Spawn
 from utils.spawn.sensor_spawner import (
     RGB,
     GNSS,
     IMU, 
+    SemanticSegmentation,
 )
-from utils.spawn.multicam import MultiCamera
+from config.enum import (
+    VehicleClass as VClass,
+    CarlaLabel as CLabel
+)
 
 from tqdm.auto import tqdm
 from utils.control.world import World
@@ -44,7 +51,7 @@ def get_recording_duration(log_path: str) -> float:
     m = re.search(r"Duration:\s*([0-9.]+)\s*seconds", report)
     if m:
         duration = float(m.group(1))
-        print(f"Recording duration: {duration:.2f} seconds")
+        logger.INFO(f"Recording duration: {duration:.2f} seconds")
     else:
         print("No duration found")
     return duration
@@ -62,11 +69,89 @@ path_optim_conf = conf.get("PathOptimizer", {})
 PATH_STEP = path_optim_conf.get("path_step", 2.0) 
 EXCLUDE_PARAMS = path_optim_conf.get("exclude_params", [0, 0, 0])
 
+gnss_conf = conf.get("GPS", {})
+MEAN_DELAY   = gnss_conf.get("mean_delay", 0)
+STDDEV_DELAY = gnss_conf.get("stddev_delay", 0)
+LAT_STDDEV   = gnss_conf.get("lat_stddev", 0)
+LON_STDDEV   = gnss_conf.get("lon_stddev", 0)
+FREQ         = gnss_conf.get("frequency", 50)
+
 MIN_SAVING_DIST = 0.4
+
+
+def _expand_replay_dirs(replay_dirs):
+    if isinstance(replay_dirs, str):
+        replay_dirs = [replay_dirs]
+    expanded = []
+    for item in replay_dirs:
+        if "," in item:
+            expanded.extend([p.strip() for p in item.split(",") if p.strip()])
+        else:
+            expanded.append(item)
+    return expanded
+
+
+def _wait_for_live_actor_by_role(world, role_name: str, timeout_s: float = 30.0, settle_ticks: int = 50):
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        vehicles = world.get_actors().filter('vehicle.*')
+        for v in vehicles:
+            try:
+                if v.attributes.get('role_name', '') == role_name and v.is_alive:
+                    logger.INFO(f"Found {role_name} actor, settling...")
+                    prev_pos = None
+                    for tick_idx in range(settle_ticks):
+                        if world.get_settings().synchronous_mode:
+                            world.tick()
+                        else:
+                            time.sleep(0.05)
+                        try:
+                            curr_pos = v.get_location()
+                            if prev_pos is not None and prev_pos.distance(curr_pos) > 0.1:
+                                logger.WARNING(f"Actor still moving (tick {tick_idx}), continuing settle...")
+                            prev_pos = curr_pos
+                        except:
+                            pass
+                    logger.INFO(f"Actor settled after {settle_ticks} ticks")
+                    return v
+            except Exception:
+                pass
+        if world.get_settings().synchronous_mode:
+            world.tick()
+        else:
+            time.sleep(0.05)
+    return None
+
+
+def _init_sensor_with_retry(game_viewer, sensors_metadata, max_retries: int = 5):
+    for attempt in range(max_retries):
+        try:
+            game_viewer.init_sensor(sensors_metadata)
+            return True
+        except RuntimeError as e:
+            if "parent actor not found" in str(e):
+                if attempt < max_retries - 1:
+                    logger.WARNING(f"Sensor init failed (attempt {attempt + 1}/{max_retries}): {e}")
+                    wait_ticks = 20 + (attempt * 10)
+                    logger.WARNING(f"Retrying after {wait_ticks} ticks...")
+                    for _ in range(wait_ticks):
+                        if game_viewer.virt_world.world.get_settings().synchronous_mode:
+                            game_viewer.virt_world.world.tick()
+                        else:
+                            time.sleep(0.1)
+                else:
+                    logger.ERROR(f"Sensor init failed after {max_retries} attempts: {e}")
+                    return False
+            else:
+                logger.ERROR(f"Sensor init error: {e}")
+                return False
+    return False
 
     
 def main(args):
     pygame.init()
+
+    lp = None
 
     client = carla.Client(args.host, args.port)
     virt_world = World(client, args.traffic_port)
@@ -76,9 +161,15 @@ def main(args):
     virt_world.apply_settings()
 
     rgb_sensor = RGB(virt_world.world)
-    gnss_sensor = GNSS(virt_world.world)
+    gnss_sensor = GNSS(virt_world.world, freq_hz = FREQ, mu_ms = MEAN_DELAY, sigma_ms = STDDEV_DELAY)
+    gnss_sensor.set_attribute("noise_lat_stddev", LAT_STDDEV / 111320.0)
+    gnss_sensor.set_attribute("noise_lon_stddev", LON_STDDEV / 111320.0)
     imu_sensor = IMU(virt_world.world)
-    
+    semseg_sensor = SemanticSegmentation(
+        virt_world.world, 
+        filter_labels = [CLabel.Road], 
+        binarize = True,
+    )
     
     script_path = os.path.abspath(__file__)
     folder = os.path.dirname(script_path)
@@ -102,65 +193,138 @@ def main(args):
         viewer_args.update({"vehicle": controlling_vehicle})
 
     if args.mode == "replay":
-        path_2_recording = folder + "/" + args.replay_dir + "/log.log"
-        path_2_waypoints = folder + "/" + args.replay_dir + "/trajectory.npy"
-        
-        if args.collect_data is None:
-            dataset_dir = None
-        else:
-            dataset_dir = folder + "/" + args.collect_data + "/" + os.path.basename(args.replay_dir) + "_" + ("temporal" if args.temporal else "spatial")
-            os.makedirs(dataset_dir, exist_ok = True)
+        replay_dirs = _expand_replay_dirs(args.replay_dir)
 
-        duration = get_recording_duration(path_2_recording)
-        client.show_recorder_file_info(path_2_recording, False)
-        start = 0; stop = 4
-        duration -= start + stop
-        client.replay_file(path_2_recording, start, duration, 0)
-        
-        spawner.wait_for_actor_by_role("ego")
-        controlling_vehicle = Vehicle(spawner.single_vehicle, virt_world.world)  
+        for idx, replay_dir in enumerate(replay_dirs, start = 1):
+            path_2_recording = folder + "/" + replay_dir + "/log.log"
+            path_2_waypoints = folder + "/" + replay_dir + "/trajectory.npy"
 
-        viewer_args.update({"vehicle": controlling_vehicle, "duration": duration, "headless": args.headless})
-    
-    game_viewer = CarlaViewer(**viewer_args)
-    game_viewer.init_sensor({
-        rgb_sensor     : None, 
-        gnss_sensor    : None, 
-        imu_sensor     : None, 
-    })
+            if not os.path.exists(path_2_recording):
+                logger.ERROR(f"Replay log not found: {path_2_recording}")
+                continue
+            if not os.path.exists(path_2_waypoints):
+                logger.ERROR(f"Trajectory file not found: {path_2_waypoints}")
+                continue
 
-    lp = line_profiler.LineProfiler()
-    lp.add_function(game_viewer.run)
-    lp.add_function(game_viewer.step_world)
-    lp_wrapper = lp(game_viewer.run)
+            if args.collect_data is None:
+                dataset_dir = None
+            else:
+                dataset_dir = folder + "/" + args.collect_data + "/" + os.path.basename(replay_dir) + "_" + ("temporal" if args.temporal else "spatial")
+                os.makedirs(dataset_dir, exist_ok = True)
 
-    map_processor = Map(
-        world = virt_world,
-        rect_dim = RECT_DIM,
-        map_offset = MAP_OFFSET,
-        range_ = MAP_RANGE,
-        resize_to = MAP_RESIZE,
-        scale = MAP_SCALE
-    )
-    path_optimizer = OptimizePath(
-        virt_world, 
-        step = PATH_STEP, 
-        exclude_circle = EXCLUDE_PARAMS,
-    )
-    game_viewer.attach_plugins(path_optimizer = path_optimizer)
-    
-    if args.mode == "replay":
-        true_trajectories    = np.load(path_2_waypoints)
-        midlane_trajectories = map_processor.precompute_waypoints(true_trajectories)
-        replayer             = ReplayHandler(virt_world, true_trajectories, midlane_trajectories, dataset_dir, args.temporal, args.debug)
-        pbar                 = tqdm(total = duration, unit = 'server second', desc = "Play duration", ncols = 125)
-        game_viewer.attach_plugins(
-            replayer = replayer, 
-            pbar = pbar, 
-            map_processor = map_processor
+            duration = get_recording_duration(path_2_recording)
+            client.show_recorder_file_info(path_2_recording, False)
+            start = 1.5; stop = 4
+            duration -= start + stop
+            if duration <= 0:
+                logger.ERROR(f"Skip replay (duration <= 0): {replay_dir}")
+                continue
+
+            spawner.despawn_vehicles()
+            logger.INFO(f"Waiting for replay system to stabilize...")
+            for _ in range(50):
+                if virt_world.world.get_settings().synchronous_mode:
+                    virt_world.world.tick()
+                else:
+                    time.sleep(0.05)
+            client.replay_file(path_2_recording, start, duration, 0)
+
+            ego_actor = _wait_for_live_actor_by_role(virt_world.world, "ego", timeout_s=30.0, settle_ticks=100)
+            if ego_actor is None:
+                logger.ERROR(f"Could not find live ego actor for replay: {replay_dir}")
+                continue
+            else:
+                logger.INFO(f"Replaying actor spawn")
+            spawner.single_vehicle = ego_actor
+            controlling_vehicle = Vehicle(ego_actor, virt_world.world)
+
+            per_viewer_args = viewer_args | {"vehicle": controlling_vehicle, "duration": duration, "headless": args.headless}
+
+            game_viewer = CarlaViewer(**per_viewer_args)
+            
+            # Refresh ego actor immediately before sensor init
+            ego_actor_refresh = _wait_for_live_actor_by_role(virt_world.world, "ego", timeout_s=5.0, settle_ticks=10)
+            if ego_actor_refresh is None:
+                logger.ERROR(f"Ego actor became invalid before sensor init: {replay_dir}")
+                continue
+            game_viewer.vehicle = ego_actor_refresh
+            game_viewer.virt_vehicle.vehicle = ego_actor_refresh
+            sensors_metadata = {
+                rgb_sensor     : None, 
+                gnss_sensor    : None, 
+                imu_sensor     : None, 
+                semseg_sensor  : None,
+            }
+            if not _init_sensor_with_retry(game_viewer, sensors_metadata):
+                logger.ERROR(f"Skipping replay due to sensor initialization failure: {replay_dir}")
+                continue
+
+            lp = line_profiler.LineProfiler()
+            lp.add_function(game_viewer.run)
+            lp.add_function(game_viewer.step_world)
+            lp_wrapper = lp(game_viewer.run)
+
+            map_processor = Map(
+                world = virt_world,
+                rect_dim = RECT_DIM,
+                map_offset = MAP_OFFSET,
+                range_ = MAP_RANGE,
+                resize_to = MAP_RESIZE,
+                scale = MAP_SCALE,
+                relative_pos = "forward"
+            )
+            path_optimizer = OptimizePath(
+                virt_world, 
+                step = PATH_STEP, 
+                exclude_circle = EXCLUDE_PARAMS,
+            )
+            game_viewer.attach_plugins(path_optimizer = path_optimizer)
+
+            true_trajectories    = np.load(path_2_waypoints)
+            midlane_trajectories = map_processor.precompute_waypoints(true_trajectories)
+            replayer             = ReplayHandler(virt_world, true_trajectories, midlane_trajectories, dataset_dir, args.temporal, args.debug)
+            pbar                 = tqdm(total = round(duration, 2), unit = 'server second', desc = f"Play duration ({idx}/{len(replay_dirs)})", ncols = 125, leave = True)
+            game_viewer.attach_plugins(
+                replayer = replayer, 
+                pbar = pbar, 
+                map_processor = map_processor
+            )
+            lp.add_function(game_viewer.map_processor.retrieve_map)
+            lp_wrapper()
+            pbar.close()
+
+            spawner.despawn_vehicles()
+            time.sleep(1.0)
+
+    if args.mode != "replay":
+        game_viewer = CarlaViewer(**viewer_args)
+        game_viewer.init_sensor({
+            rgb_sensor     : None, 
+            gnss_sensor    : None, 
+            imu_sensor     : None, 
+            semseg_sensor  : None,
+        })
+
+        lp = line_profiler.LineProfiler()
+        lp.add_function(game_viewer.run)
+        lp.add_function(game_viewer.step_world)
+        lp_wrapper = lp(game_viewer.run)
+
+        map_processor = Map(
+            world = virt_world,
+            rect_dim = RECT_DIM,
+            map_offset = MAP_OFFSET,
+            range_ = MAP_RANGE,
+            resize_to = MAP_RESIZE,
+            scale = MAP_SCALE,
+            relative_pos = "forward"
         )
-        lp.add_function(game_viewer.map_processor.retrieve_map)
-        lp_wrapper()
+        path_optimizer = OptimizePath(
+            virt_world, 
+            step = PATH_STEP, 
+            exclude_circle = EXCLUDE_PARAMS,
+        )
+        game_viewer.attach_plugins(path_optimizer = path_optimizer)
 
     if args.mode == "manual":
         virt_world.tm.ignore_signs_percentage(controlling_vehicle.vehicle, args.ignore_signs)
@@ -191,7 +355,8 @@ def main(args):
         )
         lp_wrapper()
 
-    lp.dump_stats("profile_results.lprof")
+    if lp is not None:
+        lp.dump_stats("profile_results.lprof")
     spawner.despawn_vehicles()
     
     
@@ -270,7 +435,7 @@ if __name__ == "__main__":
     replay_parser.add_argument(
         "--replay-dir",
         type = str,
-        default = "None",
+        nargs = "+",
         help = "Replay Carla recording (.log file path is needed, recording time of .npy must correspond to .log)",   
         required = True
     )
