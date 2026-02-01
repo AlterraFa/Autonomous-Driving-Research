@@ -142,7 +142,7 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
 
 
     
-    def __init__(self, world: carla.World, convert_to: SemanticData = None):
+    def __init__(self, world: carla.World, filter_labels = None, binarize = False, convert_to: SemanticData = None):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
 
@@ -155,6 +155,8 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
         self.num_label = len(list(CarlaLabel))
         self._lut_data = self._build_lut_rgba()
         
+        self.filter_labels = filter_labels
+        self.binarize = binarize
         self.convert_to = convert_to
         
     def extract_data(self):
@@ -164,18 +166,38 @@ class SemanticSegmentation(SensorCameraSemanticSegmentationStub, SensorSpawn):
         data = self.callback.get()
         labels = self.__decode_semantic_labels__(data)
 
-        
-        if self.convert_to is None:
+        if self.filter_labels is not None:
+            if not isinstance(self.filter_labels, (list, tuple, np.ndarray, set)):
+                 raise TypeError("filter_labels must be an iterable of allowed label IDs.")
+            
+            allowed_labels = set(self.filter_labels)
+            keep_mask = np.isin(labels, list(allowed_labels))
+            
+            filtered_labels = labels.copy() 
+            filtered_labels[~keep_mask] = 0
+            
+            labels = filtered_labels
+            
+        if self.binarize:
+            labels = self._binarize(labels)
             return labels
         
         sem_data = SemanticSegmentation.SemanticData(labels, lut = self._lut_data, num_label = self.num_label)
-        return self.convert_to(sem_data)
+        if self.convert_to:
+            return self.convert_to(sem_data)
+        else: return sem_data
     
     def _build_lut_rgba(self) -> np.ndarray:
         lut = np.zeros((self.num_label, 4), dtype=np.uint8)
         for k, (r, g, b) in self.palette.items():
             lut[k] = (r, g, b, 255)  # RGBA
         return lut
+    
+    def _binarize(self, labels: np.ndarray) -> np.ndarray:
+        if labels.ndim > 2:
+            raise ValueError("Binarization should be performed on the single-channel ID array, not the color image.")
+            
+        return np.where(labels != 0, 255, 0).astype(np.uint8)
             
 
     def __decode_semantic_labels__(self, carla_image: carla.Image) -> np.ndarray:
@@ -262,79 +284,63 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
                 )
             return " | ".join(parts)
     
-    def __init__(self, world: carla.World):
+    def __init__(self, world: carla.World, freq_hz=10, mu_ms=120, sigma_ms=10):
         super().__init__()
-        SensorSpawn.__init__(self, self.name, world)
-        
+        SensorSpawn.__init__(self, self.name, world, )
+        from collections import deque
 
         self.callback = Extractor({
             "lat": "latitude",
             "lon": "longitude",
             "alt": "altitude"
         })
-        
+
+        # WGS84 Constants (using more precise inverse flattening)
         self.a = 6378137.0
-        self.b = 6356752.3142
-        self.f = (self.a - self.b) / self.a
+        self.f = 1 / 298.257223563 
         self.e_sq = self.f * (2 - self.f)
-        self.origin, self.alt_offset = (42.0, 2.0, 2.036), 0
+
+        # Initialize origin with 0s, then calibrate
+        self.origin = (0.0, 0.0, 0.0)
+        self.alt_offset = 0.0
+        self._calibrate_origin(world)
 
         self._geodetic: Optional[GNSS.Geodetic] = None
         self._ecef: Optional[GNSS.ECEF] = None
         self._enu: Optional[GNSS.ENU] = None
         
+        self.world = world
+        self.sample_interval = 1.0 / freq_hz
+        self.next_sample_time = 0.0
+
+        # -- Latency Drift (Ornstein-Uhlenbeck)
+        self.mu = mu_ms / 1000.0
+        self.sigma = sigma_ms / 1000.0
+        self.theta = 0.05
+        self.current_latency = self.mu
+
+        self.delivery_queue = []
+        self.last_delivered_data = None
+        
     def _calibrate_origin(self, world: carla.World):
         """
-        Places a GNSS sensor at CARLA world origin (0,0,0) and
-        uses it to define ENU origin + altitude correction.
+        Queries the CARLA map metadata to find the exact, noiseless 
+        Geodetic coordinates for the world origin (0,0,0).
         """
-        blueprint = world.get_blueprint_library().find("sensor.other.gnss")
-        gnss = world.spawn_actor(blueprint, carla.Transform(carla.Location(0, 0, 2.0)))
+        carla_map = world.get_map()
+        
+        # transform_to_geolocation converts CARLA coordinates to Lat/Lon/Alt
+        # We query (0,0,0) to find the perfect reference point.
+        origin_geo = carla_map.transform_to_geolocation(carla.Location(x=0, y=0, z=0))
 
-        # Wait for one GNSS reading
-        data = None
-        def callback(event): nonlocal data; data = event
-        gnss.listen(callback)
-        world.tick()   # ensure at least one frame
-        gnss.stop()
-        gnss.destroy()
-
-        if data is None:
-            raise RuntimeError("Failed to calibrate GNSS origin.")
-
-        lat0, lon0, alt0 = data.latitude, data.longitude, data.altitude
-        z_carla = world.get_map().get_spawn_points()[0].location.z if world.get_map().get_spawn_points() else 0.0
-
-        alt_offset = alt0 - z_carla
-        return (lat0, lon0, alt0), alt_offset
-
-    
-    def extract_data(self, return_ecf = False, return_enu = False) -> GNSSData:
-        gdict = self.callback.get()
-        if gdict is None:
-            self._geodetic = self._ecef = self._enu = None
-            return GNSS.GNSSData()
-
-        # NOTE: refer to the inner classes via the class, not self.*
-        self._geodetic = GNSS.Geodetic(**gdict)
-        self._ecef = GNSS.ECEF(**self.geodetic_to_ecef(**gdict)) if return_ecf else None
-        self._enu  = GNSS.ENU(**self.geodetic_to_enu(**gdict))   if return_enu  else None
-
-        return GNSS.GNSSData(self._geodetic, self._ecef, self._enu)
-    
-    
-    @property
-    def geodetic(self): return self._geodetic
-
-    @property
-    def ecef(self): return self._ecef
-
-    @property
-    def enu(self): return self._enu
-
+        # self.origin[0]=Lat, [1]=Lon, [2]=Alt
+        self.origin = (origin_geo.latitude, origin_geo.longitude, origin_geo.altitude)
+        
+        # This ensures that when CARLA Z = 0, our ENU 'Up' also = 0.
+        self.alt_offset = origin_geo.altitude
 
     def geodetic_to_ecef(self, lat, lon, alt):
-        # Apply altitude correction to align CARLA Z with ENU Z
+        # Subtract the map's origin altitude so that CARLA Z=0 is our baseline
         alt_corrected = alt - self.alt_offset
 
         lamb = np.radians(lat)
@@ -351,34 +357,37 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
         y = (N + alt_corrected) * cos_lambda * sin_phi
         z = (N * (1 - self.e_sq) + alt_corrected) * sin_lambda
 
-        return {"x": float(x), "y": float(y), "z": float(z)}
+        return {"x": x, "y": y, "z": z}
     
     def ecef_to_enu(self, x, y, z):
+        # Coordinates of the origin in ECEF (using alt=0 because of alt_corrected)
         lamb = np.radians(self.origin[0])
         phi = np.radians(self.origin[1])
         s = np.sin(lamb)
         N = self.a / np.sqrt(1 - self.e_sq * s * s)
 
-        sin_lambda = np.sin(lamb)
         cos_lambda = np.cos(lamb)
-        sin_phi = np.sin(phi)
+        sin_lambda = np.sin(lamb)
         cos_phi = np.cos(phi)
+        sin_phi = np.sin(phi)
 
-        x0 = (self.origin[2] + N) * cos_lambda * cos_phi
-        y0 = (self.origin[2] + N) * cos_lambda * sin_phi
-        z0 = (self.origin[2] + (1 - self.e_sq) * N) * sin_lambda
+        # Reference ECEF at origin (0,0,0)
+        # Note: We use 0 for altitude here because geodetic_to_ecef already 
+        # normalized the incoming altitude relative to this origin's altitude.
+        x0 = N * cos_lambda * cos_phi
+        y0 = N * cos_lambda * sin_phi
+        z0 = N * (1 - self.e_sq) * sin_lambda
 
-        xd = x - x0
-        yd = y - y0
-        zd = z - z0
+        xd, yd, zd = x - x0, y - y0, z - z0
 
+        # Standard ECEF to ENU Rotation Matrix
         xEast = -sin_phi * xd + cos_phi * yd
         yNorth = -cos_phi * sin_lambda * xd - sin_lambda * sin_phi * yd + cos_lambda * zd
         zUp = cos_lambda * cos_phi * xd + cos_lambda * sin_phi * yd + sin_lambda * zd
 
         return {
             'east': float(xEast),
-            'north': float(-yNorth), # Remember that the axis is flipped
+            'north': float(-yNorth), # Correcting for CARLA's Left-Handed Y-axis
             'up': float(zUp)
         }
 
@@ -386,6 +395,70 @@ class GNSS(SensorOtherGnssStub, SensorSpawn):
         ecf = self.geodetic_to_ecef(lat, lon, alt)
         
         return self.ecef_to_enu(**ecf)
+    
+    def _update_latency_drift(self, dt):
+        """Changes the latency value slowly over time, not instantly."""
+        noise = self.sigma * np.sqrt(dt) * np.random.normal()
+        drift = self.theta * (self.mu - self.current_latency) * dt
+        self.current_latency += drift + noise
+        self.current_latency = np.clip(self.current_latency, 0.05, 0.25)
+    
+    
+    def extract_data(self) -> GNSSData:
+        snapshot = self.world.get_snapshot()
+        t = snapshot.timestamp.elapsed_seconds
+        dt = snapshot.timestamp.delta_seconds
+        
+        self._update_latency_drift(dt)
+
+        if t >= self.next_sample_time:
+            gdict = self.callback.get()
+            if gdict is  not None:
+
+                # NOTE: refer to the inner classes via the class, not self.*
+                self._geodetic = GNSS.Geodetic(**gdict)
+                self._ecef = GNSS.ECEF(**self.geodetic_to_ecef(**gdict))
+                self._enu  = GNSS.ENU(**self.geodetic_to_enu(**gdict))
+                
+                raw_data = GNSS.GNSSData(self._geodetic, self._ecef, self._enu)
+
+                delivery_time = t + self.current_latency
+
+                if self.delivery_queue and delivery_time < self.delivery_queue[-1][0]:
+                    delivery_time = self.delivery_queue[-1][0] + 0.001
+                self.delivery_queue.append((delivery_time, raw_data))
+                self.next_sample_time = t + self.sample_interval
+                
+        ready_packets = [data for arrival_t, data in self.delivery_queue if arrival_t <= t]
+        self.delivery_queue = [(arrival_t, data) for arrival_t, data in self.delivery_queue if arrival_t > t]    
+        
+        if ready_packets:
+            self.last_delivered_data = ready_packets[-1]
+            
+            self._geodetic = self.last_delivered_data.Geodetic
+            self._ecef = self.last_delivered_data.ECEF
+            self._enu = self.last_delivered_data.ENU
+
+        if self.last_delivered_data is not None:
+            return self.last_delivered_data
+        
+        gdict = self.callback.get()
+        geodetic = GNSS.Geodetic(**gdict)
+        ecef = GNSS.ECEF(**self.geodetic_to_ecef(**gdict))
+        enu  = GNSS.ENU(**self.geodetic_to_enu(**gdict))
+        return GNSS.GNSSData(geodetic, ecef, enu)
+         
+    
+    
+    @property
+    def geodetic(self): return self._geodetic
+
+    @property
+    def ecef(self): return self._ecef
+
+    @property
+    def enu(self): return self._enu
+
     
 from utils.stubs.sensor__other__imu_stub import SensorOtherImuStub
 class IMU(SensorOtherImuStub, SensorSpawn):
@@ -551,7 +624,7 @@ class Depth(SensorCameraDepthStub, SensorSpawn):
     
 from utils.stubs.sensor__camera__instance_segmentation_stub import SensorCameraInstanceSegmentationStub
 class InstanceSegmentation(SensorCameraInstanceSegmentationStub, SensorSpawn):
-    def __init__(self, world: carla.World, sat = 0.65):
+    def __init__(self, world: carla.World, sat = 0.65, convert_to = None):
         super().__init__()
         SensorSpawn.__init__(self, self.name, world)
         
@@ -559,6 +632,7 @@ class InstanceSegmentation(SensorCameraInstanceSegmentationStub, SensorSpawn):
         
         self.sat = sat
         self.cache = {}
+        self.convert_to = convert_to
         
     def extract_data(self):
         data = self.callback.get()
@@ -568,6 +642,9 @@ class InstanceSegmentation(SensorCameraInstanceSegmentationStub, SensorSpawn):
         g = image[:, :, 1].astype(np.uint32)
         r = image[:, :, 2].astype(np.uint32)
         ids = r + (g << 8) + (b << 16)          # 24-bit instance id
+
+        if self.convert_to is not None:
+            return self.convert_to(ids, sat=self.sat)
 
         return ids.astype(np.int32) 
     

@@ -18,8 +18,11 @@ max_distant_node = 500
 path_iter = 2
 
 [GPS]
-max_gps_delay = 50
-min_gps_delay = 10
+mean_delay = 550
+stddev_delay = 200
+lat_stddev = 1.0
+lon_stddev = 1.5
+frequency  = 10
 
 [UI]
 alpha       = 0.05  
