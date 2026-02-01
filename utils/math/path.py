@@ -12,7 +12,6 @@ import time
 
 from scipy.interpolate import interp1d
 from scipy.spatial import cKDTree
-from utils.messages.message_handler import MessagingSenders, MessagingSubscribers
 from utils.others.data_processor import CarlaDatasetCollector
 from utils.math.coordinate_transform import global_2_local
 from utils.messages.logger import Logger
@@ -242,13 +241,14 @@ class PathHandler(NodeFinder):
                         proj = a + np.clip(t_raw, 0.0, 1.0) * ab
                     best_i = i + 1
 
+        side_val = self.get_side(p, proj, a, b)
 
         d2 = np.dot(p - proj, p - proj)
         seg_len = np.linalg.norm(b - a)
         t = np.linalg.norm(proj - a) / (seg_len + 1e-12)
         s_star = float(self.s[best_i] + t * seg_len)
         
-        return s_star, proj, float(np.sqrt(d2)), idx / self.path_length
+        return s_star, proj, float(np.sqrt(d2)), idx / self.path_length, side_val
 
     @staticmethod
     def _edge_opposite_test(pt, A, B):
@@ -274,20 +274,84 @@ class PathHandler(NodeFinder):
         Q = A + t * AB
         return Q
 
-    def waypoints(self, position: np.ndarray, offsets: list[float], use_time: bool = False):
-        dist_travelled, *_ = self.project(position)
+    def get_side(self, p, proj, a, b):
+        forward = b - a
+        
+        up = np.array([0, 0, 1]) 
+        right_vec = np.cross(forward, up)
+        
+        norm = np.linalg.norm(right_vec)
+        if norm < 1e-9:
+            return 0.0
+        right_vec /= norm
+
+        error_vec = p - proj
+
+        side_dist = np.dot(error_vec, right_vec)
+        
+        return side_dist
+
+    def waypoints(self, position: np.ndarray, offsets: list[float], use_time: bool = False, merge = False):
+        dist_travelled, *_, side_val = self.project(position)
         if not use_time:
             dist_offset = dist_travelled + np.array(offsets)
             wp = self.pose(dist_offset)
         else: 
             if self.has_time == False:
                 self.log.ERROR(f"Temporal mode was disabled but you enabled `use_time` argument. Exiting...", exit_code = -1)
+                
             current_time = self.t_of_s(dist_travelled)
             time_offset = current_time + offsets
             wp = self.pose(time_offset, True)
+
+        if merge:
+            wp = self._apply_merging(wp, side_val, offsets)
                 
         wp = np.asarray(wp)
         return wp
+
+    def _apply_merging(self, centerline_wps: np.ndarray, current_side_val: float, offsets: list[float], merge_fraction: float = 1.0):
+        """
+        Shifts centerline waypoints laterally.
+        merge_fraction: 0.0 to 1.0. Determines how far into the offsets the path 
+                        should return to the centerline.
+        """
+        offsets_np = np.array(offsets)
+        horizon = offsets_np[-1] + 1e-6 
+        
+        # This is the distance at which we want to be perfectly at 0 offset
+        merge_target_dist = horizon * merge_fraction
+        
+        merged_pts = []
+        for i, p_center in enumerate(centerline_wps):
+            # 1. Calculate ratio relative to the merge_target_dist instead of full horizon
+            # We clip it at 1.0 so that points beyond the merge fraction stay at 0 offset
+            ratio = min(1.0, offsets_np[i] / (merge_target_dist + 1e-6))
+            
+            # 2. Quadratic decay
+            # If ratio is 1.0 (at or beyond merge point), decay is 0.0
+            decay = (1.0 - ratio) ** 2
+            active_offset = current_side_val * decay
+
+            # 3. Find the 'Right' vector
+            if i < len(centerline_wps) - 1:
+                tangent = centerline_wps[i+1] - p_center
+            else:
+                tangent = p_center - centerline_wps[i-1]
+
+            up = np.array([0, 0, 1]) 
+            right_vec = np.cross(tangent, up)
+            
+            norm = np.linalg.norm(right_vec)
+            if norm > 1e-6:
+                right_vec /= norm
+                p_merged = p_center + (right_vec * active_offset)
+            else:
+                p_merged = p_center
+                
+            merged_pts.append(p_merged)
+
+        return merged_pts
         
 class BranchingPath:
     def __init__(self, world: World):
@@ -490,27 +554,36 @@ class TurnClassify:
 
         return self.signal
 
-class ReplayHandler(MessagingSubscribers, MessagingSenders):
+from utils.messages.message_handler import MessageSubscriber, MessageSender
+from utils.messages.all_messages import (
+    Location,
+    Heading,
+    ServerFps,
+    ClientFps,
+    SteerLog,
+    Velocity,
+    BrakeLog,
+    ThrottleLog,
+    TurnSignal
+)
+class ReplayHandler:
 
-    turn_classify = True
+    turn_classify = False
+    __slot__ = ["road_type"]
     
     def __init__(self, world: World, true_trajectories: str, midlane_waypoints: np.ndarray = None, data_collect_dir: str = None, use_temporal: bool = False, debug: bool = False):
-        MessagingSubscribers.__init__(self)
-        MessagingSenders.__init__(self)
+        self.logger = Logger()
         
         self.true_trajectories = true_trajectories
-        self.path_handler = PathHandler(self.true_trajectories)
-        if midlane_waypoints is not None:
-            print("Midlane waypoints found as an extra data")
-            self.midlane_handler = PathHandler(midlane_waypoints)
+        self.path_handler = PathHandler(midlane_waypoints)
         self.debug = debug
         self.virt_world = world
         self.use_temporal = use_temporal
         self.scout_points = [i for i in range(*scout_offset_params)]
         if not self.use_temporal:
-            self.offset   = temporal_offset
-        else:
             self.offset   = spatial_offset
+        else:
+            self.offset   = temporal_offset
         self.turn_classifier = TurnClassify(world=world, threshold_deg=15)
         self.branching_path  = BranchingPath(self.virt_world)
         self.data_collector = None
@@ -520,9 +593,22 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
         self.prev_dist = 0
         self.additional_max = 20; self.addition_cnt = 0
         self.start_time = time.time()
+        self._init_transmittor()
+
+    def _init_transmittor(self):
+        self.sub_location = MessageSubscriber(Location)
+        self.sub_heading  = MessageSubscriber(Heading)
+        self.sub_server_fps = MessageSubscriber(ServerFps)
+        self.sub_client_fps = MessageSubscriber(ClientFps)
+        self.sub_steer_logging = MessageSubscriber(SteerLog)
+        self.sub_throttle_logging = MessageSubscriber(ThrottleLog)
+        self.sub_brake_logging    = MessageSubscriber(BrakeLog)
+        self.sub_velocity         = MessageSubscriber(Velocity)
+        self.send_turn_signal     = MessageSender(TurnSignal)
+        
 
     def step(self, **frame: np.ndarray):
-        vehicle_location = self.sub_location.receive() # The pivot point
+        vehicle_location = self.sub_location.receive()
 
         # Convert yaw from degrees to radians for math functions
         heading  = np.radians(self.sub_heading.receive())
@@ -545,31 +631,29 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
         
         
         
-        global_wp = self.path_handler.waypoints(
-            position, self.offset, use_time = self.use_temporal
-        )
-        ego_wp = global_2_local(vehicle_location, global_wp, heading)
         curr_dist, *_ = self.path_handler.project(position)
+        mid_global_scout = self.path_handler.waypoints(
+            position, self.scout_points
+        )
         
-        if hasattr(self, "midlane_handler"):
-            mid_global_scout = self.midlane_handler.waypoints(
-                position, self.scout_points
-            )
-            mid_global = self.midlane_handler.waypoints(
-                position, self.offset, use_time = self.use_temporal
-            )
-            mid_ego = global_2_local(vehicle_location, mid_global, heading)
-            
-            path_branches  = self.branching_path.brancher(mid_global, mid_global_scout, persist_dist = 10)
-            ego_branches = np.empty_like(path_branches)[..., :2]
-            for idx, branch in enumerate(path_branches):
-                ego_branches[idx] = global_2_local(vehicle_location, branch, heading)
+        mid_global = self.path_handler.waypoints(
+            position, self.offset, use_time = self.use_temporal, merge = False
+        )
+        mid_ego = global_2_local(vehicle_location, mid_global, heading)
+        
+        path_branches  = self.branching_path.brancher(mid_global, mid_global_scout, persist_dist = 20)
+        ego_branches = np.empty_like(path_branches)[..., :2]
+        if path_branches.shape[0] > 1:
+            self.road_type = "multi"
+        else:
+            self.road_type = "uni"
+        for idx, branch in enumerate(path_branches):
+            ego_branches[idx] = global_2_local(vehicle_location, branch, heading)
                 
                 
         if self.debug:
-            # for path in path_branches:
-            #     self.virt_world.draw_waypoints(path, 1.5 * (1 / server_fps), size = .1, color = (255, 0, 0))
-            self.virt_world.draw_waypoints(mid_global, 1.5 * (1 / server_fps), size = .1)
+            for path in path_branches:
+                self.virt_world.draw_waypoints(path, 1.5 * (1 / server_fps), size = .1, color = (255, 0, 0))
 
         if self.turn_classify:
             global_scout = self.path_handler.waypoints(
@@ -592,7 +676,6 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
                 velocity = self.sub_velocity.receive()
                 saved = self.data_collector.maybe_save(
                     {
-                        "exp_wp"     : ego_wp,
                         "midlane_wp" : mid_ego,
                         "aux_wp"     : ego_branches,
                         "steer"      : steer,
@@ -600,6 +683,9 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
                         "brake"      : brake,
                         "velocity"   : velocity,
                         "turn_signal": turn_signal,
+                        "GPS"        : vehicle_location,
+                        "IMU_radian" : heading,
+                        "road_type"  : self.road_type,
                         "timestamp"  : time.time() - self.start_time
                     },
                     **frame
@@ -610,6 +696,7 @@ class ReplayHandler(MessagingSubscribers, MessagingSenders):
             if curr_dist - self.prev_dist > 1e-2:
                 self.addition_cnt = 0
             self.prev_dist = curr_dist
+        return mid_ego
 
 
 def consecutive_angles(points: np.ndarray, signed: bool = False) -> np.ndarray:

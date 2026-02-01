@@ -1,16 +1,45 @@
+import os
 import cv2
 import carla
 import numpy as np
+import toml
 
+script_path = os.path.abspath(__file__)
+folder = os.path.dirname(script_path)
+parent = os.path.dirname(folder)
+
+from collections import deque
+from typing import Literal
 from utils.control.world import World
 from utils.messages.logger import Logger
 from utils.math.path import _find_entry_clusters, _find_exit, waypoints_between, PathHandler
+from utils.math.coordinate_transform import global_2_local
 from scipy.spatial import cKDTree
+from utils.messages.all_messages import (
+    PolylinesCmd,
+    Enu,
+    Heading
+)
+from utils.messages.message_handler import MessageSubscriber, MessageSender
 
+conf = toml.load(os.path.join(parent, "../config/config.toml"))
+
+gps_conf = conf.get("GPS", {})
+MAX_GPS_DELAY = gps_conf.get("max_gps_delay", 60)
+MIN_GPS_DELAY = gps_conf.get("min_gps_delay", 10)
 class Map:
-    def __init__(self, world: World, rect_dim: tuple = (1, 1), map_offset: tuple = (0, 0), range_ = (50, 50), resize_to = (200, 200), scale: int = 10, invert_color = False):
+    def __init__(self, 
+                 world: World, 
+                 rect_dim: tuple = (1, 1), 
+                 map_offset: tuple = (0, 0), 
+                 range_ = (50, 50), 
+                 resize_to = (200, 200), 
+                 scale: int = 10, 
+                 relative_pos: Literal["forward", "center"] = "center", 
+                 invert_color = False):
         self.log = Logger()
         self.world = world
+        self.relative_pos = relative_pos
 
         carla_map = world.world.get_map()
         waypoints = carla_map.generate_waypoints(distance=2.0)
@@ -55,8 +84,15 @@ class Map:
         self._wp_list = list(self.wp_dict.values())
         self._wps = np.array([[wp.transform.location.x, wp.transform.location.y] for wp in self._wp_list])
         self._tree = cKDTree(self._wps)
+        self.gps_buffer = deque(maxlen = MAX_GPS_DELAY)
 
         self._render_map(invert = invert_color)
+        self._init_transmission()
+    
+    def _init_transmission(self):
+        self.poly_pub    = MessageSender(PolylinesCmd)
+        self.enu_sub     = MessageSubscriber(Enu)
+        self.heading_sub = MessageSubscriber(Heading)
         
     def precompute_waypoints(self, trajectories: np.ndarray):
         
@@ -66,7 +102,10 @@ class Map:
 
         # Always keep first point, then keep if distance > tol
         self.path_handler = PathHandler(points, extrapolate = False)
-        self.offset_path  = [i for i in range(-70, 70, 3)]
+        if self.relative_pos == "forward":
+            self.offset_path  = [i for i in range(-10, 70, 3)]
+        elif self.relative_pos == "center":
+            self.offset_path  = [i for i in range(-50, 50, 3)]
 
         points[:, -1] = trajectories[:, -1] # replace with time data
         return points
@@ -105,20 +144,26 @@ class Map:
             self.map_image = 255 - self.map_image
             
     
-    def retrieve_map(self, coordinate, heading, display = False):
+    def retrieve_map(self, display = False):
         """Instead of drawing on the larger self.map_image, we draw on the smaller cutout image and apply waypoints transformation"""
-        x, y, _ = coordinate
-        before_scale = np.array(coordinate)
+
+        location = self.enu_sub.receive()
+        location_bfscale = location.copy()
+        heading  = self.heading_sub.receive()
+        heading_rad = np.radians(heading)
 
         # ================ Retrieve Submap ======================
         # Retrieve the normal submap with the same transformation as __init__
         if display:
-            x = int(x * self.scale + self.offset_x)
-            y = int(y * self.scale - self.old_min_y + self.offset_y)
+            x = int(location[0] * self.scale + self.offset_x)
+            y = int(location[1] * self.scale - self.old_min_y + self.offset_y)
             
             H, W, _ = self.map_image.shape
             w, h = self.range
-            radius = int(((w / 2) ** 2 + (h / 2) ** 2) ** 0.5)
+            if self.relative_pos == "forward":
+                radius = int((((w / 2) ** 2 + (h / 2) ** 2) ** 0.5) * 2.0)
+            elif self.relative_pos == "center":
+                radius = int(((w / 2) ** 2 + (h / 2) ** 2) ** 0.5)
 
             # clamp once
             x1, x2 = max(0, x - radius), min(W, x + radius)
@@ -126,22 +171,25 @@ class Map:
 
             # First cutout uses radius to avoid missing lanes during rotation
             cutout = self.map_image[y1:y2, x1:x2]
-
             cx, cy = x - x1, y - y1
-            cos_t, sin_t = np.cos(np.deg2rad(heading)), np.sin(np.deg2rad(heading))
+            cos_t, sin_t = np.cos(heading_rad), np.sin(heading_rad)
             M = np.float32([[cos_t, sin_t, (1 - cos_t) * cx - sin_t * cy],
                             [-sin_t, cos_t, sin_t * cx + (1 - cos_t) * cy]])
-
+                            
             # Much faster because overhead offload to GPU
-            rotated = cv2.warpAffine(cutout, M, (cutout.shape[1], cutout.shape[0]))
-            # gpu_img = cv2.cuda_GpuMat()
-            # gpu_img.upload(cutout)
-            # rotated = cv2.cuda.warpAffine(gpu_img, M, (cutout.shape[1], cutout.shape[0]))
-            # rotated = rotated.download()
+            # rotated = cv2.warpAffine(cutout, M, (cutout.shape[1], cutout.shape[0]))
+            gpu_img = cv2.cuda_GpuMat()
+            gpu_img.upload(cutout)
+            rotated = cv2.cuda.warpAffine(gpu_img, M, (cutout.shape[1], cutout.shape[0]))
+            rotated = rotated.download()
 
             # one precise crop
-            x1f, x2f = max(0, cx - w // 2), min(rotated.shape[1], cx + w // 2)
-            y1f, y2f = max(0, cy - h // 2), min(rotated.shape[0], cy + h // 2)
+            if self.relative_pos == "center":
+                x1f, x2f = max(0, cx - w // 2), min(rotated.shape[1], cx + w // 2)
+                y1f, y2f = max(0, cy - h // 2), min(rotated.shape[0], cy + h // 2)
+            elif self.relative_pos == "forward":
+                x1f, x2f = max(0, cx - w // 2), min(rotated.shape[1], cx + w // 2)
+                y1f, y2f = max(0, cy - h), min(rotated.shape[0], cy)
 
             # Second cutout to refine to the correct range
             cutout = rotated[y1f:y2f, x1f:x2f]
@@ -153,8 +201,11 @@ class Map:
             # Extract the waypoints using interpolation, globals only, locals waypoints embedded in waypoint code will mess up rotation and transformation
             # We don't need yaw, yaw = 0 is a dummy value        
             global_wp = self.path_handler.waypoints(
-                before_scale, self.offset_path
+                location_bfscale, self.offset_path
             )
+            
+            local_wp = global_2_local(location, global_wp, heading_rad)
+            self.poly_pub.send(local_wp)
             
             if display:
                 pts_world = np.atleast_2d(global_wp)[:, :2].astype(float)  # (N,2)

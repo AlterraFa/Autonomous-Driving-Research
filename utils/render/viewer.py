@@ -1,7 +1,5 @@
 import os, sys
 import toml
-from datetime import datetime
-import csv
 script_path = os.path.abspath(__file__)
 folder = os.path.dirname(script_path)
 parent = os.path.dirname(folder)
@@ -10,11 +8,11 @@ import pygame
 import numpy as np
 import time
 import gc
-import line_profiler
 
 
 from utils.control.world import World
 from utils.control.controller import Controller
+from utils.control.sensor_manager import SensorManager
 from utils.render.hud import HUD, draw_border, overlay_waypoints_on_map, overlay_gmm_on_map
 from utils.control.vehicle_control import Vehicle
 from utils.control.pid import lateral_control, longitudinal_speed
@@ -26,8 +24,37 @@ from config.enum import (
     KEYBINDS, 
 )
 from utils.messages.message_handler import (
-    MessagingSenders,
-    MessagingSubscribers 
+    MessageSubscriber,
+    MessageSender
+)
+from utils.messages.all_messages import (
+    PolylinesCmd,
+    ServerFps,
+    ClientFps,
+    VehicleName,
+    WorldName,
+    Velocity,
+    Heading,
+    Accel,
+    Gyro,
+    Enu,
+    Geo,
+    ClientRuntime,
+    ServerRuntime,
+    Location,
+    TurnSignal,
+    ModelSteer,
+    ModelSpeed,
+    ModelAutopilot,
+    ThrottleLog,
+    SteerLog,
+    BrakeLog,
+    ReverseLog,
+    HandbrakeLog,
+    ManualLog,
+    GearLog,
+    AutopilotLog,
+    RegulateSpeedLog,
 )
 from utils.messages.logger import Logger
 
@@ -51,10 +78,6 @@ MIN_DISTANT_NODE = path_conf.get("min_distant_node", 20)
 MAX_DISTANT_NODE = path_conf.get("max_distant_node", 500)
 PATH_ITER        = path_conf.get("path_iter", 5)
 
-gps_conf = conf.get("GPS", {})
-MAX_GPS_DELAY = gps_conf.get("max_gps_delay", 60)
-MIN_GPS_DELAY = gps_conf.get("min_gps_delay", 10)
-
 ui_conf = conf.get("UI", {})
 FONT_SIZE = ui_conf.get("font_size", 12)
 FONT_NAME = ui_conf.get("font_name", "arial")
@@ -63,13 +86,11 @@ offset_conf = conf.get("Offsets", {})
 front_vehicle_offset = conf.get("front_vehicle_offset", 1.5)
 
 
-class CarlaViewer(MessagingSenders, MessagingSubscribers):
+class CarlaViewer(object):
     override_render_map = False
 
     def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, headless = False, sync: bool = False, fps: int = 70, duration: tuple = None):
         self.log = Logger() 
-        MessagingSenders.__init__(self)
-        MessagingSubscribers.__init__(self)
 
         if headless:
             self.log.WARNING("HEADLESS MODE [bold][red][u]ENABLED[/][/][/]")
@@ -98,12 +119,14 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.clock: Optional[pygame.time.Clock] = None
         self.world_clock: Optional[pygame.time.Clock] = None
 
+        if self.headless and not pygame.get_init():
+            pygame.init()
+
         self.init_win()
 
         self.running = False
         self.rgb_sensor = None  
-        self.sensors_list: Dict[str, Union[RGB, Depth, SemanticSegmentation, GNSS, IMU, LidarRaycast]] = {}
-        self.camera_keys = []
+        self.sensor_manager = SensorManager(logger=self.log)
         
         self.controller = Controller()
         self.hud = HUD(display = self.display, fontName = "jetbrainsmononerdfontpropo", fontSize = FONT_SIZE, height = self.height, headless = headless)
@@ -115,11 +138,49 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         self.pbar          : tqdm             = None
         self.map_processor : Map              = None
         self.path_optimizer: OptimizePath     = None 
-        self.gps_buffer    : deque            = deque(maxlen = MAX_GPS_DELAY)
         
-        self.collision = InfractionManager(self.virt_world.world, self.virt_vehicle.vehicle)
+        # Initialize all message senders and subscribers
+        self._init_transmittor()
         
+    def _init_transmittor(self):
+        """Initialize all message senders and subscribers eagerly"""
+        # Senders for telemetry data
+        self.send_server_fps = MessageSender(ServerFps)
+        self.send_client_fps = MessageSender(ClientFps)
+        self.send_vehicle_name = MessageSender(VehicleName)
+        self.send_world_name = MessageSender(WorldName)
+        self.send_velocity = MessageSender(Velocity)
+        self.send_heading = MessageSender(Heading)
+        self.send_accel = MessageSender(Accel)
+        self.send_gyro = MessageSender(Gyro)
+        self.send_enu = MessageSender(Enu)
+        self.send_geo = MessageSender(Geo)
+        self.send_client_runtime = MessageSender(ClientRuntime)
+        self.send_server_runtime = MessageSender(ServerRuntime)
+        self.send_location = MessageSender(Location)
         
+        # Senders for control logging
+        self.send_model_autopilot_logging = MessageSender(ModelAutopilot)
+        self.send_autopilot_logging = MessageSender(AutopilotLog)
+        self.send_regulate_speed_logging = MessageSender(RegulateSpeedLog)
+        self.send_throttle_logging = MessageSender(ThrottleLog)
+        self.send_steer_logging = MessageSender(SteerLog)
+        self.send_brake_logging = MessageSender(BrakeLog)
+        self.send_reverse_logging = MessageSender(ReverseLog)
+        self.send_handbrake_logging = MessageSender(HandbrakeLog)
+        self.send_manual_logging = MessageSender(ManualLog)
+        self.send_gear_logging = MessageSender(GearLog)
+        
+        # Senders for model predictions
+        self.send_model_steer = MessageSender(ModelSteer)
+        self.send_model_speed = MessageSender(ModelSpeed)
+        
+        # Subscribers
+        self.sub_location = MessageSubscriber(Location)
+        self.sub_heading = MessageSubscriber(Heading)
+        self.sub_turn_signal = MessageSubscriber(TurnSignal)
+        self.sub_server_runtime = MessageSubscriber(ServerRuntime)
+        self.sub_polylines = MessageSubscriber(PolylinesCmd)
 
     def attach_plugins(self, **plugins):
         for name, value in plugins.items():
@@ -131,11 +192,13 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
     def init_sensor(self, sensors_metadata: dict):
         """Lazy initialize sensors"""
         for sensor, transform in sensors_metadata.items():
+            sensor_name = sensor.name.split(".")[-1]
+            sensor_type = sensor.name.split(".")[1]
+            
             # If sensor is a camera, set default image size
-            if sensor.name.split(".")[1] == 'camera':
+            if sensor_type == 'camera':
                 sensor.set_attribute("image_size_x", self.width)
                 sensor.set_attribute("image_size_y", self.height)
-                self.camera_keys.append(sensor.name.split(".")[-1])
                 if transform is None:
                     transform = CameraView.FIRST_PERSON.value  # default camera transform
             else:
@@ -144,25 +207,33 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
 
             # Spawn sensor with transform
             sensor.spawn(attach_to=self.vehicle, **transform)
-            self.sensors_list[sensor.name.split(".")[-1]] = sensor
+            
+            # Register with sensor manager
+            self.sensor_manager.register_sensor(sensor_name, sensor, sensor_type)
 
-        # Set first camera as active
-        if self.camera_keys:
-            self.active_cam_idx = 0
-            self.choosen_sensor = self.sensors_list[self.camera_keys[self.active_cam_idx]]
-            self.log.INFO(f"Defaulting to {self.choosen_sensor.literal_name}")
+        # Log sensor summary and set initial choosen_sensor
+        if self.sensor_manager.camera_keys:
+            self.log.INFO(f"Defaulting to {self.sensor_manager.active_camera}")
+            self.choosen_sensor = self.sensor_manager.get_sensor(self.sensor_manager.active_camera)
 
     def switch_camera(self, step=1):
         """Switch between camera sensors"""
-        if not self.camera_keys:
-            return
+        new_camera = self.sensor_manager.switch_camera(step)
+        if new_camera:
+            sensor = self.sensor_manager.get_sensor(new_camera)
+            if sensor:
+                self.choosen_sensor = sensor
 
-        self.active_cam_idx = (self.active_cam_idx + step) % len(self.camera_keys)
+    # ============ BACKWARD COMPATIBILITY PROPERTIES ============
+    @property
+    def sensors_list(self):
+        """Backward compatibility: access sensors_list"""
+        return self.sensor_manager.sensors_list
 
-        cam_name = self.camera_keys[self.active_cam_idx]
-        self.choosen_sensor = self.sensors_list[cam_name]
-
-        self.log.DEBUG(f"Switched to camera - [bold]{self.choosen_sensor.literal_name}[/]")
+    @property
+    def camera_keys(self):
+        """Backward compatibility: access camera_keys"""
+        return self.sensor_manager.camera_keys
 
     def init_win(self, title: str = "CARLA Camera") -> None:
         if self.headless:
@@ -187,103 +258,10 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         else:
             self.world.wait_for_tick()
             
-            
     def change_view_all(self, view_name: str):
         for camera_name in self.camera_keys:
             self.sensors_list[camera_name].change_view(**getattr(CameraView, view_name).value)
     
-    def data_bus(self, filter_ctrl=False):
-        snapshot = self.world.get_snapshot()
-        current_platform_time = snapshot.timestamp.platform_timestamp  # server wall clock
-        if self.last_platform_time is not None:
-            dt_real = current_platform_time - self.last_platform_time
-            self.server_fps = 1.0 / dt_real if dt_real > 0 else 0
-        self.last_platform_time = current_platform_time
-
-        # Extract sensor data with safe fallback
-        try:
-            heading = self.sensors_list['imu'].extract_data().Compass * 180 / np.pi
-        except:
-            heading = "N/A"
-        try:
-            accel = self.sensors_list['imu'].extract_data().Acceleration
-        except:
-            accel = "N/A"
-        try:
-            gyro = self.sensors_list['imu'].extract_data().Gyroscope
-        except:
-            gyro = "N/A"
-        try:
-            enu = self.sensors_list['gnss'].extract_data(return_ecf=True, return_enu=True).ENU
-        except:
-            enu = "N/A"
-        try:
-            geo = self.sensors_list['gnss'].extract_data(return_ecf=True, return_enu=True).Geodetic
-        except:
-            geo = "N/A"
-
-        self.heading = np.radians(heading) if isinstance(heading, (int, float)) else heading
-        self.enu = enu
-
-        client_runtime = time.time() - self.client_start
-        server_runtime = snapshot.timestamp.elapsed_seconds - self.server_start
-
-        # Velocity fallback
-        self.velocity = self.virt_vehicle.get_velocity(False)
-
-        #  Publish to subscribers
-        self.send_server_fps.send(self.server_fps)
-        self.send_client_fps.send(self.clock.get_fps())
-        self.send_vehicle_name.send(self.vehicle_name)
-        self.send_world_name.send(self.world_name)
-        self.send_velocity.send(self.velocity)
-        self.send_heading.send(np.degrees(self.heading))
-        self.send_accel.send(accel)
-        self.send_gyro.send(gyro)
-        self.send_enu.send(enu.to_numpy())
-        self.send_geo.send(geo.to_numpy())
-        self.send_client_runtime.send(client_runtime)
-        self.send_server_runtime.send(server_runtime)
-        vehicle_loc = self.vehicle.get_location()
-        self.send_location.send(np.array([vehicle_loc.x, vehicle_loc.y, vehicle_loc.z]))
-
-        self.ctrl = self.virt_vehicle.get_ctrl(filter_ctrl)
-        self.send_model_autopilot_logging.send(self.ctrl['model_autopilot'])
-        self.send_autopilot_logging.send(self.ctrl['autopilot'])
-        self.send_regulate_speed_logging.send(self.ctrl['regulate_speed'])
-        self.send_throttle_logging.send(self.ctrl['throttle'])
-        self.send_steer_logging.send(self.ctrl['steer'])
-        self.send_brake_logging.send(self.ctrl['brake'])
-        self.send_reverse_logging.send(self.ctrl['reverse'])
-        self.send_handbrake_logging.send(self.ctrl['handbrake'])
-        self.send_manual_logging.send(self.ctrl['manual'])
-        self.send_gear_logging.send(self.ctrl['gear'])
-        
-    def generate_randpath(self):
-        self.log.INFO("CREATING RANDOM PATH FOR MAP")
-        prev_loc = np.array([self.vehicle.get_location().x, self.vehicle.get_location().y])
-        extended_path = None
-        for _ in range(PATH_ITER):
-            while True:
-                distant_nodes = self.path_optimizer.find_distant_nodes(prev_loc, np.random.randint(MIN_DISTANT_NODE, MAX_DISTANT_NODE), max_distance = MAX_DISTANT_NODE)
-                if distant_nodes:
-                    rand_node = np.random.randint(0, len(distant_nodes))
-                    fartest_id, farthes_distance, farthest_pos = distant_nodes[rand_node]
-                    break
-
-            farthest_pos = np.array(list(farthest_pos))
-            nodes, path_coor = self.path_optimizer.plan_path(
-                prev_loc, 
-                farthest_pos
-            )
-            path_coor = np.hstack([path_coor, np.zeros((path_coor.shape[0], 1))])
-            if extended_path is None:
-                extended_path = path_coor
-            else:
-                extended_path = np.vstack([extended_path, path_coor])
-            prev_loc = farthest_pos
-        return extended_path
-        
     # WARNING: REMEMBER TO CHECK COLOR CHANNEL
     def run(self) -> None:
 
@@ -293,33 +271,17 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
             if self.replayer is None:
                 random_path = self.generate_randpath()
                 midlane_wp = self.map_processor.precompute_waypoints(random_path)
-                path_handler = PathHandler(midlane_wp, extrapolate = False)
-
-                # current_time = datetime.now().strftime("%Y_%m_%d|%H_%M_%S")
-                # np.save(f"store/PilotNet_path_{current_time}", random_path)
 
             frame_id = 0
             while True if self.headless else self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
                 self.step_world()
                 self.data_bus(self.replayer != None)
                 
-                frame = self.choosen_sensor.extract_data()
+                if not self.headless:
+                    frame = self.choosen_sensor.extract_data()
 
 
-                location = self.sub_location.receive()
-                heading  = self.sub_heading.receive()
-
-                # self.collision.tick()
-                # dist_travelled, _, deviation, completion = path_handler.project(location)
-                # print(f"Distance travelled: {dist_travelled:.2f}", f"Deviation: {deviation:.2f}", f"Route Completion: {completion * 100:.2f}%", end = '\r')
-                # with open(f"store/PilotNet_{current_time}.txt", "a") as f:
-                #     f.write(f"{dist_travelled}, {deviation}, {completion * 100}, {location}\n")
-                
-                self.gps_buffer.append(location) # THIS DELAY ALSO CONFIRMS THAT THE MODEL IS TOO DEPENDANT ON ROUTED MAP
-                choose_delay = np.random.randint(0, min(MIN_GPS_DELAY, len(self.gps_buffer)))
                 unrouted_map, old_map = self.map_processor.retrieve_map(
-                    coordinate = self.gps_buffer[choose_delay] + (np.random.randn(3) - .5) * .1,  # Introduce some noise to the GPS map 
-                    heading = heading, 
                     display = self.controller.toggle_map or self.replayer is not None or self.override_render_map
                 )
                 if frame_id % 1 == 0:
@@ -371,14 +333,16 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                     self.traj_logger.update(front_location)
                 if self.replayer: # in replaying mode
 
-                    frame_cutout = frame
-                    image_kwargs = (
-                        {"I0": frame_cutout} |
-                        {"MU": unrouted_map, "MR": routed_map[:, :, ::-1]} 
-                    )
+                    if self.replayer.data_collector: 
+                        image_kwargs = (
+                            {"I0": self.sensor_manager.get_sensor_data("rgb")} |
+                            {"Mask": self.sensor_manager.get_sensor_data("semantic_segmentation")} |
+                            {"MU": unrouted_map, "MR": routed_map[:, :, ::-1]} 
+                        )
 
-                    self.replayer.step(**image_kwargs)
-                    
+                        self.replayer.step(**image_kwargs)
+                    else: 
+                        self.replayer.step()
                 
 
                 if self.inference and self.controller.model_autopilot: # in inference mode
@@ -386,14 +350,14 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                     if frame_id % 1 == 0:
                         input_metadata = {
                             "I0": frame,
-                            # "MU": unrouted_map,
-                            # "MR": routed_map,
+                            "MU": unrouted_map,
+                            "MR": routed_map,
                         }
                         if "multi_images_list" in locals(): 
                             for idx, image in enumerate(multi_images_list):
                                 input_metadata[f"I{idx + 1}"] = image
 
-                        inp = self.inference.pytorch.preprocessor(**input_metadata) # VENL preprocessor
+                        inp, debug = self.inference.pytorch.preprocessor(**input_metadata) # VENL preprocessor
                         self.inference.put(inp, self.sub_turn_signal.receive())
                         output = self.inference.get()
                         if output is not None:
@@ -412,8 +376,6 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                                     self.send_model_speed.send(float(speed))
                                     self.send_model_steer.send(norm_steer)
 
-                        
-            
                 # ======================== RENDER ==========================
                 if not self.headless:
                     self.hud.draw_frame(frame)
@@ -432,18 +394,18 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
                             try:
                                 if 'extra' in locals() and len(extra) == 3:
                                     weights, muys, sigmas = extra
-                                    routed_map = overlay_gmm_on_map(
-                                        map_img = routed_map,
-                                        weights = weights.copy(), 
-                                        mu      = muys.copy(),
-                                        sigma   = sigmas.copy(),
-                                        scale       = self.map_processor.final_scale,   # (px/m_fwd, px/m_lat)
-                                        alpha       = 2.5,
-                                        n_std       = 1.0,
-                                        swap_axes   = True,         # match your [lat, fwd] convention
-                                        flip_lat    = False,
-                                        origin      = "center"
-                                    )
+                                    # routed_map = overlay_gmm_on_map(
+                                    #     map_img = routed_map,
+                                    #     weights = np.exp(weights.copy()), 
+                                    #     mu      = muys.copy(),
+                                    #     sigma   = sigmas.copy(),
+                                    #     scale       = self.map_processor.final_scale,   # (px/m_fwd, px/m_lat)
+                                    #     alpha       = .1,
+                                    #     n_std       = 1.0,
+                                    #     swap_axes   = True,         # match your [lat, fwd] convention
+                                    #     flip_lat    = False,
+                                    #     origin      = "center"
+                                    # )
                             finally: 
                                 ...
 
@@ -497,14 +459,6 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
             if self.inference is not None:
                 self.inference.stop()
                 
-            final_scr = self.collision.get_infraction_rate()
-            print(f"----------------------------------------------------")
-            print(f"Evaluation Run Finished.")
-            print(f"Total Off-Road Infractions: {self.collision.infraction_count}")
-            print(f"Total Distance Driven: {self.collision.total_distance / 1000.0:.2f} km")
-            print(f"Final Off-Road Infraction Rate: {final_scr:.2f} infractions / 1k km")
-            print(f"----------------------------------------------------")
-
     def close(self) -> None:
         
         print()
@@ -516,14 +470,109 @@ class CarlaViewer(MessagingSenders, MessagingSubscribers):
         # self.step_world_th.join()
 
         try:
-            if pygame.get_init():
+            if not self.headless and pygame.get_init():
                 pygame.quit()
                 self.log.CUSTOM("SUCCESS", "Pygame closed successfully!")
+            elif self.headless:
+                self.log.INFO("Headless mode: keeping pygame alive for next run")
         except Exception as e:
             self.log.ERROR("Pygame quit failed", full_traceback = e)
             
-        gc.collect()
 
+    def data_bus(self, filter_ctrl=False):
+        snapshot = self.world.get_snapshot()
+        current_platform_time = snapshot.timestamp.platform_timestamp  # server wall clock
+        if self.last_platform_time is not None:
+            dt_real = current_platform_time - self.last_platform_time
+            self.server_fps = 1.0 / dt_real if dt_real > 0 else 0
+        self.last_platform_time = current_platform_time
+
+        # Extract sensor data with safe fallback
+        imu_data = self.sensor_manager.get_sensor_data('imu')
+        try:
+            heading = imu_data.Compass * 180 / np.pi if imu_data else "N/A"
+        except:
+            heading = "N/A"
+        try:
+            accel = imu_data.Acceleration if imu_data else "N/A"
+        except:
+            accel = "N/A"
+        try:
+            gyro = imu_data.Gyroscope if imu_data else "N/A"
+        except:
+            gyro = "N/A"
+        
+        gnss_data = self.sensor_manager.get_sensor_data('gnss')
+        try:
+            enu = gnss_data.ENU if gnss_data else "N/A"
+        except:
+            enu = "N/A"
+        try:
+            geo = gnss_data.Geodetic if gnss_data else "N/A"
+        except:
+            geo = "N/A"
+
+        self.heading = np.radians(heading) if isinstance(heading, (int, float)) else heading
+        self.enu = enu
+
+        client_runtime = time.time() - self.client_start
+        server_runtime = snapshot.timestamp.elapsed_seconds - self.server_start
+
+        # Velocity fallback
+        self.velocity = self.virt_vehicle.get_velocity(False)
+
+        #  Publish to subscribers
+        self.send_server_fps.send(self.server_fps)
+        self.send_client_fps.send(self.clock.get_fps())
+        self.send_vehicle_name.send(self.vehicle_name)
+        self.send_world_name.send(self.world_name)
+        self.send_velocity.send(self.velocity)
+        self.send_heading.send(np.degrees(self.heading))
+        self.send_accel.send(accel)
+        self.send_gyro.send(gyro)
+        self.send_enu.send(enu.to_numpy() if hasattr(enu, 'to_numpy') else enu)
+        self.send_geo.send(geo.to_numpy() if hasattr(geo, 'to_numpy') else geo)
+        self.send_client_runtime.send(client_runtime)
+        self.send_server_runtime.send(server_runtime)
+        vehicle_loc = self.vehicle.get_location()
+        self.send_location.send(np.array([vehicle_loc.x, vehicle_loc.y, vehicle_loc.z]))
+
+        self.ctrl = self.virt_vehicle.get_ctrl(filter_ctrl)
+        self.send_model_autopilot_logging.send(self.ctrl['model_autopilot'])
+        self.send_autopilot_logging.send(self.ctrl['autopilot'])
+        self.send_regulate_speed_logging.send(self.ctrl['regulate_speed'])
+        self.send_throttle_logging.send(self.ctrl['throttle'])
+        self.send_steer_logging.send(self.ctrl['steer'])
+        self.send_brake_logging.send(self.ctrl['brake'])
+        self.send_reverse_logging.send(self.ctrl['reverse'])
+        self.send_handbrake_logging.send(self.ctrl['handbrake'])
+        self.send_manual_logging.send(self.ctrl['manual'])
+        self.send_gear_logging.send(self.ctrl['gear'])
+        
+    def generate_randpath(self):
+        self.log.INFO("CREATING RANDOM PATH FOR MAP")
+        prev_loc = np.array([self.vehicle.get_location().x, self.vehicle.get_location().y])
+        extended_path = None
+        for _ in range(PATH_ITER):
+            while True:
+                distant_nodes = self.path_optimizer.find_distant_nodes(prev_loc, np.random.randint(MIN_DISTANT_NODE, MAX_DISTANT_NODE), max_distance = MAX_DISTANT_NODE)
+                if distant_nodes:
+                    rand_node = np.random.randint(0, len(distant_nodes))
+                    fartest_id, farthes_distance, farthest_pos = distant_nodes[rand_node]
+                    break
+
+            farthest_pos = np.array(list(farthest_pos))
+            nodes, path_coor = self.path_optimizer.plan_path(
+                prev_loc, 
+                farthest_pos
+            )
+            path_coor = np.hstack([path_coor, np.zeros((path_coor.shape[0], 1))])
+            if extended_path is None:
+                extended_path = path_coor
+            else:
+                extended_path = np.vstack([extended_path, path_coor])
+            prev_loc = farthest_pos
+        return extended_path
 
 def generate_controller_doc(keybinds: dict, joybinds: dict) -> str:
     """

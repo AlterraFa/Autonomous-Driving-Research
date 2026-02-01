@@ -2,11 +2,35 @@ import pygame
 import numpy as np
 import cv2
 
-from utils.messages.message_handler import MessagingSubscribers
+from utils.messages.message_handler import MessagingSubscribers, MessageSubscriber
+from utils.messages.all_messages import (
+    ServerFps,
+    ClientFps,
+    VehicleName,
+    WorldName,
+    Velocity,
+    Heading,
+    Accel,
+    Gyro,
+    Enu,
+    Geo,
+    ClientRuntime,
+    ServerRuntime,
+    ThrottleLog,
+    SteerLog,
+    BrakeLog,
+    ReverseLog,
+    HandbrakeLog,
+    ManualLog,
+    GearLog,
+    AutopilotLog,
+    RegulateSpeedLog,
+    TurnSignal,
+    ModelAutopilot,
+)
 
-class HUD(MessagingSubscribers):
+class HUD:
     def __init__(self, display, fontName="Arial", fontSize=24, height=720, headless = False):
-        super().__init__()  # init all subscribers
         pygame.font.init()
         self.display = display
         self.headless = headless
@@ -15,6 +39,38 @@ class HUD(MessagingSubscribers):
         self._line_cache = {}
         
         self.overlay = pygame.Surface((310, height), pygame.SRCALPHA)
+        self._init_transmitter()
+    
+    def _init_transmitter(self):
+        """Initialize all message subscribers needed by HUD."""
+        # Measurement
+        self.sub_server_fps     = MessageSubscriber(ServerFps)
+        self.sub_client_fps     = MessageSubscriber(ClientFps)
+        self.sub_vehicle_name   = MessageSubscriber(VehicleName)
+        self.sub_world_name     = MessageSubscriber(WorldName)
+        self.sub_velocity       = MessageSubscriber(Velocity)
+        self.sub_heading        = MessageSubscriber(Heading)
+        self.sub_accel          = MessageSubscriber(Accel)
+        self.sub_gyro           = MessageSubscriber(Gyro)
+        self.sub_enu            = MessageSubscriber(Enu)
+        self.sub_geo            = MessageSubscriber(Geo)
+        self.sub_client_runtime = MessageSubscriber(ClientRuntime)
+        self.sub_server_runtime = MessageSubscriber(ServerRuntime)
+        
+        # Control Logging
+        self.sub_throttle_logging       = MessageSubscriber(ThrottleLog)
+        self.sub_steer_logging          = MessageSubscriber(SteerLog)
+        self.sub_brake_logging          = MessageSubscriber(BrakeLog)
+        self.sub_reverse_logging        = MessageSubscriber(ReverseLog)
+        self.sub_handbrake_logging      = MessageSubscriber(HandbrakeLog)
+        self.sub_manual_logging         = MessageSubscriber(ManualLog)
+        self.sub_gear_logging           = MessageSubscriber(GearLog)
+        self.sub_autopilot_logging      = MessageSubscriber(AutopilotLog)
+        self.sub_regulate_speed_logging = MessageSubscriber(RegulateSpeedLog)
+        self.sub_turn_signal            = MessageSubscriber(TurnSignal)
+        
+        # Model
+        self.sub_model_autopilot_logging = MessageSubscriber(ModelAutopilot)
         
     def to_surface(self, frame: np.ndarray) -> pygame.Surface:
         if self.headless: return
@@ -335,6 +391,8 @@ def overlay_gmm_on_map(map_img,
     wmax = float(np.max(WTS)) if np.max(WTS) > 0 else 1.0
     ws = (WTS[:K] / wmax).clip(0.0, 1.0)
 
+    has_drawn_anything = False
+
     overlay = map_img.copy()
     for k in range(K):
         comp_color = (255, 255, 0)  # BGR
@@ -360,8 +418,12 @@ def overlay_gmm_on_map(map_img,
                 # Draw directly, no per-ring blending
                 cv2.ellipse(temp_ring, center, (int(axes[0]*s), int(axes[1]*s)),
                             0, 0, 360, comp_color, 2, cv2.LINE_AA)
+                has_drawn_anything = True
 
         # Blend once per component
-        overlay = cv2.addWeighted(overlay, 1.0, temp_ring, alpha * ws[k], 0)
+        a = float(np.clip(alpha * ws[k], 0.0, 1.0))
+        if has_drawn_anything and a > 0:
+            overlay = cv2.addWeighted(temp_ring, a, overlay, 1.0 - a, 0)
+        # overlay = cv2.addWeighted(overlay, 1.0, temp_ring, alpha * ws[k], 0)
 
     return overlay

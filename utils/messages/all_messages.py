@@ -166,6 +166,13 @@ class RegulateSpeed(Enum):
     msgType = (bool,)
     default = False
 
+class PolylinesCmd(Enum):
+    Queue = "General"
+    Owner = "World Map"
+    msgID = 29
+    msgType = (np.ndarray, torch.Tensor)
+    default = False
+    
 
 #################################### Logging ####################################
 class TurnSignal(Enum):
