@@ -433,9 +433,9 @@ class CarlaViewer(object):
                     break
                 else:
                     if self.pbar is not None: # Not in data collect mode
-                        elapsed = round(self.sub_server_runtime.receive(), 1)                    
-                        self.pbar.n  = min(elapsed, self.duration)
-                        self.pbar.refresh()
+                        progress, task_id = self.pbar
+                        elapsed = round(self.sub_server_runtime.receive(), 1)
+                        progress.update(task_id, completed=min(elapsed, self.duration))
 
 
                 if not self.headless:

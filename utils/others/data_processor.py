@@ -91,7 +91,7 @@ class CarlaDatasetCollector:
 
     def maybe_save(
         self,
-        control: Dict[str, Any],
+        meta: Dict[str, Any],
         **images: np.ndarray,
     ) -> None:
         """
@@ -135,8 +135,7 @@ class CarlaDatasetCollector:
 
         meta = {
             "img_file": saved_files,
-            "control": control,
-            "timestamp": time.time() - self.time_start,
+            "metadata": meta,
         }
 
         np.save(self.meta_dir / f"{self.sample_idx:06d}.npy", meta, allow_pickle=True)

@@ -2,6 +2,7 @@ import carla
 import numpy as np
 import json
 import cv2
+import time
 
 from utils.others.lidar_visualization import LIDARVisualizer
 from utils.spawn.callback import Extractor
@@ -16,6 +17,10 @@ from dataclasses import dataclass
 np.printoptions(5)
     
 class SensorSpawn(object):
+    
+    __slot__ = ['log', 'name', 'sensor_bp', 'world', 'literal_name', 'actor']
+    log = Logger()
+
     def __init__(self, name, world: carla.World):
         self.log          = Logger()
         self.name         = name
@@ -76,6 +81,33 @@ class SensorSpawn(object):
             temp += [word.capitalize()]
         sensor_name = ' '.join(temp + [string[1].capitalize()])
         return sensor_name
+
+    @classmethod
+    def test_sensor(cls, game_viewer, sensors_metadata, max_retries = 3):
+        for attempt in range(max_retries):
+            try:
+                game_viewer.init_sensor(sensors_metadata)
+                cls.log.CUSTOM("SUCCESS", "All sensor initialized successfully")
+                return True
+            except RuntimeError as e:
+                if "parent actor not found" in str(e):
+                    if attempt < max_retries - 1:
+                        cls.log.WARNING(f"Sensor init failed (attempt {attempt + 1}/{max_retries}): {e}")
+                        wait_ticks = 20 + (attempt * 10)
+                        cls.log.WARNING(f"Retrying after {wait_ticks} ticks...")
+                        for _ in range(wait_ticks):
+                            if game_viewer.virt_world.world.get_settings().synchronous_mode:
+                                game_viewer.virt_world.world.tick()
+                            else:
+                                time.sleep(0.1)
+                    else:
+                        cls.log.ERROR(f"Sensor init failed after {max_retries} attempts: {e}")
+                        return False
+                else:
+                    cls.log.ERROR(f"Sensor init error: {e}")
+                    return False
+        return False
+    
         
 from utils.stubs.sensor__lidar__ray_cast_stub import SensorLidarRayCastStub
 class LidarRaycast(SensorLidarRayCastStub, SensorSpawn, LIDARVisualizer):

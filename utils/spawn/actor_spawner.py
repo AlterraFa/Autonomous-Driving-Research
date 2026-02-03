@@ -1,8 +1,7 @@
 import carla
 import random
-import math
+import time
 
-from rich import print
 from typing import Literal
 from config.enum import VehicleClass
 from utils.messages.logger import Logger
@@ -138,27 +137,6 @@ class Spawn:
         self.log.CUSTOM("SUCCESS", f"Spawned {vehicle_bp.id} at {spawn_transform.location}. Autopilot: {autopilot}")
         return self.single_vehicle
 
-    def wait_for_actor_by_role(self, role_name: str, timeout_s: float = 10.0) -> carla.Actor | None:
-        import time
-        t0 = time.time()
-        while time.time() - t0 < timeout_s:
-            vehicles = self.world.get_actors().filter('vehicle.*')
-            for v in vehicles:
-                try:
-                    if v.attributes.get('role_name', '') == role_name:
-                        self.log.INFO(f"Found actor with role [green][bold]{role_name}[/][/]")
-                        self.single_vehicle = v
-                        return
-                except Exception:
-                    pass
-            # advance world in sync or just sleep in async
-            if self.world.get_settings().synchronous_mode:
-                self.world.tick()
-            else:
-                time.sleep(0.05)
-        self.log.ERROR(f"Could not find actor with role [red][bold]{role_name}[/][/]")
-        exit(-1)
-        
     def despawn_vehicles(self):
         for vehicle in self.get_vehicles:
             vehicle.destroy()
@@ -183,3 +161,34 @@ class Spawn:
                     yield x
         else: 
             return seq.value
+
+    def wait_for_live_actor(self, role_name: str, timeout_s: float = 30.0, settle_ticks: int = 50):
+        t0 = time.time()
+        while time.time() - t0 < timeout_s:
+            vehicles = self.world.get_actors().filter('vehicle.*')
+            for v in vehicles:
+                try:
+                    if v.attributes.get('role_name', '') == role_name and v.is_alive:
+                        self.log.INFO(f"Found {role_name} actor, settling...")
+                        prev_pos = None
+                        for tick_idx in range(settle_ticks):
+                            if self.world.get_settings().synchronous_mode:
+                                self.world.tick()
+                            else:
+                                time.sleep(0.05)
+                            try:
+                                curr_pos = v.get_location()
+                                if prev_pos is not None and prev_pos.distance(curr_pos) > 0.1:
+                                    self.log.WARNING(f"Actor still moving (tick {tick_idx}), continuing settle...")
+                                prev_pos = curr_pos
+                            except:
+                                pass
+                        self.log.INFO(f"Actor settled after {settle_ticks} ticks")
+                        return v
+                except Exception:
+                    pass
+            if self.world.get_settings().synchronous_mode:
+                self.world.tick()
+            else:
+                time.sleep(0.05)
+        return None

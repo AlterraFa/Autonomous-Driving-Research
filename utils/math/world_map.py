@@ -103,9 +103,9 @@ class Map:
         # Always keep first point, then keep if distance > tol
         self.path_handler = PathHandler(points, extrapolate = False)
         if self.relative_pos == "forward":
-            self.offset_path  = [i for i in range(-10, 70, 3)]
+            self.offset_path  = [i for i in range(-5, 70, 4)]
         elif self.relative_pos == "center":
-            self.offset_path  = [i for i in range(-50, 50, 3)]
+            self.offset_path  = [i for i in range(-50, 50, 4)]
 
         points[:, -1] = trajectories[:, -1] # replace with time data
         return points

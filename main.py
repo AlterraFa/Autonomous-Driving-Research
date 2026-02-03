@@ -22,13 +22,14 @@ from utils.spawn.sensor_spawner import (
     GNSS,
     IMU, 
     SemanticSegmentation,
+    SensorSpawn
 )
 from config.enum import (
     VehicleClass as VClass,
     CarlaLabel as CLabel
 )
 
-from tqdm.auto import tqdm
+from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 from utils.control.world import World
 from utils.control.vehicle_control import Vehicle
 from utils.render.viewer import CarlaViewer
@@ -91,37 +92,6 @@ def _expand_replay_dirs(replay_dirs):
     return expanded
 
 
-def _wait_for_live_actor_by_role(world, role_name: str, timeout_s: float = 30.0, settle_ticks: int = 50):
-    t0 = time.time()
-    while time.time() - t0 < timeout_s:
-        vehicles = world.get_actors().filter('vehicle.*')
-        for v in vehicles:
-            try:
-                if v.attributes.get('role_name', '') == role_name and v.is_alive:
-                    logger.INFO(f"Found {role_name} actor, settling...")
-                    prev_pos = None
-                    for tick_idx in range(settle_ticks):
-                        if world.get_settings().synchronous_mode:
-                            world.tick()
-                        else:
-                            time.sleep(0.05)
-                        try:
-                            curr_pos = v.get_location()
-                            if prev_pos is not None and prev_pos.distance(curr_pos) > 0.1:
-                                logger.WARNING(f"Actor still moving (tick {tick_idx}), continuing settle...")
-                            prev_pos = curr_pos
-                        except:
-                            pass
-                    logger.INFO(f"Actor settled after {settle_ticks} ticks")
-                    return v
-            except Exception:
-                pass
-        if world.get_settings().synchronous_mode:
-            world.tick()
-        else:
-            time.sleep(0.05)
-    return None
-
 
 def _init_sensor_with_retry(game_viewer, sensors_metadata, max_retries: int = 5):
     for attempt in range(max_retries):
@@ -157,7 +127,7 @@ def main(args):
     virt_world = World(client, args.traffic_port)
     virt_world.sync = args.sync
     virt_world.delta = args.delay
-    virt_world.disable_render = True
+    virt_world.disable_render = False
     virt_world.apply_settings()
 
     rgb_sensor = RGB(virt_world.world)
@@ -165,6 +135,8 @@ def main(args):
     gnss_sensor.set_attribute("noise_lat_stddev", LAT_STDDEV / 111320.0)
     gnss_sensor.set_attribute("noise_lon_stddev", LON_STDDEV / 111320.0)
     imu_sensor = IMU(virt_world.world)
+    imu_sensor.set_attribute("noise_gyro_bias_x", 0.005)
+    imu_sensor.set_attribute("noise_gyro_bias_y", 0.005)
     semseg_sensor = SemanticSegmentation(
         virt_world.world, 
         filter_labels = [CLabel.Road], 
@@ -229,7 +201,7 @@ def main(args):
                     time.sleep(0.05)
             client.replay_file(path_2_recording, start, duration, 0)
 
-            ego_actor = _wait_for_live_actor_by_role(virt_world.world, "ego", timeout_s=30.0, settle_ticks=100)
+            ego_actor = spawner.wait_for_live_actor("ego", timeout_s=30.0, settle_ticks=90)
             if ego_actor is None:
                 logger.ERROR(f"Could not find live ego actor for replay: {replay_dir}")
                 continue
@@ -243,7 +215,7 @@ def main(args):
             game_viewer = CarlaViewer(**per_viewer_args)
             
             # Refresh ego actor immediately before sensor init
-            ego_actor_refresh = _wait_for_live_actor_by_role(virt_world.world, "ego", timeout_s=5.0, settle_ticks=10)
+            ego_actor_refresh = spawner.wait_for_live_actor("ego", timeout_s=30.0, settle_ticks=10)
             if ego_actor_refresh is None:
                 logger.ERROR(f"Ego actor became invalid before sensor init: {replay_dir}")
                 continue
@@ -255,7 +227,7 @@ def main(args):
                 imu_sensor     : None, 
                 semseg_sensor  : None,
             }
-            if not _init_sensor_with_retry(game_viewer, sensors_metadata):
+            if not SensorSpawn.test_sensor(game_viewer, sensors_metadata):
                 logger.ERROR(f"Skipping replay due to sensor initialization failure: {replay_dir}")
                 continue
 
@@ -283,15 +255,27 @@ def main(args):
             true_trajectories    = np.load(path_2_waypoints)
             midlane_trajectories = map_processor.precompute_waypoints(true_trajectories)
             replayer             = ReplayHandler(virt_world, true_trajectories, midlane_trajectories, dataset_dir, args.temporal, args.debug)
-            pbar                 = tqdm(total = round(duration, 2), unit = 'server second', desc = f"Play duration ({idx}/{len(replay_dirs)})", ncols = 125, leave = True)
+            
+            progress = Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TextColumn("•"),
+                TextColumn("{task.completed:.1f}/{task.total:.1f}"),
+                TimeRemainingColumn()
+            )
+            Logger.set_progress_console(progress.console)
+            
+            pbar = progress.add_task(f"Play duration ({idx}/{len(replay_dirs)})", total=round(duration, 2))
             game_viewer.attach_plugins(
                 replayer = replayer, 
-                pbar = pbar, 
+                pbar = (progress, pbar),  # Pass both progress and task_id
                 map_processor = map_processor
             )
             lp.add_function(game_viewer.map_processor.retrieve_map)
-            lp_wrapper()
-            pbar.close()
+            with progress:
+                lp_wrapper()
+            progress.stop()
 
             spawner.despawn_vehicles()
             time.sleep(1.0)

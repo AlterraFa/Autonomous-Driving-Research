@@ -12,12 +12,14 @@ import time
 
 from scipy.interpolate import interp1d
 from scipy.spatial import cKDTree
+from scipy.optimize import least_squares
 from utils.others.data_processor import CarlaDatasetCollector
 from utils.math.coordinate_transform import global_2_local
 from utils.messages.logger import Logger
 from utils.control.world import World
 
 from numba import njit
+import pyclothoids
 
 conf = toml.load(os.path.join(parent, "../config/config.toml"))
 temporal_offset      = conf['Offsets']['temporal_offset']
@@ -472,84 +474,199 @@ class TurnClassify:
     def __init__(self, world: World, threshold_deg: float = 45):
         self.thresh_deg = threshold_deg
         self.signal = None
-        self.virt_world  = world
-        pass
+        self.virt_world = world
+        
+        # Cache for interpolated junction waypoints and clothoid data
+        self._cache = {
+            'interpolated_points': None,
+            'clothoid': None,
+            'entry_heading': None,
+            'exit_heading': None,
+            'entry_wp_id': None,
+            'exit_wp_id': None
+        }
+        self.log = Logger()
 
-
-
-    def turning_type(self, enable: bool, junction, disable: bool, waypoints: np.ndarray, debug = False):
+    def _interpolate_junction_path(self, entry_wp, exit_wp, step: float = 0.5):
         """
-        Classify the vehicle's maneuver through a junction as straight, left, or right
-        based on the heading change between the closest entry and exit waypoints.
-
+        Interpolate points between entry and exit waypoints within the junction.
+        
         Parameters
         ----------
-        enable : bool
-            If True, perform classification. When enabled, the method will:
-            1. Get all (entry, exit) waypoint pairs from the junction.
-            2. Find the entry cluster closest to the vehicle's current path waypoints.
-            3. Select the exit waypoint from that cluster that is closest to the path.
-            4. Compute the heading (yaw) of both the chosen entry and exit waypoints.
-            5. Calculate the wrapped heading difference Δ (radians) using atan2.
-            6. Classify the maneuver:
-                self.signal = 0 → straight  (|Δ| < thresh_deg)
-                self.signal = 1 → right turn (Δ < -thresh_deg)
-                self.signal = 2 → left turn  (Δ > +thresh_deg)
-
-        junction : carla.Junction
-            The CARLA junction object obtained from a waypoint's `.get_junction()` call.
-            Must contain driving lane waypoints.
-
-        disable : bool
-            If True and `enable` is False, reset classification state by setting
-            `self.signal = -1`.
-
-        waypoints : np.ndarray, shape (N,3)
-            Array of vehicle trajectory points [x, y, z] used to determine which
-            entry/exit pair is closest to the current path.
-
-        thresh_deg : float, optional (default=45)
-            Angular threshold in degrees to decide what counts as "straight".
-            Turns smaller than this threshold are treated as going straight.
-
+        entry_wp : carla.Waypoint
+            Entry waypoint
+        exit_wp : carla.Waypoint
+            Exit waypoint
+        step : float
+            Distance step between interpolated points
+            
         Returns
         -------
-        signal : int
-            -1 if disabled/reset,
-            0 if straight maneuver,
-            1 if right turn,
-            2 if left turn.
-
-        Notes
-        -----
-        - This method uses only entry/exit waypoint heading difference, so small
-        zig-zags or lane curvature inside the junction will still be classified
-        correctly by the net heading change.
-        - Uses CARLA debug draw to visualize the chosen entry (blue point) and
-        exit (blue point) locations for one frame at 70 FPS.
+        np.ndarray
+            (N, 3) array of interpolated points [x, y, z]
         """
+        wp_list = waypoints_between(entry_wp, exit_wp, step=step)
+        points = carla_waypoints_to_np(wp_list)
+        return points
+
+    def _fit_clothoid_and_extract_headings(self, entry_wp, exit_wp, points: np.ndarray):
+        """
+        Fit a clothoid curve using G1Hermite interpolation and extract headings at entry/exit.
+        
+        Uses the Hermite interpolation method with entry/exit positions and headings to fit
+        a clothoid curve. Headings are computed by numerical differentiation along the curve.
+        
+        Parameters
+        ----------
+        entry_wp : carla.Waypoint
+            Entry waypoint
+        exit_wp : carla.Waypoint
+            Exit waypoint
+        points : np.ndarray
+            (N, 3) array of interpolated points (used for validation)
+            
+        Returns
+        -------
+        tuple
+            (entry_heading, exit_heading) in radians
+        """
+        try:
+            # Get entry and exit positions
+            entry_loc = entry_wp.transform.location
+            exit_loc = exit_wp.transform.location
+            
+            x_start = entry_loc.x
+            y_start = entry_loc.y
+            theta_start = waypoint_heading(entry_wp)
+            
+            x_end = exit_loc.x
+            y_end = exit_loc.y
+            theta_end = waypoint_heading(exit_wp)
+            
+            # Fit clothoid using G1Hermite (Hermite interpolation with positions and headings)
+            try:
+                clothoid = pyclothoids.Clothoid.G1Hermite(
+                    x_start, y_start, theta_start,
+                    x_end, y_end, theta_end
+                )
+                self._cache['clothoid'] = clothoid
+                
+                # Extract headings at entry and exit using numerical differentiation
+                calc_ds = 1e-4
+                
+                # Entry heading: differentiate X, Y at s=0
+                dx_start = clothoid.X(calc_ds) - clothoid.X(0.0)
+                dy_start = clothoid.Y(calc_ds) - clothoid.Y(0.0)
+                entry_heading = np.arctan2(dy_start, dx_start)
+                
+                # Exit heading: differentiate X, Y at s=length
+                s_end = clothoid.length
+                dx_end = clothoid.X(s_end) - clothoid.X(s_end - calc_ds)
+                dy_end = clothoid.Y(s_end) - clothoid.Y(s_end - calc_ds)
+                exit_heading = np.arctan2(dy_end, dx_end)
+                
+                return entry_heading, exit_heading
+            except Exception as e:
+                self.log.WARNING(f"G1Hermite clothoid fitting failed: {e}, falling back to waypoint headings")
+                return theta_start, theta_end
+                
+        except Exception as e:
+            self.log.WARNING(f"Error in clothoid extraction: {e}, falling back to waypoint headings")
+            return waypoint_heading(entry_wp), waypoint_heading(exit_wp)
+
+    def _clear_cache(self):
+        """Clear the junction cache."""
+        self._cache = {
+            'interpolated_points': None,
+            'clothoid': None,
+            'entry_heading': None,
+            'exit_heading': None,
+            'entry_wp_id': None,
+            'exit_wp_id': None
+        }
+
+    def turning_type(self, enable: bool, junction, disable: bool, waypoints: np.ndarray, debug=False):
         if enable:
-            wp_pairs       = junction.get_waypoints(carla.LaneType.Driving)
+            wp_pairs = junction.get_waypoints(carla.LaneType.Driving)
             possible_pairs = _find_entry_clusters(wp_pairs, waypoints)                    
-            choosen_pairs  = _find_exit(possible_pairs, waypoints)
+            choosen_pairs = _find_exit(possible_pairs, waypoints)
 
             if debug:
-                self.virt_world.debug.draw_point(choosen_pairs[0].transform.location, size = 0.18, color = carla.Color(0, 0, 255), life_time = 1.5 * (1 / 70))
-                self.virt_world.debug.draw_point(choosen_pairs[1].transform.location, size = 0.18, color = carla.Color(0, 0, 255), life_time = 1.5 * (1 / 70))
+                self.virt_world.world.debug.draw_point(
+                    choosen_pairs[0].transform.location,
+                    size=0.18,
+                    color=carla.Color(0, 0, 255),
+                    life_time=1.5 * (1 / 70)
+                )
+                self.virt_world.world.debug.draw_point(
+                    choosen_pairs[1].transform.location,
+                    size=0.18,
+                    color=carla.Color(0, 0, 255),
+                    life_time=1.5 * (1 / 70)
+                )
             
-            entry_heading  = waypoint_heading(choosen_pairs[0])
-            exit_heading   = waypoint_heading(choosen_pairs[1])
+            entry_wp = choosen_pairs[0]
+            exit_wp = choosen_pairs[1]
+            
+            # Check if we need to recompute or use cache using stable waypoint properties
+            entry_wp_key = (entry_wp.road_id, entry_wp.section_id, entry_wp.lane_id)
+            exit_wp_key = (exit_wp.road_id, exit_wp.section_id, exit_wp.lane_id)
+            
+            if (self._cache['entry_wp_id'] != entry_wp_key or 
+                self._cache['exit_wp_id'] != exit_wp_key or
+                self._cache['entry_heading'] is None):
+                
+                # Interpolate points between entry and exit
+                try:
+                    interpolated_pts = self._interpolate_junction_path(entry_wp, exit_wp)
+                    self._cache['interpolated_points'] = interpolated_pts
+                    
+                    # Fit clothoid and extract headings
+                    entry_heading, exit_heading = self._fit_clothoid_and_extract_headings(
+                        entry_wp, exit_wp, interpolated_pts
+                    )
+                    self._cache['entry_heading'] = entry_heading
+                    self._cache['exit_heading'] = exit_heading
+                    self._cache['entry_wp_id'] = entry_wp_key
+                    self._cache['exit_wp_id'] = exit_wp_key
+                except Exception as e:
+                    self.log.WARNING(f"Failed to process junction path: {e}")
+                    entry_heading = waypoint_heading(entry_wp)
+                    exit_heading = waypoint_heading(exit_wp)
+                    self._cache['entry_heading'] = entry_heading
+                    self._cache['exit_heading'] = exit_heading
+                    self._cache['entry_wp_id'] = entry_wp_key
+                    self._cache['exit_wp_id'] = exit_wp_key
+            else:
+                # Use cached headings
+                entry_heading = self._cache['entry_heading']
+                exit_heading = self._cache['exit_heading']
 
-            delta = np.arctan2(np.sin(exit_heading - entry_heading),
-                       np.cos(exit_heading - entry_heading))
+            delta = np.arctan2(
+                np.sin(exit_heading - entry_heading),
+                np.cos(exit_heading - entry_heading)
+            )
             
             if abs(delta) < np.radians(self.thresh_deg):
-                self.signal = 0
+                signal = 0
             elif delta < 0:
-                self.signal = 1
+                signal = 1
             else:
-                self.signal = 2
+                signal = 2
+            if self.signal != signal:
+                if signal == 0:
+                    self.log.CUSTOM(" ENTER ", f"Entering intersection ID: [cyan]{entry_wp_key[0]}[/cyan]. Mode: [bold]Straight[/bold]", color = "blue")
+                if signal == 1:
+                    self.log.CUSTOM(" ENTER ", f"Entering intersection ID: [cyan]{entry_wp_key[0]}[/cyan]. Mode: [bold]Turn Left[/bold]", color = "blue")
+                if signal == 2:
+                    self.log.CUSTOM(" ENTER ", f"Entering intersection ID: [cyan]{entry_wp_key[0]}[/cyan]. Mode: [bold]Turn Right[/bold]", color = "blue")
+
+                self.signal = signal
+                
         if disable and not enable:
+            if self._cache['entry_wp_id'] is not None:
+                self.log.CUSTOM("EXITED ", f"Exited intersection ID: [cyan]{self._cache['entry_wp_id'][0]}[/cyan]. Mode: [bold]Keep lane[/bold]", color = 100)
+            self._clear_cache()
             self.signal = -1
 
         return self.signal
@@ -564,11 +681,12 @@ from utils.messages.all_messages import (
     Velocity,
     BrakeLog,
     ThrottleLog,
-    TurnSignal
+    TurnSignal,
+    PolylinesCmd
 )
 class ReplayHandler:
 
-    turn_classify = False
+    turn_classify = True
     __slot__ = ["road_type"]
     
     def __init__(self, world: World, true_trajectories: str, midlane_waypoints: np.ndarray = None, data_collect_dir: str = None, use_temporal: bool = False, debug: bool = False):
@@ -584,7 +702,7 @@ class ReplayHandler:
             self.offset   = spatial_offset
         else:
             self.offset   = temporal_offset
-        self.turn_classifier = TurnClassify(world=world, threshold_deg=15)
+        self.turn_classifier = TurnClassify(world=world, threshold_deg=20)
         self.branching_path  = BranchingPath(self.virt_world)
         self.data_collector = None
         if data_collect_dir:
@@ -604,6 +722,7 @@ class ReplayHandler:
         self.sub_throttle_logging = MessageSubscriber(ThrottleLog)
         self.sub_brake_logging    = MessageSubscriber(BrakeLog)
         self.sub_velocity         = MessageSubscriber(Velocity)
+        self.sub_polylines        = MessageSubscriber(PolylinesCmd)
         self.send_turn_signal     = MessageSender(TurnSignal)
         
 
@@ -659,13 +778,18 @@ class ReplayHandler:
             global_scout = self.path_handler.waypoints(
                 position, self.scout_points
             )
-            is_at_junction, junction = self.virt_world.get_waypoint_junction(global_scout[14])
-            not_exit_junction, _ = self.virt_world.get_waypoint_junction(global_scout[10])
+            
+            is_at_junction , junction = self.virt_world.get_waypoint_junction(global_scout[14])
+            switch_junction, other_junction = self.virt_world.get_waypoint_junction(global_scout[19])
+            if is_at_junction and switch_junction:
+                junction = other_junction
+            not_exit_junction, _ = self.virt_world.get_waypoint_junction(global_scout[11])
             is_exit_junction = not not_exit_junction
-            turn_signal = self.turn_classifier.turning_type(is_at_junction, junction, is_exit_junction, global_scout)
+            turn_signal = self.turn_classifier.turning_type(is_at_junction, junction, is_exit_junction, global_scout, debug = self.debug)
         else:
             turn_signal = -1
         self.send_turn_signal.send(turn_signal)
+
 
         # Only save when it moves (Prevent saving all the time when stopping at red light or stop sign)
         if self.data_collector:
@@ -676,16 +800,23 @@ class ReplayHandler:
                 velocity = self.sub_velocity.receive()
                 saved = self.data_collector.maybe_save(
                     {
-                        "midlane_wp" : mid_ego,
-                        "aux_wp"     : ego_branches,
-                        "steer"      : steer,
-                        "throttle"   : throttle,
-                        "brake"      : brake,
-                        "velocity"   : velocity,
-                        "turn_signal": turn_signal,
-                        "GPS"        : vehicle_location,
-                        "IMU_radian" : heading,
-                        "road_type"  : self.road_type,
+                        "gt_data": {
+                            "midlane_wp" : mid_ego,
+                            "aux_wp"     : ego_branches,
+                            "steer"      : steer,
+                            "throttle"   : throttle,
+                            "brake"      : brake,
+                            "velocity"   : velocity,
+                        },
+                        "command": {
+                            "turn_signal": turn_signal,
+                            "polycmd"    : self.sub_polylines.receive(), 
+                        },
+                        "condition": {
+                            "GPS"        : vehicle_location,
+                            "heading"    : heading,
+                            "road_type"  : self.road_type,
+                        }, 
                         "timestamp"  : time.time() - self.start_time
                     },
                     **frame
