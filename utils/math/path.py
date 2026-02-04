@@ -948,11 +948,15 @@ class OptimizePath:
         self.log = Logger()
         self.virt_world = world
         self.exclude_params = exclude_circle # (cx, cy, radius)
+        
+        # Initialize spatial hash grid for O(1) node lookups during building
+        self._spatial_hash_grid = {}
+        self._grid_size = 1.0  # Grid cell size for hashing
 
         carla_map = world.world.get_map()
         self.network, self.nodes = self._build_detailed_graph(carla_map, step=step, epsilon=0.1)
 
-        self.log.DEBUG(f"Built Road network. Nodes: {len(self.network.nodes)}")   
+        self.log.DEBUG(f"Built Road network. Nodes: {len(self.network.nodes)}")      
 
     @staticmethod
     def fast_extract_coordinates(network_or_nodes):
@@ -981,13 +985,37 @@ class OptimizePath:
         else:
             raise TypeError("Input must be NetworkX graph or dictionary")
 
-    @staticmethod
-    def _find_or_create_node(nodes, loc, epsilon=0.1):
-        for nid, (x, y) in nodes.items():
-            if math.hypot(loc.x - x, loc.y - y) < epsilon:
-                return nid
+    def _find_or_create_node(self, nodes, loc, epsilon=0.1):
+        """Find existing node within epsilon distance or create new one.
+        Uses spatial hash grid for O(1) average lookup during building.
+        """
+        x, y = loc.x, loc.y
+        
+        # Compute grid cell coordinates
+        grid_x = int(x / self._grid_size)
+        grid_y = int(y / self._grid_size)
+        
+        # Check nearby grid cells (3x3 neighborhood for safety)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                cell_key = (grid_x + dx, grid_y + dy)
+                if cell_key in self._spatial_hash_grid:
+                    # Check all nodes in this cell
+                    for nid in self._spatial_hash_grid[cell_key]:
+                        node_x, node_y = nodes[nid]
+                        if math.hypot(x - node_x, y - node_y) < epsilon:
+                            return nid
+        
+        # Create new node
         nid = len(nodes)
-        nodes[nid] = (loc.x, loc.y)
+        nodes[nid] = (x, y)
+        
+        # Add to spatial hash grid
+        cell_key = (grid_x, grid_y)
+        if cell_key not in self._spatial_hash_grid:
+            self._spatial_hash_grid[cell_key] = []
+        self._spatial_hash_grid[cell_key].append(nid)
+        
         return nid
     
     def _is_inside_circle(self, wp):
@@ -1003,19 +1031,21 @@ class OptimizePath:
         nodes = {}
         
         topology = cmap.get_topology()
-
+        edges_to_add = []  # Batch edges for efficient addition
+        
         for start_wp, end_wp in topology:
             wp_list = start_wp.next_until_lane_end(step)
             wp_list = [start_wp] + wp_list
             if end_wp not in wp_list:
                 wp_list.append(end_wp)
 
+            # Check if segment is invalid
             is_segment_invalid = False
             if self.exclude_params:
                 for wp in wp_list:
                     if self._is_inside_circle(wp):
                         is_segment_invalid = True
-                        break # One bad point spoils the whole segment
+                        break
             
             if is_segment_invalid:
                 continue
@@ -1024,12 +1054,17 @@ class OptimizePath:
             for wp in wp_list:
                 nid = self._find_or_create_node(nodes, wp.transform.location, epsilon)
                 
+                # Only add node if new
                 if nid not in G.nodes:
                     G.add_node(nid, x=nodes[nid][0], y=nodes[nid][1], pos=nodes[nid])
                 
                 if prev_id is not None and prev_id != nid:
-                    G.add_edge(prev_id, nid)
+                    edges_to_add.append((prev_id, nid))
                 prev_id = nid
+        
+        # Batch add all edges at once for efficiency
+        if edges_to_add:
+            G.add_edges_from(edges_to_add)
 
         return G, nodes
 
