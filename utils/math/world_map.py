@@ -36,13 +36,15 @@ class Map:
                  resize_to = (200, 200), 
                  scale: int = 10, 
                  relative_pos: Literal["forward", "center"] = "center", 
-                 invert_color = False):
+                 invert_color = False,
+                 waypoint_distance: float = 0.5):
         self.log = Logger()
         self.world = world
         self.relative_pos = relative_pos
 
         carla_map = world.world.get_map()
-        waypoints = carla_map.generate_waypoints(distance=2.0)
+        # Generate waypoints at finer spacing for detailed map rendering
+        waypoints = carla_map.generate_waypoints(distance=waypoint_distance)
         self.wp_dict = {(wp.transform.location.x, wp.transform.location.y): wp for wp in waypoints}
         waypoints_metadata = []
         for i, wp in enumerate(waypoints):
@@ -53,20 +55,28 @@ class Map:
         
         self._map = carla_map
 
-
-        self.log.DEBUG("Found waypoints metadata")        
+        self.log.DEBUG(f"Generated {len(waypoints_metadata)} waypoints at {waypoint_distance}m spacing")
+        
+        # Store raw world bounds BEFORE transformation
+        self.world_min_x = waypoints_metadata[:, 0].min()
+        self.world_max_x = waypoints_metadata[:, 0].max()
+        self.world_min_y = waypoints_metadata[:, 1].min()
+        self.world_max_y = waypoints_metadata[:, 1].max()
+        
         # Scale up for fine grain detail
         waypoints_metadata[:, 0] *= scale   # x
         waypoints_metadata[:, 1] *= scale   # y
 
-        # Min/max using numpy instead of describe()
-        self.min_x, self.max_x = waypoints_metadata[:, 0].min(), waypoints_metadata[:, 0].max()
-        self.old_min_y, self.old_max_y = waypoints_metadata[:, 1].min(), waypoints_metadata[:, 1].max()
+        # Shift BOTH x and y to start from zero
+        waypoints_metadata[:, 0] -= self.world_min_x * scale
+        waypoints_metadata[:, 1] -= self.world_min_y * scale
 
-        # Shift y to start from zero
-        waypoints_metadata[:, 1] -= self.old_min_y
-
-        self.new_min_y, self.new_max_y = waypoints_metadata[:, 1].min(), waypoints_metadata[:, 1].max()
+        self.min_x = 0
+        self.max_x = (self.world_max_x - self.world_min_x) * scale
+        self.old_min_y = 0
+        self.old_max_y = (self.world_max_y - self.world_min_y) * scale
+        self.new_min_y = 0
+        self.new_max_y = self.old_max_y
 
         # Store for later
         self.waypoints_metadata = waypoints_metadata
@@ -129,15 +139,22 @@ class Map:
     def draw_waypoints_lines(self, image, waypoints, color=(0, 0, 255), line_thickness=2):
         pts = np.array(waypoints, dtype=np.int32).reshape((-1, 1, 2))
         cv2.polylines(image, [pts], isClosed=False, color=color, thickness=line_thickness, lineType=cv2.LINE_AA)
-    
     def _render_map(self, invert):
         
-        # Create the map_image with padding to avoid going out of range
-        self.map_image = np.zeros((int(self.new_max_y + self.offset_x * 2), int(self.max_x + self.offset_y * 2), 3), dtype = np.uint8)
+        # Create the map_image with generous padding to handle rotation and boundary cases
+        # Padding should be at least the maximum radius we'll request during retrieve_map
+        map_padding = int(self.range[0] * 2.5)  # Extra large padding for rotation buffer
+        
+        map_height = int(self.new_max_y + map_padding)
+        map_width = int(self.max_x + map_padding)
+        
+        self.log.DEBUG(f"Creating map image: {map_width}x{map_height}, waypoint bounds: ({self.max_x:.2f}, {self.new_max_y:.2f}), padding: {map_padding}")
+        
+        self.map_image = np.zeros((map_height, map_width, 3), dtype=np.uint8)
         self.map_image = self.draw_map(self.map_image, (255, 255, 255), self.waypoints_metadata)
         
-        self.map_image = cv2.GaussianBlur(self.map_image, (3, 3), sigmaX = 0) 
-        kernel         = np.ones((3,3), np.uint8)
+        self.map_image = cv2.GaussianBlur(self.map_image, (3, 3), sigmaX=0) 
+        kernel = np.ones((3, 3), np.uint8)
         self.map_image = cv2.morphologyEx(self.map_image, cv2.MORPH_CLOSE, kernel)
         
         if invert:
@@ -155,22 +172,42 @@ class Map:
         # ================ Retrieve Submap ======================
         # Retrieve the normal submap with the same transformation as __init__
         if display:
-            x = int(location[0] * self.scale + self.offset_x)
-            y = int(location[1] * self.scale - self.old_min_y + self.offset_y)
+            # Apply same world-to-map transformation as waypoints
+            x = int((location[0] - self.world_min_x) * self.scale + self.offset_x)
+            y = int((location[1] - self.world_min_y) * self.scale + self.offset_y)
             
             H, W, _ = self.map_image.shape
             w, h = self.range
+            
             if self.relative_pos == "forward":
-                radius = int((((w / 2) ** 2 + (h / 2) ** 2) ** 0.5) * 2.0)
+                base_radius = int((((w / 2) ** 2 + (h / 2) ** 2) ** 0.5) * 2.0)
             elif self.relative_pos == "center":
-                radius = int(((w / 2) ** 2 + (h / 2) ** 2) ** 0.5)
+                base_radius = int(((w / 2) ** 2 + (h / 2) ** 2) ** 0.5)
+            
+            rotation_padding = int(base_radius * 1.5) 
+            radius = base_radius + rotation_padding
 
             # clamp once
             x1, x2 = max(0, x - radius), min(W, x + radius)
             y1, y2 = max(0, y - radius), min(H, y + radius)
+            
+            # DEBUG: Check if cutout would be empty
+            if x1 >= x2 or y1 >= y2:
+                self.log.WARNING(f"Empty cutout bounds: x1={x1}, x2={x2}, y1={y1}, y2={y2}. "
+                                f"Location: ({location[0]:.1f}, {location[1]:.1f}), "
+                                f"Map shape: ({W}, {H}), base_radius: {base_radius}, padded_radius: {radius}", frequency = 10)
+                return None, None
+            
+            self.log.DEBUG(f"Cutout bounds: x1={x1}, x2={x2}, y1={y1}, y2={y2}, shape={self.map_image.shape}", frequency = 10)
 
             # First cutout uses radius to avoid missing lanes during rotation
             cutout = self.map_image[y1:y2, x1:x2]
+            
+            # Verify cutout is valid
+            if cutout.size == 0:
+                self.log.WARNING(f"Empty cutout image generated. Bounds: ({y1}:{y2}, {x1}:{x2})")
+                return None, None
+            
             cx, cy = x - x1, y - y1
             cos_t, sin_t = np.cos(heading_rad), np.sin(heading_rad)
             M = np.float32([[cos_t, sin_t, (1 - cos_t) * cx - sin_t * cy],
@@ -183,16 +220,35 @@ class Map:
             rotated = cv2.cuda.warpAffine(gpu_img, M, (cutout.shape[1], cutout.shape[0]))
             rotated = rotated.download()
 
-            # one precise crop
+            # one precise crop - handle negative center by clamping to visible region
             if self.relative_pos == "center":
-                x1f, x2f = max(0, cx - w // 2), min(rotated.shape[1], cx + w // 2)
-                y1f, y2f = max(0, cy - h // 2), min(rotated.shape[0], cy + h // 2)
+                x1f = max(0, int(cx - w // 2))
+                x2f = min(rotated.shape[1], int(cx + w // 2))
+                y1f = max(0, int(cy - h // 2))
+                y2f = min(rotated.shape[0], int(cy + h // 2))
             elif self.relative_pos == "forward":
-                x1f, x2f = max(0, cx - w // 2), min(rotated.shape[1], cx + w // 2)
-                y1f, y2f = max(0, cy - h), min(rotated.shape[0], cy)
+                x1f = max(0, int(cx - w // 2))
+                x2f = min(rotated.shape[1], int(cx + w // 2))
+                y1f = max(0, int(cy - h))
+                y2f = min(rotated.shape[0], int(cy))
+
+            # If requested region is entirely out of bounds after rotation, skip
+            if x1f >= x2f or y1f >= y2f:
+                self.log.DEBUG(f"Crop region out of rotated bounds: x1f={x1f}, x2f={x2f}, y1f={y1f}, y2f={y2f}. "
+                              f"Rotated shape: {rotated.shape}, center: ({cx}, {cy}). Returning black frame.")
+                # Return a black frame instead of crashing
+                black_frame = np.zeros((h, w, 3), dtype=np.uint8)
+                return None, black_frame
 
             # Second cutout to refine to the correct range
             cutout = rotated[y1f:y2f, x1f:x2f]
+            
+            # If cutout is smaller than expected, pad with black
+            if cutout.shape[0] < h or cutout.shape[1] < w:
+                padded = np.zeros((h, w, 3), dtype=np.uint8)
+                padded[:cutout.shape[0], :cutout.shape[1]] = cutout
+                cutout = padded
+            
             unrouted_cutout = cutout.copy()
         
         # ================= Draw path on map ====================
@@ -209,9 +265,9 @@ class Map:
             
             if display:
                 pts_world = np.atleast_2d(global_wp)[:, :2].astype(float)  # (N,2)
-                # Same transformation
-                pts_world[:, 0] = pts_world[:, 0] * self.scale + self.offset_x
-                pts_world[:, 1] = pts_world[:, 1] * self.scale - self.old_min_y + self.offset_y
+                # Apply same world-to-map transformation as waypoints
+                pts_world[:, 0] = (pts_world[:, 0] - self.world_min_x) * self.scale + self.offset_x
+                pts_world[:, 1] = (pts_world[:, 1] - self.world_min_y) * self.scale + self.offset_y
 
                 pts_in_cutout = pts_world - np.array([x1, y1], dtype=float)   # (N,2)
 
