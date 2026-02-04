@@ -4,9 +4,9 @@ import json
 import cv2
 import time
 
-from utils.others.lidar_visualization import LIDARVisualizer
-from utils.spawn.callback import Extractor
-from utils.messages.logger import Logger
+from utils.others import LIDARVisualizer
+from . import Extractor
+from utils.messages import Logger
 
 from config.enum import CarlaLabel
 from typing import Optional

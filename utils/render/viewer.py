@@ -7,27 +7,23 @@ parent = os.path.dirname(folder)
 import pygame
 import numpy as np
 import time
-import gc
+import carla
 
 
-from utils.control.world import World
-from utils.control.controller import Controller
-from utils.control.sensor_manager import SensorManager
-from utils.render.hud import HUD, draw_border, overlay_waypoints_on_map, overlay_gmm_on_map
-from utils.control.vehicle_control import Vehicle
-from utils.control.pid import lateral_control, longitudinal_speed
+from utils.control import (
+    World, Controller, SensorManager
+)
+from . import HUD, draw_border, overlay_waypoints_on_map, overlay_gmm_on_map
+from utils.control import Vehicle, lateral_control, longitudinal_speed
 
-from utils.spawn.sensor_spawner import *
 from config.enum import (
     CameraView,
     JOYBINDS, 
     KEYBINDS, 
 )
-from utils.messages.message_handler import (
+from utils.messages import (
     MessageSubscriber,
-    MessageSender
-)
-from utils.messages.all_messages import (
+    MessageSender,
     PolylinesCmd,
     ServerFps,
     ClientFps,
@@ -65,9 +61,7 @@ from collections import deque
 
 from model.inference import AsyncInference
 from utils.others.data_processor import TrajectoryBuffer
-from utils.math.world_map import Map
-from utils.math.path import ReplayHandler, OptimizePath
-from utils.math.path import PathHandler
+from utils.math import Map, ReplayHandler, OptimizePath
 
         
 conf = toml.load(os.path.join(parent, "../config/config.toml"))
