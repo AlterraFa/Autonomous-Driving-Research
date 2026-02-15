@@ -1,0 +1,87 @@
+common: &common_settings
+  patch_size: 16
+  tubelet_size: 2
+  crop_size: 224
+  fps: 2
+  nclips: 3
+
+loader_setup: &loader_settings
+  num_workers: 4
+  persistent_workers: true
+  pin_mem: true
+
+train:
+  <<: *common_settings
+  <<: *loader_settings
+  batch_size: 8
+  allow_clip_overlap: true
+  random_jiggle: true
+  datasets:
+    - name: "carla"
+      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20251019_161905_best_spatial.csv"
+      ctx_fpcs: 16
+      pred_fpcs: 8
+    - name: "carla"
+      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20251025_142727_best_spatial.csv"
+      ctx_fpcs: 16
+      pred_fpcs: 8
+    - name: "carla"
+      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_005321_spatial.csv"
+      ctx_fpcs: 16
+      pred_fpcs: 8
+    - name: "carla"
+      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_010805_spatial.csv"
+      ctx_fpcs: 16
+      pred_fpcs: 8
+    - name: "carla"
+      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_090029_spatial.csv"
+      ctx_fpcs: 16
+      pred_fpcs: 8
+    - name: "carla"
+      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_231048_spatial.csv"
+      ctx_fpcs: 16
+      pred_fpcs: 8
+    - name: "orin"
+      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Orin_run_2026-01-30_18-44-12.csv"
+      ctx_fpcs: 16
+      pred_fpcs: 8  
+
+val:
+  <<: *common_settings
+  <<: *loader_settings
+  batch_size: 8
+  allow_clip_overlap: true
+  random_jiggle: false
+  datasets:
+    - name: "bdd100k"
+      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/model/JEPA_ACT/data_bdd100k.csv"
+      ctx_fpcs: 16
+      pred_fpcs: 8
+
+mask:
+- aspect_ratio:
+  - 0.75
+  - 1.5
+  full_complement: false
+  max_keep: null
+  max_temporal_keep: 1.0
+  num_blocks: 8
+  spatial_scale:
+  - 0.15
+  - 0.15
+  temporal_scale:
+  - 1.0
+  - 1.0
+- aspect_ratio:
+  - 0.75
+  - 1.5
+  full_complement: false
+  max_keep: null
+  max_temporal_keep: 1.0
+  num_blocks: 2
+  spatial_scale:
+  - 0.7
+  - 0.7
+  temporal_scale:
+  - 1.0
+  - 1.0
