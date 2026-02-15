@@ -104,6 +104,21 @@ def refresh_world_references(client, virt_world, spawner=None):
     
     logger.INFO(f"World references refreshed")
 
+def reinit_sensors(virt_world):
+    """
+    Reinitialize sensors with the new world reference.
+    """
+    rgb_sensor = RGB(virt_world.world)
+    gnss_sensor = GNSS(virt_world.world, freq_hz = FREQ, mu_ms = MEAN_DELAY, sigma_ms = STDDEV_DELAY)
+    gnss_sensor.set_attribute("noise_lat_stddev", LAT_STDDEV / 111320.0)
+    gnss_sensor.set_attribute("noise_lon_stddev", LON_STDDEV / 111320.0)
+    imu_sensor = IMU(virt_world.world)
+    imu_sensor.set_attribute("noise_gyro_bias_x", 0.005)
+    imu_sensor.set_attribute("noise_gyro_bias_y", 0.005)
+    
+    logger.INFO("Sensors reinitialized with new world")
+    return rgb_sensor, gnss_sensor, imu_sensor
+
 def load_recording(client, virt_world, spawner, folder, replay_dir):
     map_name = replay_dir.split("/")[-2]
     logger.INFO(f"Loading map: {map_name}")
@@ -158,11 +173,6 @@ def main(args):
     imu_sensor = IMU(virt_world.world)
     imu_sensor.set_attribute("noise_gyro_bias_x", 0.005)
     imu_sensor.set_attribute("noise_gyro_bias_y", 0.005)
-    # semseg_sensor = SemanticSegmentation(
-    #     virt_world.world, 
-    #     filter_labels = [CLabel.Road], 
-    #     binarize = True,
-    # )
     
     script_path = os.path.abspath(__file__)
     folder = os.path.dirname(script_path)
@@ -180,7 +190,7 @@ def main(args):
     
 
     if args.mode == "manual" or args.mode == "inference":
-        spawner.spawn_mass_vehicle(7, exclude = [VClass.Large, VClass.Tiny])
+        spawner.spawn_mass_vehicle(15, exclude = [VClass.Large, VClass.Tiny])
         spawner.spawn_single_vehicle(bp_id = "vehicle.dodge.charger_2020", exclude = [VClass.Large, VClass.Medium, VClass.Tiny], autopilot = False)
         controlling_vehicle = Vehicle(spawner.single_vehicle, virt_world.world)
         viewer_args.update({"vehicle": controlling_vehicle})
@@ -198,11 +208,15 @@ def main(args):
             if not ret:
                 logger.ERROR(f"Failed to load log at {path_2_recording}")
                 continue
+            
+            # Reinitialize sensors with new world
+            rgb_sensor, gnss_sensor, imu_sensor = reinit_sensors(virt_world)
 
             # Read the recordings parameters, clean previous vehicle and play the recording
             duration = get_recording_duration(path_2_recording)
             client.show_recorder_file_info(path_2_recording, False)
-            start_offset, stop_offset = 1.5, 4
+            
+            start_offset, stop_offset = 0, 4
             duration -= start_offset + stop_offset
             if duration <= 0:
                 logger.ERROR(f"Skip replay (duration <= 0): {replay_dir}")
@@ -236,7 +250,6 @@ def main(args):
                 rgb_sensor     : None, 
                 gnss_sensor    : None, 
                 imu_sensor     : None, 
-                # semseg_sensor  : None,
             }
             if not SensorSpawn.test_sensor(game_viewer, sensors_metadata):
                 logger.ERROR(f"Skipping replay due to sensor initialization failure: {replay_dir}")
@@ -265,7 +278,7 @@ def main(args):
 
             true_trajectories    = np.load(path_2_waypoints)
             midlane_trajectories = map_processor.precompute_waypoints(true_trajectories)
-            replayer             = ReplayHandler(virt_world, true_trajectories, midlane_trajectories, dataset_dir, args.temporal, args.debug)
+            replayer             = ReplayHandler(virt_world, true_trajectories, midlane_trajectories, dataset_dir, args.temporal, args.draw_waypoints if hasattr(args, 'draw_waypoints') else False)
             
             progress = Progress(
                 TextColumn("[progress.description]{task.description}"),
@@ -284,6 +297,7 @@ def main(args):
                 map_processor = map_processor
             )
             lp.add_function(game_viewer.map_processor.retrieve_map)
+            
             with progress:
                 lp_wrapper()
             progress.stop()
@@ -329,7 +343,7 @@ def main(args):
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             directory = f"{folder}/{args.record}/{map_name}/recording_{date}"
             os.makedirs(directory, exist_ok=True)
-            client.start_recorder(f"{directory}/log.log")
+            client.start_recorder(f"{directory}/log.log", True)
 
             trajectory_logging = TrajectoryBuffer(directory, min_dt_s = MIN_SAVING_DIST)
             game_viewer.attach_plugins(
@@ -457,7 +471,7 @@ if __name__ == "__main__":
         help="Use temporal (time-based) waypoint generation instead of spatial."
     )
     replay_parser.add_argument(
-        "--debug",
+        "--draw-waypoints",
         action = "store_true",
         help = "Draw debugging waypoints onto the world"
     )
@@ -484,7 +498,7 @@ if __name__ == "__main__":
     # ====================================================== #
     infer_parser = subparser.add_parser("inference", help = "Autonomous inference")
     infer_parser.add_argument(
-        "--debug",
+        "--draw-waypoints",
         action = "store_true",
         help = "Draw debugging waypoints onto the world"
     )
