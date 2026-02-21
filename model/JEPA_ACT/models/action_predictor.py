@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import math
+from torch.nn.modules.utils import _pair
 
 from .utils.modules import ACBlock as Block
 from .utils.pos_embs import get_3d_sincos_pos_embed, get_2d_sincos_pos_embed
@@ -28,7 +29,6 @@ class TransformerActionPredictor(nn.Module):
         drop_path_rate=0.0,
         norm_layer=nn.LayerNorm,
         init_std=0.02,
-        uniform_power=True,
         use_silu=False,
         wide_silu=True,
         use_activation_checkpointing=False,
@@ -36,6 +36,8 @@ class TransformerActionPredictor(nn.Module):
         use_sdpa = False,
         **kwargs):
         super().__init__()
+        
+        img_size = _pair(img_size)
         
         self.grid_H, self.grid_W = (int(size / patch_size) for size in img_size)
         self.grid_ctx  = ctx_nframes // tubelet_size
@@ -119,25 +121,29 @@ class TransformerActionPredictor(nn.Module):
     def no_weight_decay(self):
         return {}
 
-    def forward(self, ctxt_z: torch.Tensor, goal_z: torch.Tensor):
-        
-        ctxt_z = self.to_action(ctxt_z)
-        goal_z = self.to_action(goal_z)
+    def forward(self, ctxt_z: torch.Tensor, goal_z: torch.Tensor = None):
 
-        B, *_ = ctxt_z.shape
-        
-        z = torch.concat([ctxt_z, goal_z], dim=1)
+        if goal_z is None:
+            z = ctxt_z
+        else:
+            z = torch.concat([ctxt_z, goal_z], dim=1)
+        z = self.to_action(z)
 
-        frame_tokens = z.view(B, self.total_timestep, self.token_pframes, self.action_embed_dim) # -- B, T, H*W, D
-        action_tokens = self.action_embed.expand(B, -1, -1).view(
-            B, self.total_timestep, self.action_pframe, self.action_embed_dim
+        B, tokens, _ = z.shape
+        
+        # -- Handle case where there are less timestep
+        total_timestep = tokens // self.token_pframes
+        frame_tokens = z.view(B, total_timestep, self.token_pframes, self.action_embed_dim) # -- B, T, H*W, D
+        action_tokens = self.action_embed.expand(B, -1, -1)[:, :total_timestep * self.action_pframe, :]
+        action_tokens = action_tokens.view(
+            B, total_timestep, self.action_pframe, self.action_embed_dim
         ) # -- B, T, A, D
 
         # -- Interleave frame tokens with action tokens per frame
         # -- Reason: The model must create action from goal frames
         # -- We will use cross attention between image and action latent for prediction
         x = torch.cat([frame_tokens, action_tokens], dim=2).reshape(
-            B, self.total_timestep * (self.token_pframes + self.action_pframe), self.action_embed_dim
+            B, total_timestep * (self.token_pframes + self.action_pframe), self.action_embed_dim
         ) # -- B, T, H*W + A, D -> B, T(H*W + A), D 
 
         for i, blk in enumerate(self.action_blocks):
@@ -147,7 +153,7 @@ class TransformerActionPredictor(nn.Module):
                     x, 
                     None,
                     None,
-                    self.total_timestep,
+                    total_timestep,
                     self.grid_H,
                     self.grid_W,
                     self.action_pframe,
@@ -158,13 +164,13 @@ class TransformerActionPredictor(nn.Module):
                     x, 
                     mask=None,
                     attn_mask=None,
-                    T=self.total_timestep,
+                    T=total_timestep,
                     H_patches=self.grid_H,
                     W_patches=self.grid_W,
                     action_tokens = self.action_pframe
                 )
                 
-        a = x.reshape(B, self.total_timestep, -1, self.action_embed_dim)[:, :, -self.action_pframe:, :]
+        a = x.reshape(B, total_timestep, -1, self.action_embed_dim)[:, :, -self.action_pframe:, :]
         a = a.reshape(B, -1, self.action_embed_dim)
 
         a = self.norm(a)
@@ -188,7 +194,7 @@ if __name__ == "__main__":
     ).to(device)
     
     dummy = torch.rand((3, 1568, 512)).to(device)
-    dummy1 = torch.rand((3, 784, 512)).to(device)
+    dummy1 = torch.rand((3, 588, 512)).to(device)
 
     with torch.autocast('cuda', torch.bfloat16):
         output = model(dummy, dummy1)
