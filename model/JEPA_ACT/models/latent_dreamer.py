@@ -43,6 +43,7 @@ class VisionTransformerPredictorAC(nn.Module):
         use_activation_checkpointing=False,
         use_rope=True,
         action_embed_dim=7,
+        use_sdpa=False,
         **kwargs
     ):
         super().__init__()
@@ -90,6 +91,7 @@ class VisionTransformerPredictorAC(nn.Module):
                     attn_drop=attn_drop_rate,
                     drop_path=dpr[i],
                     norm_layer=norm_layer,
+                    use_sdpa=use_sdpa
                 )
                 for i in range(depth)
             ]
