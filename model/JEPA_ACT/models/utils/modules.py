@@ -188,9 +188,10 @@ class ACRoPEAttention(nn.Module):
         h_mask *= self.grid_size / H
         w_mask *= self.grid_size / W
 
+        # -- Rotating action differently depth wise
         # -- split out action tokens from sequence
         if action_tokens > 0:
-            x = x.view(B, -1, action_tokens + H * W, C)  # [B, T, 1+H*W, D]
+            x = x.view(B, -1, action_tokens + H * W, C)  # [B, T, A+H*W, D]
 
             action_q, action_k, action_v = [], [], []
             for i in range(action_tokens):
