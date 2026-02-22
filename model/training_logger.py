@@ -25,6 +25,7 @@ class TrainingLogger:
         run_name: Optional name for the run (will be appended to log_dir)
         metrics_to_track: List of metric names to track (optional, auto-detected if not provided)
         progress_type: Either "tqdm" or "table" for progress display style
+        use_validation: Whether to expect validation metrics (set to False for self-supervised training)
     """
     
     def __init__(
@@ -33,12 +34,14 @@ class TrainingLogger:
         epochs: int,
         run_name: Optional[str] = None,
         metrics_to_track: Optional[List[str]] = None,
-        progress_type: Literal["tqdm", "table"] = "tqdm"
+        progress_type: Literal["tqdm", "table"] = "tqdm",
+        use_validation: bool = True
     ):
         self.epochs = epochs
         self.current_epoch = 0
         self.metrics_to_track = metrics_to_track or []
         self.progress_type = progress_type
+        self.use_validation = use_validation
         
         # Validate progress_table availability
         if progress_type == "table" and not PROGRESS_TABLE_AVAILABLE:
@@ -220,17 +223,24 @@ class TrainingLogger:
                 # Add metric columns dynamically on first batch
                 if not self._table_columns_added:
                     for key in metrics.keys():
-                        self.progress_table.add_column(f"Train | {key}", color="red")
-                    for key in metrics.keys():
-                        self.progress_table.add_column(f"Val | {key}", color="cyan")
+                        if self.use_validation:
+                            self.progress_table.add_column(f"Train | {key}", color="blue")
+                            self.progress_table.add_column(f"Val | {key}", color="green")
+                        else:
+                            # No validation mode - just show metric name without 'Train' prefix
+                            self.progress_table.add_column(key, color="blue")
                     self._table_columns_added = True
                 
                 # Update running average in the table
-                prefix = "Train | " if phase == "train" else "Val | "
+                if self.use_validation:
+                    prefix = "Train | " if phase == "train" else "Val | "
+                else:
+                    prefix = ""  # No prefix in self-supervised mode
                 for key in metrics.keys():
                     # Get running average from accumulator
                     avg_value = sum(accum[key]) / len(accum[key])
-                    self.progress_table[f"{prefix}{key}"] = avg_value
+                    column_name = f"{prefix}{key}" if prefix else key
+                    self.progress_table[column_name] = avg_value
             
     def log_epoch(
         self,
@@ -251,8 +261,10 @@ class TrainingLogger:
         # Use accumulated metrics if not provided
         if train_metrics is None:
             train_metrics = {k: sum(v) / len(v) for k, v in self._train_metrics_accum.items() if v}
-        if val_metrics is None:
+        if val_metrics is None and self.use_validation:
             val_metrics = {k: sum(v) / len(v) for k, v in self._val_metrics_accum.items() if v}
+        elif val_metrics is None:
+            val_metrics = {}
             
         # Log training metrics
         for key, value in train_metrics.items():
@@ -260,11 +272,12 @@ class TrainingLogger:
                 value = value.item()
             self.writer.add_scalar(f"Train/{key}", value, epoch)
             
-        # Log validation metrics
-        for key, value in val_metrics.items():
-            if isinstance(value, torch.Tensor):
-                value = value.item()
-            self.writer.add_scalar(f"Val/{key}", value, epoch)
+        # Log validation metrics (only if validation is enabled and metrics exist)
+        if self.use_validation and val_metrics:
+            for key, value in val_metrics.items():
+                if isinstance(value, torch.Tensor):
+                    value = value.item()
+                self.writer.add_scalar(f"Val/{key}", value, epoch)
             
         # Log extra metrics (learning rate, EMA, etc.)
         if extra_metrics:
@@ -288,13 +301,11 @@ class TrainingLogger:
             # For table mode, add extra metric columns and finalize row
             if self.progress_table is not None:
                 # Add extra metric columns on first epoch (train/val columns added in log_batch)
-                if extra_metrics:
+                if extra_metrics and not hasattr(self, '_extra_columns_added'):
                     for key in extra_metrics.keys():
-                        # Check if column exists by trying to update
-                        try:
-                            self.progress_table.add_column(key)
-                        except:
-                            pass  # Column already exists
+                        color = "yellow" if "lr" in key.lower() else "magenta"
+                        self.progress_table.add_column(f"Misc | {key}", color=color)
+                    self._extra_columns_added = True
                 
                 # Update extra metrics
                 if extra_metrics:
@@ -302,9 +313,9 @@ class TrainingLogger:
                         if isinstance(value, torch.Tensor):
                             value = value.item()
                         if "lr" in key.lower():
-                            self.progress_table[key] = f"{value:.2e}"
+                            self.progress_table[f"Misc | {key}"] = f"{value:.2e}"
                         else:
-                            self.progress_table[key] = value
+                            self.progress_table[f"Misc | {key}"] = value
                 
                 self.progress_table.next_row()
             
@@ -325,13 +336,17 @@ class TrainingLogger:
             
         parts = [f"Epoch {epoch}/{self.epochs}"]
         
-        # Add train metrics
+        # Add train metrics (only show 'Train' prefix if validation is enabled)
         for key, value in train_metrics.items():
-            parts.append(f"Train {key}: {value:.4f}")
+            if self.use_validation:
+                parts.append(f"Train {key}: {value:.4f}")
+            else:
+                parts.append(f"{key}: {value:.4f}")
             
-        # Add val metrics
-        for key, value in val_metrics.items():
-            parts.append(f"Val {key}: {value:.4f}")
+        # Add val metrics (only if validation is enabled and metrics exist)
+        if self.use_validation and val_metrics:
+            for key, value in val_metrics.items():
+                parts.append(f"Val {key}: {value:.4f}")
             
         # Add extra metrics
         if extra_metrics:
@@ -472,6 +487,15 @@ class TrainingLogger:
                 self.progress_table.close()
         self.writer.close()
         
+    def set_validation_mode(self, use_validation: bool):
+        """
+        Enable or disable validation mode dynamically.
+        
+        Args:
+            use_validation: Whether to expect validation metrics
+        """
+        self.use_validation = use_validation
+        
     def __enter__(self):
         return self
     
@@ -505,14 +529,69 @@ def get_next_run(exp_dir: str) -> int:
     return max(run_numbers) + 1 if run_numbers else 1
 
 
-def test_logger(progress_type: str = "tqdm"):
-    """Test function for TrainingLogger with specified progress type."""
+def create_supervised_logger(
+    log_dir: str,
+    epochs: int,
+    run_name: Optional[str] = None,
+    progress_type: Literal["tqdm", "table"] = "tqdm"
+) -> TrainingLogger:
+    """
+    Create a TrainingLogger configured for supervised training (with validation).
+    
+    Args:
+        log_dir: Directory to save TensorBoard logs
+        epochs: Total number of training epochs
+        run_name: Optional name for the run (will be appended to log_dir)
+        progress_type: Either "tqdm" or "table" for progress display style
+        
+    Returns:
+        TrainingLogger instance with use_validation=True
+    """
+    return TrainingLogger(
+        log_dir=log_dir,
+        epochs=epochs,
+        run_name=run_name,
+        progress_type=progress_type,
+        use_validation=True
+    )
+
+
+def create_self_supervised_logger(
+    log_dir: str,
+    epochs: int,
+    run_name: Optional[str] = None,
+    progress_type: Literal["tqdm", "table"] = "tqdm"
+) -> TrainingLogger:
+    """
+    Create a TrainingLogger configured for self-supervised training (no validation).
+    
+    Args:
+        log_dir: Directory to save TensorBoard logs
+        epochs: Total number of training epochs
+        run_name: Optional name for the run (will be appended to log_dir)
+        progress_type: Either "tqdm" or "table" for progress display style
+        
+    Returns:
+        TrainingLogger instance with use_validation=False
+    """
+    return TrainingLogger(
+        log_dir=log_dir,
+        epochs=epochs,
+        run_name=run_name,
+        progress_type=progress_type,
+        use_validation=False
+    )
+
+
+def test_logger(progress_type: str = "tqdm", use_validation: bool = True):
+    """Test function for TrainingLogger with specified progress type and validation mode."""
     import tempfile
     import time
     
-    print("=" * 60)
-    print(f"Testing TrainingLogger with progress_type='{progress_type}'")
-    print("=" * 60)
+    mode_str = "with validation" if use_validation else "no validation (self-supervised)"
+    print("=" * 70)
+    print(f"Testing TrainingLogger with progress_type='{progress_type}' ({mode_str})")
+    print("=" * 70)
     
     # Create a temporary directory for testing
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -520,8 +599,9 @@ def test_logger(progress_type: str = "tqdm"):
         logger = TrainingLogger(
             log_dir=tmpdir,
             epochs=5,
-            run_name=f"test_run_{progress_type}",
-            progress_type=progress_type
+            run_name=f"test_run_{progress_type}_{mode_str.replace(' ', '_')}",
+            progress_type=progress_type,
+            use_validation=use_validation
         )
         
         # Simulate training
@@ -548,16 +628,17 @@ def test_logger(progress_type: str = "tqdm"):
                     logger.log_batch(train_metrics, phase="train")
                     time.sleep(0.02)  # Simulate computation time
                 
-                # Validation phase - using batch_iterator
-                logger.start_phase(num_val_batches, desc="Validation")
-                
-                for batch_idx in logger.batch_iterator(fake_val_loader):
-                    val_metrics = {
-                        "Loss": 1.1 - epoch * 0.15 - batch_idx * 0.01,
-                        "L1_Loss": 0.55 - epoch * 0.06 - batch_idx * 0.005,
-                    }
-                    logger.log_batch(val_metrics, phase="val")
-                    time.sleep(0.02)
+                # Validation phase (only if validation is enabled)
+                if use_validation:
+                    logger.start_phase(num_val_batches, desc="Validation")
+                    
+                    for batch_idx in logger.batch_iterator(fake_val_loader):
+                        val_metrics = {
+                            "Loss": 1.1 - epoch * 0.15 - batch_idx * 0.01,
+                            "L1_Loss": 0.55 - epoch * 0.06 - batch_idx * 0.005,
+                        }
+                        logger.log_batch(val_metrics, phase="val")
+                        time.sleep(0.02)
                 
                 # Log epoch with extra metrics
                 logger.log_epoch(
@@ -585,19 +666,32 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         mode = sys.argv[1].lower()
         if mode in ("tqdm", "table"):
-            test_logger(mode)
+            print(f"\nTesting {mode} mode with validation:")
+            test_logger(mode, use_validation=True)
+            print(f"\nTesting {mode} mode without validation (self-supervised):")
+            test_logger(mode, use_validation=False)
         else:
             print(f"Unknown progress type: {mode}. Use 'tqdm' or 'table'.")
     else:
-        # Test both modes
-        print("\n" + "=" * 60)
-        print("TESTING TQDM MODE")
-        print("=" * 60 + "\n")
-        test_logger("tqdm")
+        # Test both progress types and validation modes
+        print("\n" + "=" * 70)
+        print("TESTING TQDM MODE WITH VALIDATION")
+        print("=" * 70 + "\n")
+        test_logger("tqdm", use_validation=True)
+        
+        print("\n" + "=" * 70)
+        print("TESTING TQDM MODE WITHOUT VALIDATION (SELF-SUPERVISED)")
+        print("=" * 70 + "\n")
+        test_logger("tqdm", use_validation=False)
         
         print("\n\n")
         
-        print("=" * 60)
-        print("TESTING PROGRESS-TABLE MODE")
-        print("=" * 60 + "\n")
-        test_logger("table")
+        print("=" * 70)
+        print("TESTING PROGRESS-TABLE MODE WITH VALIDATION")
+        print("=" * 70 + "\n")
+        test_logger("table", use_validation=True)
+        
+        print("\n" + "=" * 70)
+        print("TESTING PROGRESS-TABLE MODE WITHOUT VALIDATION (SELF-SUPERVISED)")
+        print("=" * 70 + "\n")
+        test_logger("table", use_validation=False)
