@@ -44,7 +44,7 @@ def _find_metadata_values(data, target_keys):
             for key, value in obj.items():
                 # Check if this key is one we're looking for
                 if key in keys_to_find and key not in found_values:
-                    found_values[key] = value
+                    found_values[key] = float(value)
                     keys_to_find = [k for k in keys_to_find if k != key]
                     if not keys_to_find:
                         return
@@ -296,7 +296,6 @@ class ActVideoDataset(Dataset):
     def __init__(
         self,
         data_paths,
-        dataset_fpc=None, 
         ctx_frames_per_clips=16,
         pred_frames_per_clips=8,
         nclips=1,
@@ -506,7 +505,6 @@ if __name__ == "__main__":
     ctx_fpcs   = [name['ctx_fpcs'] for name in args['train']['datasets']]
     pred_fpcs  = [name['pred_fpcs'] for name in args['train']['datasets']]
 
-    mask_cfg     = args["mask"]
     dataset_fpcs = [16, 16]
     crop_size    = 256 
     patch_size   = 16 
@@ -522,13 +520,6 @@ if __name__ == "__main__":
         pred_frames_per_clips = pred_fpcs,
         nclips = 3,
         individual_transform = standardize_transform  # Apply resize to each clip
-    )
-
-    collator = MaskCollator(
-        mask_cfg,
-        dataset_fpcs = dataset.datasets_fpc,
-        crop_size = (256, 256), 
-        patch_size = (16, 16)
     )
 
     dataloader = DataLoader(dataset, batch_size = 16, shuffle = True)

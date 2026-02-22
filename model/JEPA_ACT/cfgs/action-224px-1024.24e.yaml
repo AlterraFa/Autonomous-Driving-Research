@@ -1,9 +1,11 @@
 common: &common_settings
   patch_size: 16
   tubelet_size: 2
-  crop_size: 256
+  crop_size: 224
   fps: 2
   nclips: 1
+  ctx_fpcs: 16
+  pred_fpcs: 8
 
 loader_setup: &loader_settings
   num_workers: 4
@@ -13,38 +15,24 @@ loader_setup: &loader_settings
 train:
   <<: *common_settings
   <<: *loader_settings
-  batch_size: 4
+  batch_size: 2
   allow_clip_overlap: true
   random_jiggle: true
   datasets:
     - name: "carla"
       path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20251019_161905_best_spatial.csv"
-      ctx_fpcs: 16
-      pred_fpcs: 8
     - name: "carla"
       path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20251025_142727_best_spatial.csv"
-      ctx_fpcs: 16
-      pred_fpcs: 8
     - name: "carla"
       path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_005321_spatial.csv"
-      ctx_fpcs: 16
-      pred_fpcs: 8
     - name: "carla"
       path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_010805_spatial.csv"
-      ctx_fpcs: 16
-      pred_fpcs: 8
     - name: "carla"
       path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_090029_spatial.csv"
-      ctx_fpcs: 16
-      pred_fpcs: 8
     - name: "carla"
       path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_231048_spatial.csv"
-      ctx_fpcs: 16
-      pred_fpcs: 8
     - name: "orin"
       path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Orin_run_2026-01-30_18-44-12.csv"
-      ctx_fpcs: 16
-      pred_fpcs: 8  
 
 val:
   <<: *common_settings
@@ -74,18 +62,55 @@ meta:
   dtype: bfloat16
   save_every_freq: 2
   seed: 239
-  use_sdpa: true
 
 model: 
+  compile: false
+  common: &common_model
+    action_pframe: 1
+    action_embed_dim: 512
+    use_sdpa: true
+
   enc: 
+    <<: *common_settings
     name: vjepa2_vit_large
     load_from: facebookresearch/vjepa2
-    use_grad_checkpointing: true
+    use_activation_checkpointing: true
 
 
   pred:
+    <<: *common_settings
+    <<: *common_model
+    pred_embed_dim: 1024
+    depth: 4
+    num_heads: 16
+    mlp_ratio: 4.0
+    qkv_bias: true
+    drop_rate: 0.0
+    attn_drop_rate: 0.0
+    drop_path_rate: 0.0
+    init_std: 0.02
+    use_silu: true
+    wide_silu: true
+    is_frame_causal: true
+    use_activation_checkpointing: true
+    use_rope: true
+
 
   action:
+    <<: *common_settings
+    <<: *common_model
+    depth: 4
+    num_heads: 16
+    mlp_ratio: 4.0
+    qkv_bias: true
+    drop_rate: 0.0
+    attn_drop_rate: 0.0
+    drop_path_rate: 0.0
+    init_std: 0.02
+    use_silu: true
+    wide_silu: true
+    use_activation_checkpointing: true
+    use_rope: true
 
 optimization:
   anneal: 15
@@ -97,3 +122,14 @@ optimization:
   start_lr: 0.000075
   warmup: 15
   weight_decay: 0.04
+
+loss:
+  auto_steps: 2
+  loss_exp: 1.0
+  normalize_reps: true
+  reg_coeff: 0.0
+  l2: 1.0
+  l1: 0.05
+  lv: 0.1
+  lc: 0.01  # Increased from 0.001 to 0.01 (10x higher)
+  lm: 0.1
