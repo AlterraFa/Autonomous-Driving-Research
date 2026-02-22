@@ -1,15 +1,15 @@
 import os, sys
 import resource
 import yaml
-import copy
 import time
 import gc
+from functools import partial
 from pathlib import Path
 
 project_root = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(project_root))
-
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+FOLDER_DIR = os.path.dirname(os.path.dirname(__file__))
 
 import torch
 import torch.nn.functional as F
@@ -20,24 +20,33 @@ from model.JEPA_ACT.train_script.action.compile import (
     compile_dataloader,
     compile_opt
 )
-from utils.messages.logger import Logger
-
-from model.JEPA_ACT.masks.utils import apply_masks
 from model.training_logger import (
     TrainingLogger, 
-    get_next_run
+    get_next_run,
+    create_self_supervised_logger
 )
+from utils.messages.logger import Logger
 from model.early_stop import EarlyStopping
 from torch.nn import functional as F
 
-def get_vram_usage() -> float:
-    if torch.cuda.is_available():
-        return round(torch.cuda.memory_reserved() / (1024 ** 3), 3)
-    return 0.0
-
 logger = Logger()
 
-FOLDER_DIR = os.path.dirname(os.path.dirname(__file__))
+def gpu_timer(funct, log_timming = True):
+    log_timming = log_timming and torch.cuda.is_available()
+    
+    elapsed_time = -1.0
+    if log_timming:
+        start = torch.cuda.Event(enable_timing = True)
+        end = torch.cuda.Event(enable_timing = True)
+        start.record()
+        
+    result = funct()
+    if log_timming:
+        end.record()
+        torch.cuda.synchronize()
+        elapsed_time = start.elapsed_time(end)
+    
+    return result, elapsed_time
 
 
 def load_checkpoint(model, optimizer, checkpoint_dir, prefer_best=True, map_location=None):
@@ -147,6 +156,11 @@ def main(args: dict, yaml_path: str):
     loss_exp      = loss_cfg.get("loss_exp", 1.0)
     normalize_rep = loss_cfg.get('normalize_rep', False)
     reg_coeff     = loss_cfg.get('reg_coeff', 0.0)
+    l1_energy     = loss_cfg.get('l1', 1.0)
+    l2_energy     = loss_cfg.get('l2', 0.0)
+    lv_vcm        = loss_cfg.get('lv', 0.0)
+    lc_vcm        = loss_cfg.get('lc', 0.0)
+    lm_vcm        = loss_cfg.get('lm', 0.0)
 
     meta_cfg: dict = args.get('meta', {})
     dtype = meta_cfg.get('dtype', 'float32')
@@ -221,13 +235,16 @@ def main(args: dict, yaml_path: str):
         final_wd = final_wd
     )
     
-    # sample = next(iter(dataloader))
-    # with torch.autocast('cuda', torch.bfloat16):
-    #     full_clip = torch.concat([sample[0][0].to(torch.device('cuda')), sample[1][0].to(torch.device('cuda'))], dim = 2)
-    #     z = encoder(full_clip)
-    #     print(z.shape)
-
     loader = iter(video_loader)
+
+    log_dir = os.path.join(FOLDER_DIR, "../Experiment/action/")
+    run_idx = get_next_run(log_dir)
+    log_stats = create_self_supervised_logger(
+        log_dir = log_dir,
+        epochs = epochs,
+        run_name = f"run{run_idx}",
+        progress_type = "table"
+    )
     
     gc.disable()
     gc.collect()
@@ -285,11 +302,11 @@ def main(args: dict, yaml_path: str):
                 
                 D = a.size(-1)
                 # -- Prevents vanishing signals
-                hinge = torch.relu(D ** 0.5 - (a ** 2).sum(-1))
+                hinge = torch.relu(D ** 0.5 - (a ** 2).sum(-1)) * l2_energy
                 # -- Sparse action (clearly defined action)
-                sparsity = torch.abs(a).sum(-1)
+                sparsity = torch.abs(a).sum(-1) * l1_energy
                 
-                return (hinge + sparsity).mean()
+                return (hinge + sparsity).mean(), hinge.mean().item(), sparsity.mean().item()
 
             def vcm(a):
 
@@ -299,63 +316,112 @@ def main(args: dict, yaml_path: str):
                 a = a.reshape(N, D)
 
                 # -- Ensure each sample in batch is different (prevent collapse) 
-                variance = torch.relu(1 - torch.std(a, dim = 0)).mean()
+                variance = torch.relu(1 - torch.std(a, dim = 0)).mean() * lv_vcm
 
                 # -- Prevent static action to have value different than 0
-                mean = a.mean()
+                mean = a.mean() * lm_vcm
 
                 # -- Ensure each variable is independent (maximize information capacity)
                 a = a - a.mean(dim = 0)
                 cov = (a.T @ a) / (N - 1)
                 diag_mask = ~torch.eye(D, device = a.device).bool()
-                covariance = cov[diag_mask].pow(2).mean()
-                return covariance + mean + variance
-            
-            return vcm(a) + energy(a)
+                covariance = cov[diag_mask].pow(2).mean() * lc_vcm
+                return covariance + mean + variance, covariance.item(), mean.item(), variance.item()
+                
+            vcm_loss, covariance, mean, variance = vcm(a)
+            energy_loss, hinge, sparsity = energy(a)
+            return vcm_loss + energy_loss, (hinge, sparsity), (variance, covariance, mean)
 
         with torch.amp.autocast(device_type, dtype = dtype, enabled = mixed_precision):
             h = forward_target(clips)
             z_tf, z_ar, a_tf = forward_prediction(h)
             loss_tf  = latent_loss(h, z_tf)
             loss_ar  = latent_loss(h, z_ar)
-            loss_act = action_loss(a_tf)            
-            print(loss_act)
+            loss_act, energy, vcm = action_loss(a_tf)            
+            loss = loss_tf + loss_ar + loss_act
             
+            
+        if mixed_precision:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optim)
+        else:
+            loss.backward()
+            
+        if mixed_precision:
+            scaler.step(optim)
+            scaler.update()
+        else:
+            optim.step()
+        optim.zero_grad()
+        
+        loss = loss.item()
+        loss_tf = loss_tf.item()
+        loss_ar = loss_ar.item()
+        loss_act = loss_act.item()
+        
+        return (
+            loss, 
+            loss_tf,
+            loss_ar,
+            loss_act,
+            energy,
+            vcm
+        )
     
-    for epoch in range(epochs):
-        for itr in range(ipe):
+    with log_stats:
+        log_stats.start_training("Training Latent Action WM")
+        
+        for epoch in range(epochs):
             
-            iter_retries = 0
-            iter_success = False
-            while not iter_success:
-                try:
-                    sample = next(loader)
-                    iter_success = True
-                except StopIteration:
-                    loader = iter(video_loader)
-                except Exception as e:
-                    NUM_RETRIES = 5
-                    if iter_retries < NUM_RETRIES:
-                        print(f"Encountered an error while iterating loader: {e}")
-                        iter_retries += 1
-                        time.sleep(5)
-                    else:
-                        print("Exceeded maximum retries when iterating dataloade. Please check for error")
-                        raise e
-                    
-            def load_clips():
-                clips = torch.concat(
-                    [
-                        sample[0][0].to(device, non_blocking = True), 
-                        sample[1][0].to(device, non_blocking = True)
-                    ], dim = 2) 
+            log_stats.start_epoch(epoch, len(video_loader), desc = "Training")
+            
+            for itr in log_stats.batch_iterator([i for i in range(ipe)]):
                 
-                actions = [{key: value.to(device, non_blocking=True) for key, value in action_dict.items()} for action_dict in sample[2]]
-                return clips, actions
+                iter_retries = 0
+                iter_success = False
+                while not iter_success:
+                    try:
+                        sample = next(loader)
+                        iter_success = True
+                    except StopIteration:
+                        loader = iter(video_loader)
+                    except Exception as e:
+                        NUM_RETRIES = 5
+                        if iter_retries < NUM_RETRIES:
+                            print(f"Encountered an error while iterating loader: {e}")
+                            iter_retries += 1
+                            time.sleep(5)
+                        else:
+                            print("Exceeded maximum retries when iterating dataloade. Please check for error")
+                            raise e
+                        
+                def load_clips():
+                    clips = torch.concat(
+                        [
+                            sample[0][0].to(device, non_blocking = True), 
+                            sample[1][0].to(device, non_blocking = True)
+                        ], dim = 2) 
+                    
+                    actions = [{key: value.to(device, non_blocking=True) for key, value in action_dict.items()} for action_dict in sample[2]]
+                    return clips, actions
+                
+                clips, actions = load_clips()
+                
+                (loss, loss_tf, loss_ar, loss_act, energy, vcm), elapsed_time = gpu_timer(partial(train_step, clips))
+
+                log_stats.log_batch({
+                    "Loss": loss,
+                    "Teach Force": loss_tf,
+                    "Autoregressive": loss_ar,
+                    "Action": loss_act,
+                    "Hinge": energy[0],
+                    "Sparsity": energy[1],
+                    "Variance": vcm[0],
+                    "Covariance": vcm[1],
+                    "Mean": vcm[2],
+                    "GPU timer": elapsed_time 
+                })
             
-            clips, actions = load_clips()
-            
-            train_step(clips)
     
 if __name__ == "__main__":
     yaml_path = "./JEPA_ACT/cfgs/action-224px-1024.24e.yaml"

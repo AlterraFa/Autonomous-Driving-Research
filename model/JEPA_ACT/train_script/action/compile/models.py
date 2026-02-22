@@ -51,7 +51,7 @@ def compile_model(
         attn_drop_rate=lpred_cfg.get('attn_drop_rate', 0.0),
         drop_path_rate=lpred_cfg.get('drop_path_rate', 0.0),
         norm_layer=nn.LayerNorm,
-        init_std=lpred_cfg.get('init_std', 0.02),
+        init_std=lpred_cfg.get('init_std', 0.1),
         uniform_power=lpred_cfg.get('uniform_power', True),
         use_silu=lpred_cfg.get('use_silu', False),
         wide_silu=lpred_cfg.get('wide_silu', True),
@@ -60,7 +60,7 @@ def compile_model(
         use_rope=lpred_cfg.get('use_rope', True),
         action_embed_dim=lpred_cfg.get('action_embed_dim', 256),
         use_sdpa=lpred_cfg.get('use_sdpa', False),
-        
+
     )
     latent_predictor.to(device)
 
@@ -83,7 +83,7 @@ def compile_model(
         attn_drop_rate=apred_cfg.get('attn_drop_rate', 0.0),
         drop_path_rate=apred_cfg.get('drop_path_rate', 0.0),
         norm_layer=apred_cfg.get('norm_layer', nn.LayerNorm),
-        init_std=apred_cfg.get('init_std', 0.02),
+        init_std=apred_cfg.get('init_std', 0.1),
         uniform_power=apred_cfg.get('uniform_power', True),
         use_silu=apred_cfg.get('use_silu', False),
         wide_silu=apred_cfg.get('wide_silu', True),
