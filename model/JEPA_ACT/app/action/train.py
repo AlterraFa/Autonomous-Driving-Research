@@ -388,12 +388,11 @@ def main(args: dict, yaml_path: str):
                     except Exception as e:
                         NUM_RETRIES = 5
                         if iter_retries < NUM_RETRIES:
-                            print(f"Encountered an error while iterating loader: {e}")
+                            logger.WARNING(f"Encountered an error while iterating loader: {e}")
                             iter_retries += 1
                             time.sleep(5)
                         else:
-                            print("Exceeded maximum retries when iterating dataloade. Please check for error")
-                            raise e
+                            logger.ERROR("Exceeded maximum retries when iterating dataloade. Please check for error", exit_code = 5, full_traceback = e)
                         
                 def load_clips():
                     clips = torch.concat(
