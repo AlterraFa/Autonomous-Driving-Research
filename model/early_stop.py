@@ -1,6 +1,7 @@
 import torch
 import os
 import numpy as np
+from torch import distributed as dist
 
 class EarlyStopping:
     def __init__(self, 
@@ -38,21 +39,32 @@ class EarlyStopping:
             self.min_delta = self.min_delta
         else:
             raise ValueError(f"EarlyStopping mode {mode} is unknown!")
+        
+        self.rank = dist.get_rank() if dist.is_initialized() else 0
 
-    def __call__(self, score: float, model: torch.nn.Module, epoch, optimizer=None):
+    def __call__(self, score: float, model: torch.nn.Module, **other):
         # check if loss improved by at least min_delta
+        
+        if dist.is_initialized():
+            score_t = torch.tensor(score, device=torch.cuda.current_device())
+            dist.all_reduce(score_t, op=dist.ReduceOp.SUM)
+            score = score_t.item() / dist.get_world_size()
         
         if self.best_loss is None:
             self.best_loss = score
-            self._save_checkpoint(self.parent_folder + self.best_name, score, model, epoch, optimizer)
+            path = self.parent_folder + self.best_name
+            if self.rank == 0:
+                self._save_checkpoint(path, score, model, other)
         
         elif self.monitor_op(score, self.best_loss + self.min_delta):
             self.best_loss = score
             self.counter   = 1
-            self._save_checkpoint(self.parent_folder + self.best_name, score, model, epoch, optimizer)
+            path = self.parent_folder + self.best_name
+            if self.rank == 0:
+                self._save_checkpoint(path, score, model, other)
             self.improved = True
             if self.verbose:
-                print(f"Validation loss improved to {score:.4f}. Saved model to {self.parent_folder + self.best_name}")
+                print(f"Validation loss improved to {score:.4f}. Saved model to {path}")
         else:
             self.counter += 1
             self.improved = False
@@ -65,16 +77,15 @@ class EarlyStopping:
             name, ext = self.last_name.split(".")
             name += f"_{self.iter_count}"
             last_name = name + "." + ext 
-            self._save_checkpoint(self.parent_folder + last_name, score, model, epoch, optimizer)
+            path  = self.parent_folder + last_name
+            if self.rank == 0:
+                self._save_checkpoint(path, score, model, other)
         self.iter_count += 1
                 
-    def _save_checkpoint(self, path, score, model, epoch, optimizer):
+    def _save_checkpoint(self, path, score, model, other):
+        raw_model = model.module if hasattr(model, 'module') else model
         
-        checkpoint = {
-            'epoch': epoch,
-            'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
-            'score': score
-        }
+        checkpoint = {'score': score} | other
         
-        torch.save(checkpoint, self.parent_folder + "/checkpoint.pt")
-        torch.save(model.state_dict() if self.weights_only else model, path)
+        torch.save(checkpoint, os.path.join(self.parent_folder, "checkpoint.pt"))
+        torch.save(raw_model.state_dict() if self.weights_only else raw_model, path)

@@ -6,7 +6,7 @@ import cv2
 from torch.utils.data import random_split
 from torch.nn.utils.rnn import pad_sequence
 
-from utils.messages.logger import Logger
+from .logger import Logger
 from pathlib import Path
 
 class CarlaDatasetLoader:
@@ -72,7 +72,6 @@ class CarlaDatasetLoader:
         dataset_base = meta_file.parent.parent
 
         if self.images_key is None:
-            self.log.WARNING("Single input detected", once=True)
             img_file = dataset_base / meta["img_file"]
             image = self.read_image(str(img_file))
             if self.downsize_ratio != 1:
@@ -85,7 +84,6 @@ class CarlaDatasetLoader:
                 "timestamp": meta["timestamp"],
             }
         else:
-            self.log.WARNING("Multiple inputs detected", once=True)
             inp_images = {}
             for key_name in self.images_key:
                 img_file = dataset_base / meta["img_file"][key_name]

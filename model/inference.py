@@ -8,10 +8,9 @@ import yaml
 
 # Compute group
 import cv2
-import torch
 import numpy as np
 import difflib
-from model.tensor_engine import ImageTensorRTInference
+from .tensor_engine import ImageTensorRTInference
 
 # Cuda group
 import pycuda.driver as cuda
@@ -19,10 +18,9 @@ import pycuda.autoinit
 
 # Logging group
 from traceback import print_exc
-from utils.messages.logger import Logger
+from .logger import Logger
 if not hasattr(np, "float"): np.float = np.float64
 
-torch.set_float32_matmul_precision("highest")
 
 class ModelLoader:
     def __init__(self):
@@ -53,28 +51,26 @@ class ModelLoader:
         
         current_search_dir = os.path.dirname(abs_ckpt_path)
         
-        
+
         while True:
             for root, dirs, files in os.walk(current_search_dir):
                 
                 if '__pycache__' in dirs: dirs.remove('__pycache__')
                 if '.git' in dirs: dirs.remove('.git')
                 if '.vscode' in dirs: dirs.remove('.vscode')
+                if '.venv' in dirs: dirs.remove('.venv')
 
                 for py_file in files:
                     if not py_file.endswith(".py"):
                         continue
 
                     full_file_path = os.path.join(root, py_file)
-                    
                     try:
                         rel_path = os.path.relpath(full_file_path, cwd)
-                        
                         if rel_path.startswith(".."):
-                            continue
+                            rel_path = rel_path.strip("../")
                             
                         module_path = os.path.splitext(rel_path)[0].replace(os.sep, ".")
-                        
                         module = importlib.import_module(module_path)
                         
                         if hasattr(module, class_name) and inspect.isclass(getattr(module, class_name)):
@@ -83,6 +79,7 @@ class ModelLoader:
                             return found_class
                             
                     except (ImportError, AttributeError, Exception) as e:
+                        print(e)
                         continue
 
             if os.path.basename(current_search_dir) == "model":
@@ -178,6 +175,7 @@ class ModelLoader:
 
 class AsyncInference:
     def __init__(self, path, device = "cpu", batch_output = False, **model_kwargs):
+        import torch
         self.log = Logger()
         self.input_data = None
         self.output_data = None
@@ -192,6 +190,7 @@ class AsyncInference:
         self.infer_thread.start()
     
     def _inference_torch(self):
+        import torch
         
         while not self._event.is_set():
 
@@ -258,6 +257,7 @@ class AsyncInference:
         
     def _inference_tensorrt(self):
 
+        import torch
         self.ctx.push()
         self.log.INFO("Started engine inference")
 
@@ -319,6 +319,7 @@ class AsyncInference:
         Returns:
             torch.nn.Module: Loaded model
         """
+        import torch
 
         # Load checkpoint
         try:

@@ -14,6 +14,89 @@ except ImportError:
     PROGRESS_TABLE_AVAILABLE = False
 
 
+class NoOpLogger:
+    """
+    No-operation logger for distributed training - provides the same interface
+    as TrainingLogger but performs no actual logging operations.
+    
+    This is used for non-zero ranks in distributed training to avoid:
+    - Race conditions in directory creation
+    - Duplicate logging output
+    - Unnecessary computational overhead
+    
+    All methods are no-ops and return appropriate default values.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        """No-op constructor - accepts any arguments to match TrainingLogger interface."""
+        self.current_epoch = 0
+        self.use_validation = kwargs.get('use_validation', True)
+    
+    def __enter__(self):
+        """Context manager entry - returns self."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - no cleanup needed."""
+        return False
+    
+    def start_training(self, description: str = "Training"):
+        """No-op training initialization."""
+        pass
+    
+    def start_epoch(self, epoch: int, num_batches: int, desc: str = "Training"):
+        """No-op epoch initialization."""
+        self.current_epoch = epoch
+    
+    def start_phase(self, num_batches: int, desc: str = "Phase"):
+        """No-op phase initialization."""
+        pass
+    
+    def batch_iterator(self, dataloader):
+        """Returns the dataloader as-is without progress tracking."""
+        return dataloader
+    
+    def log_batch(self, metrics: Dict[str, float], phase: str = "train", step: Optional[int] = None):
+        """No-op batch logging."""
+        pass
+    
+    def log_epoch(self, train_metrics: Optional[Dict[str, float]] = None, 
+                  val_metrics: Optional[Dict[str, float]] = None,
+                  extra_metrics: Optional[Dict[str, float]] = None):
+        """No-op epoch logging."""
+        pass
+    
+    def log_model_graph(self, model: torch.nn.Module, input_sample: Union[torch.Tensor, Tuple[torch.Tensor, ...], Dict[str, torch.Tensor]]):
+        """No-op model graph logging."""
+        pass
+    
+    def log_histogram(self, tag: str, values: torch.Tensor, step: Optional[int] = None):
+        """No-op histogram logging."""
+        pass
+    
+    def get_epoch_metrics(self, phase: str = "val") -> Dict[str, float]:
+        """Returns empty metrics dictionary."""
+        return {}
+    
+    def get_metric(self, metric_name: str, phase: str = "val") -> Optional[float]:
+        """Returns None for any metric request."""
+        return None
+    
+    def save_checkpoint(self, models: Dict[str, torch.nn.Module], optimizer: torch.optim.Optimizer,
+                       scheduler: Optional[object] = None, filename: Optional[str] = None, 
+                       extra_state: Optional[Dict] = None):
+        """No-op checkpoint saving."""
+        pass
+    
+    def close(self):
+        """No-op cleanup."""
+        pass
+    
+    def set_validation_mode(self, use_validation: bool):
+        """No-op validation mode setting."""
+        self.use_validation = use_validation
+
+
 class TrainingLogger:
     """
     A training logger for models that integrates TensorBoard SummaryWriter

@@ -1,4 +1,3 @@
-import torch
 import numpy as np
 import tensorrt as trt
 import pycuda.driver as cuda
@@ -7,8 +6,6 @@ import yaml
 import resource
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
 
 import os, sys
 import time
@@ -26,7 +23,7 @@ sys.path.append(root_dir)
 
 from tqdm.auto import tqdm
 from rich import print
-from utils.messages.logger import Logger
+from src.messages.logger import Logger
 if not hasattr(np, "float"): np.float = np.float64
 
 class TensorRTCore:
@@ -383,7 +380,6 @@ class ImageTensorRTExport(TensorRTCore):
 
     def export_onnx(self, onnx_path="model.onnx",
                     opset=13, dynamic=True, dynamo=False):
-        
 
         dynamic_axes = None
         if dynamic:
@@ -440,7 +436,7 @@ class ImageTensorRTExport(TensorRTCore):
                 config.set_flag(trt.BuilderFlag.INT8)
             elif quantize_type.upper() == "TF32" and getattr(builder, "platform_has_tf32", False):
                 config.set_flag(trt.BuilderFlag.TF32)
-            elif quantize_type.upper() == "BF16" and getattr(builder, "platfrom_has_fast_bf16", False):
+            elif quantize_type.upper() == "BF16":
                 config.set_flag(trt.BuilderFlag.BF16)
             else:
                 quantize_type = "FP32"
@@ -534,6 +530,7 @@ class ImageTensorRTExport(TensorRTCore):
         return onnx_path, engine_path
 
 if __name__ == "__main__":
+    import torch
     import argparse
     log = Logger()
 
