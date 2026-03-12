@@ -27,6 +27,25 @@ def build_action_block_causal_attention_mask(T, H, W, add_tokens=1):
 
     return mask
 
+def build_gc_causal_attn_mask(T, H, W, add_tokens = 1):
+    N_T = H * W + add_tokens
+    N_ = H * W
+    N = T * N_T
+    
+    mask = torch.zeros(N, N, dtype = torch.bool)
+    mask_block = torch.ones(N_T, N_T, dtype = torch.bool)
+    mask_diag = torch.ones_like(mask_block)
+    mask_diag[:N_, N_:] = False
+    
+    # -- image must not attent to action in the same timestep
+    for t1 in range(T):
+        for t2 in range(max(0, t1 - T + 1), t1 + 1):
+            if t1 == t2:
+                mask[t1 * N_T : (t1 + 1) * N_T, t2 * N_T : (t2 + 1) * N_T] = mask_diag
+            else:    
+                mask[t1 * N_T : (t1 + 1) * N_T, t2 * N_T : (t2 + 1) * N_T] = mask_block
+
+    return mask, N_
 
 def rotate_queries_or_keys(x, pos):
     B, num_heads, N, D = x.size()
@@ -408,6 +427,179 @@ class RoPEAttention(nn.Module):
         x = self.proj_drop(x)
         return x
 
+class GCRoPEAttention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        num_heads=8,
+        qkv_bias=False,
+        qk_scale=None,
+        attn_drop=0.0,
+        proj_drop=0.0,
+        use_sdpa=True,
+        grid_size=14,
+        is_causal=False,
+    ):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim**-0.5
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop_prob = proj_drop
+        self.proj_drop = nn.Dropout(proj_drop)
+        self.use_sdpa = use_sdpa
+        # --
+        # -- Additional modulus by 2 to ensure that the number of tokens is even
+        self.d_dim = int(2 * ((head_dim // 3) // 2))
+        self.h_dim = int(2 * ((head_dim // 3) // 2))
+        self.w_dim = int(2 * ((head_dim // 3) // 2))
+        self.grid_size = grid_size
+        self.is_causal = is_causal
+
+    def _get_frame_pos(self, ids, H_patches=None, W_patches=None):
+        if H_patches is None or W_patches is None:
+            tokens_per_frame = int(self.grid_size * self.grid_size)
+        else:
+            tokens_per_frame = int(H_patches * W_patches)
+        return ids // tokens_per_frame
+
+    def _get_height_pos(self, ids, H_patches=None, W_patches=None):
+        # Remove frame component from ids
+        if H_patches is None or W_patches is None:
+            tokens_per_frame = int(self.grid_size * self.grid_size)
+            tokens_per_row = self.grid_size
+        else:
+            tokens_per_frame = int(H_patches * W_patches)
+            tokens_per_row = W_patches
+        # -- Possibly [0, 0, 0, 1, 1, 22, 22, 56, 56, 56, 56, ....] 
+        # -- Index in range (0, H * W) is 0, Index in range (H * W, H * W * 2) is index 1, ...
+        # -- Hierachy is  T -> H -> W
+        frame_ids = self._get_frame_pos(ids, H_patches, W_patches)
+        # -- Every frame ids is now the same as the first frame
+        ids = ids - tokens_per_frame * frame_ids
+        # --
+        return ids // tokens_per_row
+
+    def separate_positions(self, ids, H_patches=None, W_patches=None):
+        if H_patches is None or W_patches is None:
+            tokens_per_frame = int(self.grid_size * self.grid_size)
+            tokens_per_row = self.grid_size
+        else:
+            tokens_per_frame = int(H_patches * W_patches)
+            tokens_per_row = W_patches
+        frame_ids = self._get_frame_pos(ids, H_patches, W_patches)
+        # --
+        height_ids = self._get_height_pos(ids, H_patches, W_patches)
+        # --
+        # Remove frame component from ids (1st term) and height component (2nd term)
+        # -- Every row ids is now the same as the first row
+        width_ids = (ids - tokens_per_frame * frame_ids) - tokens_per_row * height_ids
+        return frame_ids, height_ids, width_ids
+
+    def forward(self, x: torch.Tensor, mask=None, attn_mask=None, T=None, H=None, W=None, apstep = 0):
+        B, N_tokens, D = x.shape
+        
+        tokens_pstep = self.grid_size ** 2
+        if T is None:
+            steps = N_tokens // tokens_pstep
+        else:
+            steps = T
+        ctx_steps = steps - 1
+        
+
+        goal   = x[:, -tokens_pstep:, :]
+        ctx_a  = x[:, :-tokens_pstep, :].view(B, ctx_steps, tokens_pstep + apstep, D)
+        ctx    = ctx_a[:, :, :tokens_pstep, :].flatten(1, 2)
+        action = ctx_a[:, :, tokens_pstep:]
+        
+        latent = torch.cat([ctx, goal], dim = 1)
+        
+        if mask is not None:
+            d_mask, h_mask, w_mask = self.separate_positions(mask, H, W)
+        else:
+            mask = torch.arange(int(T * H * W), device=x.device)
+            d_mask, h_mask, w_mask = self.separate_positions(mask, H, W)
+        
+         
+        # -- compute qkv for frame tokens and rotate
+        qkv = self.qkv(latent).unflatten(-1, (3, self.num_heads, -1)).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # [B, num_heads, N, D]
+
+        s = 0
+        # Rotate depth
+        qd = rotate_queries_or_keys(q[..., s : s + self.d_dim], pos=d_mask)
+        kd = rotate_queries_or_keys(k[..., s : s + self.d_dim], pos=d_mask)
+        s += self.d_dim
+        # Rotate height dim
+        qh = rotate_queries_or_keys(q[..., s : s + self.h_dim], pos=h_mask)
+        kh = rotate_queries_or_keys(k[..., s : s + self.h_dim], pos=h_mask)
+        s += self.h_dim
+        # Rotate width dim
+        qw = rotate_queries_or_keys(q[..., s : s + self.w_dim], pos=w_mask)
+        kw = rotate_queries_or_keys(k[..., s : s + self.w_dim], pos=w_mask)
+        s += self.w_dim
+
+        # Combine rotated dimension
+        if s < self.head_dim:
+            qr = q[..., s:]
+            kr = k[..., s:]
+            q = torch.cat([qd, qh, qw, qr], dim=-1)
+            k = torch.cat([kd, kh, kw, kr], dim=-1)
+        else:
+            q = torch.cat([qd, qh, qw], dim=-1)
+            k = torch.cat([kd, kh, kw], dim=-1)
+
+        if apstep > 0:
+            action_q, action_k, action_v = [], [], []
+            for idx in range(apstep):
+                a_i = action[:, :, idx]
+                
+                qkv_i = self.qkv(a_i).unflatten(-1, (3, self.num_heads, -1)).permute(2, 0, 3, 1, 4)
+                q_i , k_i, v_i= qkv_i[0], qkv_i[1], qkv_i[2]
+                
+                q_i = rotate_queries_or_keys(q_i, pos=torch.arange(ctx_steps, device=x.device))
+                k_i = rotate_queries_or_keys(k_i, pos=torch.arange(ctx_steps, device=x.device))
+                
+                action_q += [q_i.reshape(B, self.num_heads, ctx_steps, 1, -1)]
+                action_k += [k_i.reshape(B, self.num_heads, ctx_steps, 1, -1)]
+                action_v += [v_i.reshape(B, self.num_heads, ctx_steps, 1, -1)]
+                
+            action_q = torch.cat(action_q, dim = 3).flatten(2, 3)
+            action_k = torch.cat(action_k, dim = 3).flatten(2, 3)
+            action_v = torch.cat(action_v, dim = 3).flatten(2, 3)
+
+            def merge_(l, a):
+                ctx, goal = l[:, :, :ctx_steps * tokens_pstep], l[:, :, ctx_steps * tokens_pstep:]
+                ctx = ctx.view(B, self.num_heads, ctx_steps, tokens_pstep, -1)
+                a = a.view(B, self.num_heads, ctx_steps, apstep, -1)
+                ctx_a = torch.cat([ctx, a], dim = 3).view(B, self.num_heads, ctx_steps * (tokens_pstep + apstep), -1)
+                return torch.cat([ctx_a, goal], dim = 2)
+                
+            q = merge_(q, action_q)
+            k = merge_(k, action_k)
+            v = merge_(v, action_v)
+            
+        
+        if self.use_sdpa:
+            with sdpa_kernel(_USABLE_BACKENDS):
+                out = F.scaled_dot_product_attention(
+                    q, k, v, dropout_p=self.proj_drop_prob, attn_mask=attn_mask
+                )
+        else:
+            attn = (q @ k.transpose(-2, -1)) * self.scale
+            if attn_mask is not None:
+                attn = attn.masked_fill(attn_mask == 0, float('-inf'))
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            out = attn @ v
+
+        out = out.transpose(1, 2).reshape(B, N_tokens, D)
+        out = self.proj(out)
+        out = self.proj_drop(out)
+
+        return out
 
 class Attention(nn.Module):
     def __init__(
@@ -516,6 +708,73 @@ class ACBlock(nn.Module):
         y = self.norm1(x)
         if isinstance(self.attn, ACRoPEAttention):
             y = self.attn(y, mask=mask, attn_mask=attn_mask, T=T, H=H, W=W, action_tokens=action_tokens)
+        else:
+            y = self.attn(y, mask=mask, attn_mask=attn_mask)
+        x = x + self.drop_path(y)
+        y = self.norm2(x)
+        x = x + self.drop_path(self.mlp(y))
+        return x
+
+class GCBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        mlp_ratio=4.0,
+        qkv_bias=False,
+        qk_scale=None,
+        drop=0.0,
+        attn_drop=0.0,
+        drop_path=0.0,
+        act_layer=nn.GELU,
+        wide_silu=True,
+        norm_layer=nn.LayerNorm,
+        use_sdpa=True,
+        is_causal=False,
+        grid_size=16,
+        use_rope=False,
+        **kwargs,
+    ):
+        super().__init__()
+        self.norm1 = norm_layer(dim)
+        if use_rope:
+            self.attn = GCRoPEAttention(
+                dim,
+                num_heads=num_heads,
+                qkv_bias=qkv_bias,
+                qk_scale=qk_scale,
+                attn_drop=attn_drop,
+                use_sdpa=use_sdpa,
+                is_causal=is_causal,
+                grid_size=grid_size,
+                proj_drop=drop,
+            )
+        else:
+            self.attn = Attention(
+                dim,
+                num_heads=num_heads,
+                qkv_bias=qkv_bias,
+                qk_scale=qk_scale,
+                attn_drop=attn_drop,
+                use_sdpa=use_sdpa,
+                is_causal=is_causal,
+                proj_drop=drop,
+            )
+
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        if act_layer is nn.SiLU:
+            self.mlp = SwiGLUFFN(
+                in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, wide_silu=wide_silu, drop=drop
+            )
+        else:
+            self.mlp = MLP(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+
+    def forward(self, x, mask=None, attn_mask=None, T=None, H=None, W=None, apstep=0):
+        y = self.norm1(x)
+        if isinstance(self.attn, GCRoPEAttention):
+            y = self.attn(y, mask=mask, attn_mask=attn_mask, T=T, H=H, W=W, apstep=apstep)
         else:
             y = self.attn(y, mask=mask, attn_mask=attn_mask)
         x = x + self.drop_path(y)
