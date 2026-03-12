@@ -309,7 +309,6 @@ class ActVideoDataset(Dataset):
         super().__init__()
         self.data_paths = data_paths
         self.nclips = nclips
-        self.frame_step = frame_step
         self.allow_clip_overlap = allow_clip_overlap
         self.random_jiggle_part = random_jiggle_part
         self.random_part = random_part
@@ -319,6 +318,7 @@ class ActVideoDataset(Dataset):
         # Handle context and prediction frames per clip
         self.ctx_fpcs = self._ensure_list(ctx_frames_per_clips, len(data_paths))
         self.pred_fpcs = self._ensure_list(pred_frames_per_clips, len(data_paths))
+        self.frame_step = self._ensure_list(frame_step, len(data_paths))
         
         if len(self.ctx_fpcs) != len(self.pred_fpcs):
             raise ValueError("Number of context fpcs must match prediction fpcs")
@@ -373,6 +373,7 @@ class ActVideoDataset(Dataset):
         dataset_idx = self.video_indices_map[index]
         fpc = self.datasets_fpc[dataset_idx]
         ctx_fpcs = self.ctx_fpcs[dataset_idx]
+        fps = self.frame_step[dataset_idx]
         
         # Check structure and get metadata paths
         metadata_paths = self._check_structure(sample)
@@ -388,7 +389,7 @@ class ActVideoDataset(Dataset):
         
         # Calculate frame indices using helper function
         buffer_indices, clip_indices = _calculate_frame_indices(
-            len(meta_paths), fpc, self.nclips, self.frame_step,
+            len(meta_paths), fpc, self.nclips, fps,
             self.allow_clip_overlap, self.random_jiggle_part
         )
         

@@ -2,10 +2,11 @@ common: &common_settings
   patch_size: 16
   tubelet_size: 2
   crop_size: 224
-  fps: 2
   nclips: 1
-  ctx_fpcs: 16
+  ctx_fpcs: 8
   pred_fpcs: 8
+
+app: action
 
 loader_setup: &loader_settings
   num_workers: 4
@@ -21,18 +22,25 @@ train:
   datasets:
     - name: "carla"
       path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20251019_161905_best_spatial.csv"
+      fps: 1
     - name: "carla"
       path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20251025_142727_best_spatial.csv"
+      fps: 1
     - name: "carla"
       path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_005321_spatial.csv"
+      fps: 1
     - name: "carla"
       path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_010805_spatial.csv"
+      fps: 1
     - name: "carla"
       path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_090029_spatial.csv"
+      fps: 1
     - name: "carla"
       path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_231048_spatial.csv"
+      fps: 1
     - name: "orin"
       path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Orin_run_2026-01-30_18-44-12.csv"
+      fps: 4
 
 val:
   <<: *common_settings
@@ -60,8 +68,9 @@ data_aug:
 
 meta:
   dtype: bfloat16
-  save_every_freq: 2
+  save_every_freq: 5
   seed: 239
+  sync_gc: true
 
 model: 
   compile: false
@@ -117,7 +126,7 @@ optimization:
   epochs: 315
   final_lr: 0.0
   final_weight_decay: 0.04
-  ipe: 300
+  ipe: 12
   lr: 0.000425
   start_lr: 0.000075
   warmup: 15
