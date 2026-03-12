@@ -1,9 +1,9 @@
 [project]
 name = "autonomous"
-version = "0.1.0"
+version = "1.1.0"
 requires-python = ">=3.10,<3.11"
 dependencies = [
-    "carla",
+    "carla==0.9.16",
     "decord>=0.6.0",
     "einops>=0.8.2",
     "ipykernel>=7.1.0",
@@ -40,8 +40,16 @@ dependencies = [
     "tqdm>=4.67.2",
     "wheel>=0.46.3",
     "yacs>=0.1.8",
+    "rich",
+    "tensorflow>=2.20.0",
+    "yapf>=0.43.0",
+    "vjepa2",
 ]
 
 [tool.uv.sources]
-carla = { path = "../../../../HyperStorage_ext4/Carla_Packages/CARLA_0.9.14_Tester/PythonAPI/carla/dist/carla-0.9.14-cp310-cp310-linux_x86_64.whl" }
 open3d = { path = "../../../../HyperStorage_ext4/Linux_Backup/Arch/Open3D/build/lib/python_package/pip_package/open3d-0.19.0+3550f4e-cp310-cp310-manylinux_2_42_x86_64.whl" }
+vjepa2 = { path = "../vjepa2" }
+
+[tool.uv]
+conflicts = [[{ extra = 'cpu' },  { extra = 'gpu' }]]
+compile-bytecode = true
