@@ -7,12 +7,12 @@ resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 import carla
 import argparse
 import pygame
-from utils.messages.logger import Logger
+from src.messages.logger import Logger
 logger = Logger()
 
-from utils.spawn.actor_spawner import Spawn
-from utils.spawn.sensor_spawner import RGB, GNSS, IMU
-from utils.control.world import World
+from src.spawn.actor_spawner import Spawn
+from src.spawn.sensor_spawner import RGB, GNSS, IMU
+from src.control.world import World
 
 from mode import MODE_RUNNERS
 from mode.utils import FREQ, MEAN_DELAY, STDDEV_DELAY, LAT_STDDEV, LON_STDDEV

@@ -1,9 +1,9 @@
 import pygame
 
 from config.enum import JoyControl, JOYBINDS, KEYBINDS
-from utils.messages.logger import Logger
-from utils.messages.message_handler import MessageSender
-from utils.messages.all_messages import (
+from src.messages.logger import Logger
+from src.messages.message_handler import MessageSender
+from src.messages.all_messages import (
     Throttle,
     Steer,
     Brake,

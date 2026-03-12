@@ -4,8 +4,8 @@ import numpy as np
 import threading
 import time
 
-from utils.spawn.sensor_spawner import SensorSpawn
-from utils.messages import Logger
+from src.spawn.sensor_spawner import SensorSpawn
+from src.messages import Logger
 
 from typing import Optional, Any
 from collections.abc import Iterable

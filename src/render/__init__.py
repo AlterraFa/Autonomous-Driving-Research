@@ -1,7 +1,7 @@
 """Rendering utilities for HUD and viewer."""
 
-from utils.render.hud import *
-from utils.render.viewer import *
+from .hud import *
+from .viewer import *
 
 __all__ = [
     "hud",

@@ -12,7 +12,7 @@ import threading, queue
 from pathlib import Path
 from typing import Dict, Any
 
-from utils.messages.logger import Logger
+from src.messages.logger import Logger
 
 conf = toml.load(os.path.join(parent, "../config/config.toml"))
 quality = conf['Picture']['quality']
@@ -54,6 +54,8 @@ class TrajectoryBuffer:
     def finalize(self):
         np.save(self.save_dir + "/trajectory", self.arr[:self.n])
 
+from src.messages.message_handler import MessageSubscriber
+from src.messages.all_messages import ServerRuntime
 class CarlaDatasetCollector:
     """
     Collects dataset samples from CARLA simulation.
@@ -65,7 +67,7 @@ class CarlaDatasetCollector:
     Samples are not saved continuously, but occasionally (every N frames).
     """
 
-    def __init__(self, save_dir: str, save_interval: int = 10):
+    def __init__(self, save_dir: str, save_interval: int = None, fps: int = None):
         """
         Args:
             save_dir (str): Base directory to save dataset.
@@ -82,12 +84,15 @@ class CarlaDatasetCollector:
         self.meta_dir.mkdir(exist_ok=True)
 
         self.save_interval = save_interval
+        self.fps = fps
         self.frame_count = 0
         self.sample_idx = 0
         
+        self.server_runtime = MessageSubscriber(ServerRuntime)
         self.saver = AsyncSaver()
-        self.time_start = time.time()
+        self.time_start = self.server_runtime.receive()
         self.encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+        
 
     def maybe_save(
         self,
@@ -104,8 +109,15 @@ class CarlaDatasetCollector:
             turn_signal (str): Turn classification label.
         """
         self.frame_count += 1
-        if self.frame_count % self.save_interval != 0:
-            return  False
+        if self.fps is None:
+            if self.frame_count % self.save_interval != 0:
+                return  False
+        else:
+            server_time = self.server_runtime.receive()
+            if server_time - self.time_start < (1 / self.fps):
+                return False
+            else:
+                self.time_start = server_time
 
         # lock image keys on first run
         if not hasattr(self, "_image_keys"):

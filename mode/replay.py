@@ -4,11 +4,11 @@ import line_profiler
 
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 
-from utils.messages.logger import Logger
-from utils.spawn.sensor_spawner import SensorSpawn
-from utils.control.vehicle_control import Vehicle
-from utils.math.path import ReplayHandler
-from utils.render.viewer import VIEWER_REGISTRY
+from src.messages.logger import Logger
+from src.spawn.sensor_spawner import SensorSpawn
+from src.control.vehicle_control import Vehicle
+from src.math.path import ReplayHandler
+from src.render.viewer import VIEWER_REGISTRY
 
 from .utils import (
     logger,

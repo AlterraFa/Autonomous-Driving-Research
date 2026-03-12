@@ -1,7 +1,7 @@
 import line_profiler
 
-from utils.control.vehicle_control import Vehicle
-from utils.render.viewer import VIEWER_REGISTRY
+from src.control.vehicle_control import Vehicle
+from src.render.viewer import VIEWER_REGISTRY
 from model.inference import AsyncInference
 from config.enum import VehicleClass as VClass
 

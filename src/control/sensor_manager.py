@@ -3,7 +3,7 @@ Sensor Manager for CARLA - Handles extraction and organization of sensor data.
 """
 
 from typing import Dict, Optional, Any, List
-from utils.messages.logger import Logger
+from src.messages.logger import Logger
 
 
 class SensorManager:
@@ -68,7 +68,7 @@ class SensorManager:
             if sensor_name in self.sensors_list:
                 return self.sensors_list[sensor_name].extract_data()
         except Exception as e:
-            self.logger.DEBUG(f"Failed to extract data from '{sensor_name}': {e}")
+            self.logger.ERROR(f"Failed to extract data from '{sensor_name}': {e}")
         return None
 
     def get_sensors_by_type(self, sensor_type: str) -> Dict[str, Any]:

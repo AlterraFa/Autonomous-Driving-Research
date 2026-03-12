@@ -7,10 +7,10 @@ import toml
 import carla
 import numpy as np
 
-from utils.messages.logger import Logger
-from utils.spawn.sensor_spawner import GNSS, IMU
-from utils.math.world_map import Map
-from utils.math.path import OptimizePath
+from src.messages.logger import Logger
+from src.spawn.sensor_spawner import GNSS, IMU
+from src.math.world_map import Map
+from src.math.path import OptimizePath
 
 logger = Logger()
 

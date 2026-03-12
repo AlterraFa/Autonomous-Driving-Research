@@ -4,7 +4,7 @@ import time
 
 from typing import Literal
 from config.enum import VehicleClass
-from utils.messages import Logger
+from src.messages import Logger
 
 Vehicle_BP = Literal[
  'vehicle.audi.a2', 'vehicle.citroen.c3', 'vehicle.chevrolet.impala',

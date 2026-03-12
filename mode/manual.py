@@ -2,10 +2,10 @@ import os
 import datetime
 import line_profiler
 
-from utils.messages.logger import Logger
-from utils.control.vehicle_control import Vehicle
-from utils.others.data_processor import TrajectoryBuffer
-from utils.render.viewer import VIEWER_REGISTRY
+from src.messages.logger import Logger
+from src.control.vehicle_control import Vehicle
+from src.others.data_processor import TrajectoryBuffer
+from src.render.viewer import VIEWER_REGISTRY
 from config.enum import VehicleClass as VClass
 
 from .utils import (

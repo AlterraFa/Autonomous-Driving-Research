@@ -1,5 +1,5 @@
 """INSPIRATION TAKEN FROM BFMC ECC"""
-from utils.messages.logger import Logger
+from src.messages.logger import Logger
 from enum import Enum
 
 class MessageBroker:

@@ -6,8 +6,9 @@ parent = os.path.dirname(folder)
 import toml
 import carla
 import numpy as np
-from utils.messages.logger import Logger
+from src.messages.logger import Logger
 from typing import Literal
+from functools import lru_cache
 
 conf = toml.load(parent + "/../config/config.toml")
 excluded_junctions = conf["TrafficManager"]["excluded_junctions"]
@@ -26,6 +27,10 @@ class World:
 
         self.log = Logger()   # <-- attach logger to this class
         
+        # Cache for waypoint junction lookups to avoid repeated CARLA queries
+        self._junction_cache = {}
+        self._cache_max_size = 5000
+        
     def switch_map(self, name: str):
         self.client.load_world(name)
         
@@ -36,7 +41,7 @@ class World:
         self.world.apply_settings(self.settings)
         self.tm.set_synchronous_mode(self.sync)
         
-        self.log.DEBUG(
+        self.log.INFO(
             f"Applied settings:\n"
             f"    synchronous_mode={self.settings.synchronous_mode}\n"
             f"    fixed_delta_seconds={self.settings.fixed_delta_seconds}\n"
@@ -45,7 +50,7 @@ class World:
         )
 
     def factory_reset(self):
-        self.log.DEBUG("Reseting world to factory")
+        self.log.WARNING("Reseting world to factory")
         self.sync = False
         self.settings.synchronous_mode = self.sync
         self.settings.fixed_delta_seconds = self.delta if self.sync else None
@@ -67,24 +72,58 @@ class World:
         self.world.debug.draw_point(point_loc, size = size, color = carla.Color(*color), life_time = duration)
 
     def get_waypoint_junction(self, location: np.ndarray):
+        # Use tuple of location as cache key (rounded to avoid floating point precision issues)
+        cache_key = tuple(np.round(location, decimals=2))
+        
+        if cache_key in self._junction_cache:
+            return self._junction_cache[cache_key]
+        
+        # Clear cache if it gets too large to prevent unbounded growth
+        if len(self._junction_cache) > self._cache_max_size:
+            self._junction_cache.clear()
+        
         wp = self.map.get_waypoint(carla.Location(*location))
         if wp.is_junction:
             junction = wp.get_junction()
             if junction.id not in excluded_junctions:  # Not a 2 way junction
-                return True, junction
-            return False, None
-        return False, None
+                result = (True, junction)
+            else:
+                result = (False, None)
+        else:
+            result = (False, None)
+        
+        self._junction_cache[cache_key] = result
+        return result
 
     def get_multi_junctions(self, waypoints: np.ndarray):
         junctions_metadata = []; cached_id = []
         for wp in waypoints:
-            loc = carla.Location(*wp)
-            carla_wp = self.map.get_waypoint(loc)
-            if carla_wp.is_junction:
-                junction = carla_wp.get_junction()
-                if junction.id not in excluded_junctions and junction.id not in cached_id:
-                    junctions_metadata += [junction]
-                    cached_id += [junction.id]
+            # Use tuple of location as cache key (rounded to avoid floating point precision issues)
+            cache_key = tuple(np.round(wp, decimals=2))
+            
+            if cache_key in self._junction_cache:
+                is_junction, junction = self._junction_cache[cache_key]
+                if is_junction and junction.id not in cached_id:
+                    junctions_metadata.append(junction)
+                    cached_id.append(junction.id)
+            else:
+                # Clear cache if it gets too large to prevent unbounded growth
+                if len(self._junction_cache) > self._cache_max_size:
+                    self._junction_cache.clear()
+                
+                loc = carla.Location(*wp)
+                carla_wp = self.map.get_waypoint(loc)
+                if carla_wp.is_junction:
+                    junction = carla_wp.get_junction()
+                    if junction.id not in excluded_junctions and junction.id not in cached_id:
+                        junctions_metadata.append(junction)
+                        cached_id.append(junction.id)
+                        self._junction_cache[cache_key] = (True, junction)
+                    else:
+                        self._junction_cache[cache_key] = (False, None)
+                else:
+                    self._junction_cache[cache_key] = (False, None)
+        
         return junctions_metadata
 
     def get_segments_from_points(self, seg_type: Literal["junction", "road"], locations: np.ndarray):

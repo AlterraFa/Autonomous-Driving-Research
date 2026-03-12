@@ -13,10 +13,10 @@ import time
 from scipy.interpolate import interp1d
 from scipy.spatial import cKDTree
 from scipy.optimize import least_squares
-from utils.others.data_processor import CarlaDatasetCollector
-from utils.math.coordinate_transform import global_2_local
-from utils.messages.logger import Logger
-from utils.control.world import World
+from src.others.data_processor import CarlaDatasetCollector
+from src.math.coordinate_transform import global_2_local
+from src.messages.logger import Logger
+from src.control.world import World
 
 from numba import njit
 import pyclothoids
@@ -73,7 +73,7 @@ class NodeFinder:
     
     def update_state(self, p):
         """Optimized version using KDTree"""
-        dists, idxs = self.kdtree.query(p, k=len(self.path), distance_upper_bound=2*self.Ld)
+        dists, idxs = self.kdtree.query(p, k=self.path_length, distance_upper_bound=2*self.Ld)
         mask = np.isfinite(dists)
         idxs, dists = idxs[mask], dists[mask]
 
@@ -151,7 +151,7 @@ class PathHandler(NodeFinder):
 
         # --- interpolation in t if available ---
         if self.has_time:
-            self.log.DEBUG("Found time vector. Enabling spatial and temporal mode")
+            self.log.INFO("Found time vector. Enabling spatial and temporal mode")
             
             self.timer = 0
             t_col = defined_path[:, -1].astype(float)[keep]
@@ -167,7 +167,7 @@ class PathHandler(NodeFinder):
                                    bounds_error=False, fill_value="extrapolate" if extrapolate else (t_col[0], t_col[-1]))
 
         else:
-            self.log.DEBUG("Didn't find time vector. Disabling temporal mode")
+            self.log.WARNING("Didn't find time vector. Disabling temporal mode")
 
             self.t = None
             
@@ -655,24 +655,24 @@ class TurnClassify:
                 signal = 2
             if self.signal != signal:
                 if signal == 0:
-                    self.log.CUSTOM(" ENTER ", f"Entering intersection ID: [cyan]{entry_wp_key[0]}[/cyan]. Mode: [bold]Straight[/bold]", color = "blue")
+                    self.log.DEBUG("[blue]ENTER[/blue]:", f"Entering intersection ID: [cyan]{entry_wp_key[0]}[/cyan]. Mode: [bold]Straight[/bold]")
                 if signal == 1:
-                    self.log.CUSTOM(" ENTER ", f"Entering intersection ID: [cyan]{entry_wp_key[0]}[/cyan]. Mode: [bold]Turn Left[/bold]", color = "blue")
+                    self.log.DEBUG("[blue]ENTER[/blue]:", f"Entering intersection ID: [cyan]{entry_wp_key[0]}[/cyan]. Mode: [bold]Turn Left[/bold]")
                 if signal == 2:
-                    self.log.CUSTOM(" ENTER ", f"Entering intersection ID: [cyan]{entry_wp_key[0]}[/cyan]. Mode: [bold]Turn Right[/bold]", color = "blue")
+                    self.log.DEBUG("[blue]ENTER[/blue]:", f"Entering intersection ID: [cyan]{entry_wp_key[0]}[/cyan]. Mode: [bold]Turn Right[/bold]")
 
                 self.signal = signal
                 
         if disable and not enable:
             if self._cache['entry_wp_id'] is not None:
-                self.log.CUSTOM("EXITED ", f"Exited intersection ID: [cyan]{self._cache['entry_wp_id'][0]}[/cyan]. Mode: [bold]Keep lane[/bold]", color = 100)
+                self.log.DEBUG("[color(100)]EXITED[/color(100)]:", f"Exited intersection ID: [cyan]{self._cache['entry_wp_id'][0]}[/cyan]. Mode: [bold]Keep lane[/bold]")
             self._clear_cache()
             self.signal = -1
 
         return self.signal
 
-from utils.messages.message_handler import MessageSubscriber, MessageSender
-from utils.messages.all_messages import (
+from src.messages.message_handler import MessageSubscriber, MessageSender
+from src.messages.all_messages import (
     Location,
     Heading,
     ServerFps,
@@ -682,7 +682,8 @@ from utils.messages.all_messages import (
     BrakeLog,
     ThrottleLog,
     TurnSignal,
-    PolylinesCmd
+    PolylinesCmd,
+    ServerRuntime
 )
 class ReplayHandler:
 
@@ -706,12 +707,12 @@ class ReplayHandler:
         self.branching_path  = BranchingPath(self.virt_world)
         self.data_collector = None
         if data_collect_dir:
-            self.data_collector = CarlaDatasetCollector(save_dir=data_collect_dir, save_interval=20)
+            self.data_collector = CarlaDatasetCollector(save_dir=data_collect_dir, fps=20)
 
+        self._init_transmittor()
         self.prev_dist = 0
         self.additional_max = 20; self.addition_cnt = 0
-        self.start_time = time.time()
-        self._init_transmittor()
+        self.start_time = self.sub_server_runtime.receive()
 
     def _init_transmittor(self):
         self.sub_location = MessageSubscriber(Location)
@@ -723,6 +724,7 @@ class ReplayHandler:
         self.sub_brake_logging    = MessageSubscriber(BrakeLog)
         self.sub_velocity         = MessageSubscriber(Velocity)
         self.sub_polylines        = MessageSubscriber(PolylinesCmd)
+        self.sub_server_runtime = MessageSubscriber(ServerRuntime)
         self.send_turn_signal     = MessageSender(TurnSignal)
         
 
@@ -772,6 +774,7 @@ class ReplayHandler:
                 
         if self.debug:
             for path in path_branches:
+                path[:, 2] = vehicle_location[2] + 0.1
                 self.virt_world.draw_waypoints(path, 1.5 * (1 / server_fps), size = .1, color = (255, 0, 0))
 
         if self.turn_classify:
@@ -793,40 +796,41 @@ class ReplayHandler:
 
         # Only save when it moves (Prevent saving all the time when stopping at red light or stop sign)
         if self.data_collector:
-            if self.addition_cnt < self.additional_max:
-                steer    = self.sub_steer_logging.receive()
-                throttle = self.sub_throttle_logging.receive()
-                brake    = self.sub_brake_logging.receive()
-                velocity = self.sub_velocity.receive()
-                saved = self.data_collector.maybe_save(
-                    {
-                        "gt_data": {
-                            "midlane_wp" : mid_ego,
-                            "aux_wp"     : ego_branches,
-                            "steer"      : steer,
-                            "throttle"   : throttle,
-                            "brake"      : brake,
-                            "velocity"   : velocity,
-                        },
-                        "command": {
-                            "turn_signal": turn_signal,
-                            "polycmd"    : self.sub_polylines.receive(), 
-                        },
-                        "condition": {
-                            "GPS"        : vehicle_location,
-                            "heading"    : heading,
-                            "road_type"  : self.road_type,
-                        }, 
-                        "timestamp"  : time.time() - self.start_time
+            steer    = self.sub_steer_logging.receive()
+            throttle = self.sub_throttle_logging.receive()
+            brake    = self.sub_brake_logging.receive()
+            velocity = self.sub_velocity.receive()
+            # if self.addition_cnt < self.additional_max:
+            #     if saved:
+            #         if curr_dist - self.prev_dist < 1e-2:
+            #             self.addition_cnt += 1
+            # if curr_dist - self.prev_dist > 1e-2:
+            #     self.addition_cnt = 0
+
+            saved = self.data_collector.maybe_save(
+                {
+                    "gt_data": {
+                        "midlane_wp" : mid_ego,
+                        "aux_wp"     : ego_branches,
+                        "steer"      : steer,
+                        "throttle"   : throttle,
+                        "brake"      : brake,
+                        "velocity"   : velocity,
                     },
-                    **frame
-                )
-                if saved:
-                    if curr_dist - self.prev_dist < 1e-2:
-                        self.addition_cnt += 1
-            if curr_dist - self.prev_dist > 1e-2:
-                self.addition_cnt = 0
-            self.prev_dist = curr_dist
+                    "command": {
+                        "turn_signal": turn_signal,
+                        "polycmd"    : self.sub_polylines.receive(), 
+                    },
+                    "condition": {
+                        "GPS"        : vehicle_location,
+                        "heading"    : heading,
+                        "road_type"  : self.road_type,
+                    }, 
+                    "timestamp"  : self.sub_server_runtime.receive() - self.start_time
+                },
+                **frame
+            )
+            # self.prev_dist = curr_dist
         return mid_ego
 
 
@@ -956,7 +960,7 @@ class OptimizePath:
         carla_map = world.world.get_map()
         self.network, self.nodes = self._build_detailed_graph(carla_map, step=step, epsilon=0.1)
 
-        self.log.DEBUG(f"Built Road network. Nodes: {len(self.network.nodes)}")      
+        self.log.INFO(f"Built Road network. Nodes: {len(self.network.nodes)}")      
 
     @staticmethod
     def fast_extract_coordinates(network_or_nodes):

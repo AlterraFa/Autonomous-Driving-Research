@@ -10,17 +10,17 @@ parent = os.path.dirname(folder)
 
 from collections import deque
 from typing import Literal
-from utils.control.world import World
-from utils.messages.logger import Logger
-from utils.math.path import _find_entry_clusters, _find_exit, waypoints_between, PathHandler
-from utils.math.coordinate_transform import global_2_local
+from src.control.world import World
+from src.messages.logger import Logger
+from src.math.path import _find_entry_clusters, _find_exit, waypoints_between, PathHandler
+from src.math.coordinate_transform import global_2_local
 from scipy.spatial import cKDTree
-from utils.messages.all_messages import (
+from src.messages.all_messages import (
     PolylinesCmd,
     Enu,
     Heading
 )
-from utils.messages.message_handler import MessageSubscriber, MessageSender
+from src.messages.message_handler import MessageSubscriber, MessageSender
 
 conf = toml.load(os.path.join(parent, "../config/config.toml"))
 
@@ -117,7 +117,19 @@ class Map:
         elif self.relative_pos == "center":
             self.offset_path  = [i for i in range(-50, 50, 4)]
 
-        points[:, -1] = trajectories[:, -1] # replace with time data
+        # Interpolate time data from original trajectories to filtered waypoints
+        # The filtered points may have fewer entries than the original trajectories
+        original_time = trajectories[:, -1]
+        num_original = len(trajectories)
+        num_filtered = len(points)
+        
+        # Create indices for interpolation
+        original_indices = np.linspace(0, num_original - 1, num_original)
+        filtered_indices = np.linspace(0, num_original - 1, num_filtered)
+        
+        # Interpolate time values
+        points[:, -1] = np.interp(filtered_indices, original_indices, original_time)
+        
         return points
 
 
@@ -217,8 +229,12 @@ class Map:
             # rotated = cv2.warpAffine(cutout, M, (cutout.shape[1], cutout.shape[0]))
             gpu_img = cv2.cuda_GpuMat()
             gpu_img.upload(cutout)
-            rotated = cv2.cuda.warpAffine(gpu_img, M, (cutout.shape[1], cutout.shape[0]))
-            rotated = rotated.download()
+            gpu_rotated = cv2.cuda.warpAffine(gpu_img, M, (cutout.shape[1], cutout.shape[0]))
+            rotated = gpu_rotated.download()
+            
+            # Explicitly release GPU memory to prevent accumulation during replay
+            gpu_img.release()
+            gpu_rotated.release()
 
             # one precise crop - handle negative center by clamping to visible region
             if self.relative_pos == "center":
@@ -399,7 +415,7 @@ class Map:
 
         filtered_meta = []
         tol = 1e-2
-        for i in range(len(coordinates)):
+        for i in range(len(combined_meta)):
             closest_wp = np.array(combined_meta[i], dtype = float)[:3]
 
             j = i
@@ -412,11 +428,11 @@ class Map:
             
             k = i
             forward_point = np.array(closest_wp)
-            while k != len(coordinates):
+            while k < len(combined_meta) - 1:
+                k += 1
                 forward_point = np.array(combined_meta[k], dtype = float)[:3]
                 if not np.allclose(closest_wp, forward_point, atol = tol):
                     break
-                k += 1
 
             choose_backward = PathHandler._edge_opposite_test(coordinates[i], backward_point, closest_wp)
             choose_forward  = PathHandler._edge_opposite_test(coordinates[i], forward_point, closest_wp)

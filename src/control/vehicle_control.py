@@ -9,8 +9,8 @@ import numpy as np
 
 from traceback import print_exc
 from scipy.signal import butter, lfilter, lfilter_zi
-from utils.messages.message_handler import MessageSubscriber
-from utils.messages.all_messages import (
+from src.messages.message_handler import MessageSubscriber
+from src.messages.all_messages import (
     Throttle,
     Steer,
     Brake,
@@ -19,7 +19,7 @@ from utils.messages.all_messages import (
     ModelSpeed,
     ModelSteer,
 )
-from utils.others.others import get_nested_config
+from src.others.others import get_nested_config
 
 conf = toml.load(os.path.join(parent, "../config/config.toml"))
 decay     = conf["Vehicle"]['decay']

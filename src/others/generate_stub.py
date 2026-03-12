@@ -165,7 +165,7 @@ if __name__ == "__main__":
         "sensor.other.rss",
     ]
 
-    stubsDir = "./utils/stubs"
+    stubsDir = "./src/stubs"
     # 1) Combined module (.py) with overloads
     writeCombinedModule(world, chosen, os.path.join(stubsDir, "all_sensors_stub.py"))
 
