@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 
 from model.JEPA_ACT.masks.multiseq_multiblock3d import MaskCollator
-from model.JEPA_ACT.train_script.pretraining.compile import (
+from .compile import (
     compile_model, 
     compile_dataloader, 
     compile_optim

@@ -5,6 +5,11 @@ from ....models.vision_transformer import VisionTransformer as Enc
 from ....models.latent_dreamer import VisionTransformerPredictorAC as LPred
 from ....models.action_predictor import TransformerActionPredictor as APred
 
+from ....utils.logger import Logger
+
+from torch import distributed as dist
+
+logger = Logger(__name__)
 
 def compile_model(
     enc_cfg: dict = None,
@@ -16,10 +21,10 @@ def compile_model(
 ):
     
     name = enc_cfg.get('name', "Not found")
-    load_from = enc_cfg.get('load_from', 'Not found')
+    repo = enc_cfg.get('load_from', 'Not found')
     
     # -- Encoder has sdpa and grad checkpoint enabled
-    model = torch.hub.load(load_from, name)
+    model = torch.hub.load(repo, name, trust_repo=True)
     encoder: Enc = model[0]
     encoder.use_activation_checkpointing = enc_cfg['use_activation_checkpointing']
     
@@ -92,5 +97,28 @@ def compile_model(
         use_sdpa=apred_cfg.get('use_sdpa', False),
     )
     action_predictor.to(device)
+
+    
+    def count_params(model):
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    logger.INFO(f"Encoder number of parameters: {count_params(encoder)}")
+    logger.INFO(f"Action Predictor number of parameters: {count_params(action_predictor)}")
+    logger.INFO(f"Latent Predictor number of parameters: {count_params(latent_predictor)}")
     
     return encoder, latent_predictor, action_predictor
+
+def load_hub_model(repo, model_name, **kwargs):
+    # 1. Determine rank safely
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    
+    # 2. Rank 0 downloads the model
+    if rank == 0:
+        logger.INFO(f"Rank 0: Initializing download/cache check for {repo}...")
+        _ = torch.hub.load(repo, model_name, trust_repo=True, **kwargs)
+        logger.INFO("Rank 0: Model cached successfully.")
+
+    if dist.is_initialized():
+        dist.barrier() 
+
+    return torch.hub.load(repo, model_name, trust_repo=True, **kwargs)

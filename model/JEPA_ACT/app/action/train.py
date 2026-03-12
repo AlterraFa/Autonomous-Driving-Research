@@ -11,25 +11,30 @@ sys.path.insert(0, str(project_root))
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 FOLDER_DIR = os.path.dirname(os.path.dirname(__file__))
 
+import random
+import numpy as np
 import torch
 import torch.nn.functional as F
+from torch import distributed as dist
+from torch.nn import functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 
-from model.JEPA_ACT.train_script.action.compile import (
+from .compile import (
     compile_model,
     compile_transform,
     compile_dataloader,
     compile_opt
 )
 from model.training_logger import (
-    TrainingLogger, 
     get_next_run,
-    create_self_supervised_logger
+    create_self_supervised_logger,
+    NoOpLogger
 )
-from utils.messages.logger import Logger
+from ...utils.distributed import init_distributed
+from ...utils.logger import Logger
 from model.early_stop import EarlyStopping
-from torch.nn import functional as F
 
-logger = Logger()
+logger = Logger(__name__)
 
 def gpu_timer(funct, log_timming = True):
     log_timming = log_timming and torch.cuda.is_available()
@@ -106,13 +111,19 @@ def load_multi_checkpoint(
 
     return models, optimizer, start_epoch + 1, score
 
+    
+GLOBAL_SEED = 12
+random.seed(GLOBAL_SEED)
+np.random.seed(GLOBAL_SEED)
+torch.manual_seed(GLOBAL_SEED)
+torch.backends.cudnn.benchmark = True
+
 def main(args: dict, yaml_path: str):
     
     train_cfg: dict = args.get("train", {})
     patch_size   = train_cfg.get('patch_size', 16)
     tubelet_size = train_cfg.get('tubelet_size', 2)
     crop_size    = train_cfg.get('crop_size', 224)
-    fps          = train_cfg.get('fps', 2)
     nclips       = train_cfg.get('nclips', 1)
     ctx_fpcs     = train_cfg.get('ctx_fpcs', 8)
     pred_fpcs    = train_cfg.get('pred_fpcs', 8)
@@ -166,7 +177,12 @@ def main(args: dict, yaml_path: str):
     dtype = meta_cfg.get('dtype', 'float32')
     save_freq = meta_cfg.get('save_every_freq', 2)
     seed      = meta_cfg.get('seed', 0)
+    sync_gc   = meta_cfg.get('sync_gc', False)
+    tokens_pframe = (crop_size // patch_size) ** 2
     
+
+    world_size, rank = init_distributed()
+    logger.CUSTOM("SUCCESS", f"Initialized distributed on rank {rank}")
     
     
     if dtype.lower() == "bfloat16":
@@ -179,9 +195,9 @@ def main(args: dict, yaml_path: str):
         dtype = torch.float32
         mixed_precision = False
     
-    tokens_pframe = (crop_size // patch_size) ** 2
     
-    device_type = 'cuda'
+    torch.cuda.set_device(rank)
+    device_type = f'cuda:{rank}'
     device = torch.device(device_type)
     encoder, lpred, apred = compile_model(
         enc_cfg = enc_cfg,
@@ -191,11 +207,17 @@ def main(args: dict, yaml_path: str):
     )
 
     if model_cfg.get('compile', False):
-        print("Compiling model")
+        logger.INFO("Compiling model")
         torch._dynamo.config.optimize_ddp = False
         encoder.compile()
         lpred.compile()
         apred.compile()
+
+    encoder = DDP(encoder, static_graph = True)
+    lpred   = DDP(lpred, static_graph = False, find_unused_parameters = True)
+    apred   = DDP(apred, static_graph = False, find_unused_parameters = True)
+    for p in encoder.parameters():
+        p.requires_grad = False
     
     transform = compile_transform(
         random_horizontal_flip = horizontal_flip,
@@ -207,47 +229,56 @@ def main(args: dict, yaml_path: str):
         crop_size    = crop_size,
     )
     
-    video_loader = compile_dataloader(
+    video_loader, video_sampler = compile_dataloader(
         train_cfg, 
         nclips = nclips,
         transform = transform,
         collate_fn = torch.utils.data.default_collate,
         num_workers  = num_workers,
         persistance_workers = persistent_workers,
-        pin_memory = pin_mem
+        pin_memory = pin_mem,
+        world_sz = world_size,
+        rank = rank
     )
     
     optim, scaler, lr_scheduler, wd_scheduler = compile_opt(
-        encoder = encoder,
-        apred   = apred,
-        lpred   = lpred,
+        encoder              = encoder,
+        apred                = apred,
+        lpred                = lpred,
         iterations_per_epoch = ipe,
-        start_lr = start_lr,
-        warmup = warmup, 
-        anneal = annel,
-        num_epochs = epochs,
-        wd = weight_decay,
-        final_lr = final_lr,
-        mixed_precision = mixed_precision,
-        betas = betas,
-        eps = eps,
-        ref_lr = lr,
-        final_wd = final_wd
+        start_lr             = start_lr,
+        warmup               = warmup, 
+        anneal               = annel,
+        num_epochs           = epochs,
+        wd                   = weight_decay,
+        final_lr             = final_lr,
+        mixed_precision      = mixed_precision,
+        betas                = betas,
+        eps                  = eps,
+        ref_lr               = lr,
+        final_wd             = final_wd
     )
     
     loader = iter(video_loader)
 
-    log_dir = os.path.join(FOLDER_DIR, "../Experiment/action/")
-    run_idx = get_next_run(log_dir)
-    log_stats = create_self_supervised_logger(
-        log_dir = log_dir,
-        epochs = epochs,
-        run_name = f"run{run_idx}",
-        progress_type = "table"
-    )
-    
-    gc.disable()
-    gc.collect()
+    # Only create logger and run directories for rank 0 to avoid race conditions
+    if rank == 0:
+        log_dir = os.path.join(FOLDER_DIR, "../Experiment/action/")
+        run_idx = get_next_run(log_dir)
+        log_stats = create_self_supervised_logger(
+            log_dir = log_dir,
+            epochs = epochs,
+            run_name = f"run{run_idx}",
+            progress_type = "table"
+        )
+        lpred_save = EarlyStopping(patience = epochs, freq = save_freq, min_delta = 0, path = os.path.join(log_dir, f"run{run_idx}/weights/lpred.pt"), weights_only = True)
+        apred_save = EarlyStopping(patience = epochs, freq = save_freq, min_delta = 0, path = os.path.join(log_dir, f"run{run_idx}/weights/apred.pt"), weights_only = True)
+    else:
+        log_stats = NoOpLogger()
+   
+    if sync_gc:
+        gc.disable()
+        gc.collect()
 
     def train_step(clips):
         _new_lr = lr_scheduler.step()
@@ -284,6 +315,7 @@ def main(args: dict, yaml_path: str):
                 # -- Since the latent is predicted on action, the action must not drift
                 a_ctx = _a_tf[:, :n * action_pframe]
 
+                # -- Prediction shifting all frames to 1 timestep to the future
                 h_nxt = _step_prediction(h_ctx, a_ctx)[:, -tokens_pframe: ]
                 h_ctx = torch.cat([h_ctx, h_nxt], dim = 1)
             _z_ar = h_ctx[:, tokens_pframe: ]
@@ -311,6 +343,13 @@ def main(args: dict, yaml_path: str):
             def vcm(a):
 
                 """Laziness not permitted"""
+
+                if dist.is_initialized():
+                    # -- Variance and Covariance are non-linear
+                    # -> gather all tensors to satisfies the correct calculation
+                    full_a = [torch.zeros_like(a) for _ in range(world_size)]
+                    dist.all_gather(full_a, a)
+                    a = torch.cat(full_a, dim = 0)
                 
                 N, D = a.size(0) * a.size(1), a.size(2)
                 a = a.reshape(N, D)
@@ -322,6 +361,7 @@ def main(args: dict, yaml_path: str):
                 mean = a.mean() * lm_vcm
 
                 # -- Ensure each variable is independent (maximize information capacity)
+                # -- Cov is rank deficient => Condition B >> D must satisfied
                 a = a - a.mean(dim = 0)
                 cov = (a.T @ a) / (N - 1)
                 diag_mask = ~torch.eye(D, device = a.device).bool()
@@ -365,12 +405,14 @@ def main(args: dict, yaml_path: str):
             loss_ar,
             loss_act,
             energy,
-            vcm
+            vcm,
+            _new_lr,
+            _new_wd
         )
     
     with log_stats:
         log_stats.start_training("Training Latent Action WM")
-        
+        video_sampler.set_epoch(0)
         for epoch in range(epochs):
             
             log_stats.start_epoch(epoch, len(video_loader), desc = "Training")
@@ -385,6 +427,7 @@ def main(args: dict, yaml_path: str):
                         iter_success = True
                     except StopIteration:
                         loader = iter(video_loader)
+                        video_sampler.set_epoch(epoch)
                     except Exception as e:
                         NUM_RETRIES = 5
                         if iter_retries < NUM_RETRIES:
@@ -406,9 +449,14 @@ def main(args: dict, yaml_path: str):
                 
                 clips, actions = load_clips()
                 
-                (loss, loss_tf, loss_ar, loss_act, energy, vcm), elapsed_time = gpu_timer(partial(train_step, clips))
+                (loss, loss_tf, loss_ar, loss_act, energy, vcm, curr_lr, curr_wd), elapsed_time = gpu_timer(partial(train_step, clips))
 
+                if np.isnan(loss) or np.isinf(loss):
+                    logger.ERROR(f"Model failed to converge. {'nan' if np.isnan(loss) else 'inf' if np.isinf(loss) else ''} detected", exit_code = -213)
+                
                 log_stats.log_batch({
+                    "Learning Rate": curr_lr,
+                    "Weight Decay": curr_wd, 
                     "Loss": loss,
                     "Teach Force": loss_tf,
                     "Autoregressive": loss_ar,
@@ -421,6 +469,15 @@ def main(args: dict, yaml_path: str):
                     "GPU timer": elapsed_time 
                 })
             
+            log_stats.log_epoch(extra_metrics = {
+                "GPU": torch.cuda.max_memory_allocated() / 1024.0 ** 2
+            })
+            
+            gc.collect()
+            
+            if rank == 0:
+                lpred_save(log_stats.get_metric("Loss", "train"), lpred, epoch = epoch, optimizer = optim, scaler = scaler, loss = loss, lr = curr_lr)
+                apred_save(log_stats.get_metric("Loss", "train"), lpred, epoch = epoch, optimizer = optim, scaler = scaler, loss = loss, lr = curr_lr)
     
 if __name__ == "__main__":
     yaml_path = "./JEPA_ACT/cfgs/action-224px-1024.24e.yaml"
