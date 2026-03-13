@@ -17,8 +17,15 @@ from torch.utils.data import Dataset
 from concurrent.futures import ThreadPoolExecutor
 from torch.utils.data import random_split
 
-
-_jpeg_loader = TurboJPEG("/usr/lib/libturbojpeg.so.0")
+try: 
+    from turbojpeg import TurboJPEG
+    _jpeg_loader = TurboJPEG("/usr/lib/libturbojpeg.so0")
+    _use_turbo = True
+    print(f"Loaded TurboJPEG")
+except Exception as e:
+    _use_turbo = False
+    print(f"Error while loading TurboJPEG, Falling back to opencv: {e}")
+    import cv2
 _image_ext = ('.jpg', '.jpeg', '.png')
 _find_meta = ("steer", "velocity")
 
@@ -98,10 +105,19 @@ def _decode_metadata(path):
     
 def _decode_image(path):
     if path.lower().endswith(_image_ext[:-1]):
-        with open(path, "rb") as f:
-            img_bytes = f.read()
-
-        return _jpeg_loader.decode(img_bytes, pixel_format = 0)
+        if _use_turbo:
+            # Method 1: TurboJPEG (Fastest)
+            with open(path, "rb") as f:
+                img_bytes = f.read()
+            # pixel_format=0 typically refers to TJPF_RGB in most turbojpeg wrappers
+            return _jpeg_loader.decode(img_bytes, pixel_format=0)
+        else:
+            img = cv2.imread(path)
+            if img is not None:
+                return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            else:
+                with Image.open(path) as img:
+                    return np.array(img.convert('RGB'))
     else: 
         with Image.open(path) as img:
             return np.array(img.convert('RGB'))
@@ -459,139 +475,3 @@ class ActVideoDataset(Dataset):
 
     def __len__(self):
         return len(self.samples)
-
-
-if __name__ == "__main__":
-    import yaml
-    from model.JEPA_ACT.augmenter.transforms_builder import VideoTransform
-    from model.JEPA_ACT.masks.multiseq_multiblock3d import MaskCollator
-    from torch.utils.data import DataLoader
-    import torchvision.transforms as transforms
-    import torch.nn.functional as F
-
-    
-    check_norm_val  = False
-    check_collator  = True
-    check_transform = True
-    check_dataloader = True
-    
-    # Define resolution standardization transform
-    def resize_video_clip(clip, target_size=(256, 256)):
-        """
-        Resize video clip to target resolution
-        Args:
-            clip: numpy array of shape (T, H, W, C) 
-            target_size: tuple (H, W) target resolution
-        Returns:
-            resized clip as numpy array
-        """
-        if isinstance(clip, np.ndarray):
-            # Convert to tensor for resize
-            clip_tensor = torch.from_numpy(clip).float()
-            # Permute to (T, C, H, W) for F.interpolate
-            clip_tensor = clip_tensor.permute(0, 3, 1, 2)
-            # Resize
-            resized = F.interpolate(clip_tensor, size=target_size, mode='bilinear', align_corners=False)
-            # Permute back to (T, H, W, C) and convert to numpy
-            resized = resized.permute(0, 2, 3, 1).numpy().astype(np.uint8)
-            return resized
-        return clip
-    
-    with open("./JEPA_ACT/cfgs/action-256px-1024.24e.yaml", "r") as f:
-        args = yaml.safe_load(f)
-        
-    data_paths = [name['path'] for name in args['train']['datasets']]
-    ctx_fpcs   = [name['ctx_fpcs'] for name in args['train']['datasets']]
-    pred_fpcs  = [name['pred_fpcs'] for name in args['train']['datasets']]
-
-    dataset_fpcs = [16, 16]
-    crop_size    = 256 
-    patch_size   = 16 
-    tubelet_size = 2
-    
-    # Create transform that handles resolution standardization
-    def standardize_transform(clip):
-        return resize_video_clip(clip, target_size=(256, 256))
-    
-    dataset = ActVideoDataset(
-        data_paths = data_paths,
-        ctx_frames_per_clips = ctx_fpcs,
-        pred_frames_per_clips = pred_fpcs,
-        nclips = 3,
-        individual_transform = standardize_transform  # Apply resize to each clip
-    )
-
-    dataloader = DataLoader(dataset, batch_size = 16, shuffle = True)
-    
-    # Verify dataloader structure
-    print("=== DATALOADER VERIFICATION ===")
-    try:
-        batch = next(iter(dataloader))
-        print(f"Batch type: {type(batch)}")
-        print(f"Batch length: {len(batch)}")
-        
-        if len(batch) == 3:  # ctx_buffers, pred_buffers, gt_data
-            ctx_buffers, pred_buffers, gt_data = batch
-            
-            print(f"\n--- Context Buffers ---")
-            print(f"Type: {type(ctx_buffers)}")
-            print(f"Length (nclips): {len(ctx_buffers)}")
-            for i, clip in enumerate(ctx_buffers):
-                print(f"  Clip {i} shape: {clip.shape if hasattr(clip, 'shape') else 'No shape attr'}")
-                
-            print(f"\n--- Prediction Buffers ---") 
-            print(f"Type: {type(pred_buffers)}")
-            print(f"Length (nclips): {len(pred_buffers)}")
-            for i, clip in enumerate(pred_buffers):
-                print(f"  Clip {i} shape: {clip.shape if hasattr(clip, 'shape') else 'No shape attr'}")
-                
-            print(f"\n--- Ground Truth Data ---")
-            print(f"Type: {type(gt_data)}")
-            print(f"Length (nclips): {len(gt_data)}")
-            for i, gt in enumerate(gt_data):
-                print(f"  GT {i} type: {type(gt)}")
-                if isinstance(gt, dict):
-                    for key, value in gt.items():
-                        print(f"    {key}: {value.shape if hasattr(value, 'shape') else type(value)}")
-                        
-    except Exception as e:
-        print(f"Error loading batch: {e}")
-        print("This likely indicates resolution mismatch - images can't be batched!")
-        
-        # Try single sample
-        print("\n--- SINGLE SAMPLE TEST ---")
-        sample = dataset[0]
-        if sample:
-            ctx, pred, gt = sample
-            print(f"Context clips: {len(ctx)}")
-            for i, clip in enumerate(ctx):
-                print(f"  Ctx clip {i}: {clip.shape}")
-            print(f"Prediction clips: {len(pred)}")  
-            for i, clip in enumerate(pred):
-                print(f"  Pred clip {i}: {clip.shape}")
-            print(f"GT data: {len(gt)}")
-            for i, g in enumerate(gt):
-                print(f"  GT {i}: {g}")
-
-    if check_norm_val:
-        device = torch.device("cuda")
-        
-        total_sum = torch.zeros(3, dtype = torch.float64).to(device)
-        total_sq  = torch.zeros(3, dtype = torch.float64).to(device)
-        total_pixel = 0
-        for idx in range(len(dataset)):
-            buffer, _ = dataset[idx]
-            buffer = torch.tensor(np.array(buffer), dtype = torch.float64).to(device)
-            buffer /= 255.0
-            total_sum += buffer.sum((0, 1, 2, 3), dtype = torch.float64)
-            total_sq  += (buffer ** 2).sum((0, 1, 2, 3), dtype = torch.float64)
-
-            total_pixel += torch.prod(torch.tensor(buffer.shape[:-1]))
-
-
-        mean = total_sum / total_pixel
-        dev  = (total_sq / total_pixel) - mean ** 2
-        std_dev = torch.sqrt(dev)
-        
-        print(f"{mean=}") # -- [0.2809, 0.2959, 0.2946]
-        print(f"{std_dev=}") # -- [0.2469, 0.2675, 0.2795]
