@@ -12,7 +12,6 @@ import torch
 import re
 from PIL import Image
 from pathlib import Path
-from turbojpeg import TurboJPEG
 from torch.utils.data import Dataset
 from concurrent.futures import ThreadPoolExecutor
 from torch.utils.data import random_split
