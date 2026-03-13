@@ -19,7 +19,7 @@ from torch.utils.data import random_split
 
 try: 
     from turbojpeg import TurboJPEG
-    _jpeg_loader = TurboJPEG("/usr/lib/libturbojpeg.so0")
+    _jpeg_loader = TurboJPEG("/usr/lib/libturbojpeg.so.0")
     _use_turbo = True
     print(f"Loaded TurboJPEG")
 except Exception as e:
@@ -475,3 +475,74 @@ class ActVideoDataset(Dataset):
 
     def __len__(self):
         return len(self.samples)
+
+if __name__ == "__main__":
+    import yaml
+
+    def display_clip_opencv(clip, window_name="dataset clip"):
+        if isinstance(clip, torch.Tensor):
+            clip = clip.detach().cpu().numpy()
+
+        clip = np.asarray(clip)
+
+        if len(clip) == 0:
+            return
+
+        print("Controls: n/right/space = next, p/left = previous, q/esc = quit")
+
+        frame_idx = 0
+
+        while True:
+            frame = clip[frame_idx]
+
+            frame_to_show = frame
+            if frame_to_show.dtype != np.uint8:
+                frame_to_show = np.clip(frame_to_show, 0, 255).astype(np.uint8)
+
+            if frame_to_show.ndim == 3 and frame_to_show.shape[-1] == 3:
+                frame_to_show = cv2.cvtColor(frame_to_show, cv2.COLOR_RGB2BGR)
+
+            display_frame = frame_to_show.copy()
+            cv2.putText(
+                display_frame,
+                f"Frame {frame_idx + 1}/{len(clip)}",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+
+            cv2.imshow(window_name, display_frame)
+            key = cv2.waitKeyEx(0)
+
+            if key in (27, ord('q')):
+                break
+            if key in (32, ord('n'), 2555904):
+                frame_idx = min(frame_idx + 1, len(clip) - 1)
+                continue
+            if key in (ord('p'), 2424832):
+                frame_idx = max(frame_idx - 1, 0)
+                continue
+
+        cv2.destroyAllWindows()
+    
+    with open("./cfgs/action-256px-1024.24e.yaml", "r") as f:
+        args = yaml.safe_load(f)
+
+    train_arg = args['train']
+    
+    dset = ActVideoDataset(
+        data_paths = [dataset['path'] for dataset in train_arg['datasets']],    
+        frame_step = [dataset['fps'] for dataset in train_arg['datasets']],
+        ctx_frames_per_clips = train_arg['ctx_fpcs'],
+        pred_frames_per_clips = train_arg['pred_fpcs'],
+        nclips = 1,
+        # individual_transform = transform,
+        allow_clip_overlap = train_arg['allow_clip_overlap'],
+        random_jiggle_part = train_arg['random_jiggle']
+    )
+    
+    
+    display_clip_opencv(dset[0][0][0])
