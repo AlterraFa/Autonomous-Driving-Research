@@ -1,0 +1,46 @@
+[project]
+name = "cooking_station"
+version = "2.5.0"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "decord>=0.6.0",
+    "einops>=0.8.2",
+    "line-profiler>=5.0.0",
+    "multiprocess>=0.70.19",
+    "numba>=0.63.1",
+    "numpy>=2.2.6",
+    "onnx>=1.20.1",
+    "onnxruntime>=1.23.2",
+    "prefetch-generator>=1.0.3",
+    "progress-table>=3.2.2",
+    "pyclothoids>=0.2.0",
+    "pycuda>=2026.1",
+    "pyturbojpeg>=1.8.2",
+    "pyyaml>=6.0.3",
+    "rich>=14.3.1",
+    "scikit-image>=0.25.2",
+    "scikit-learn>=1.7.2",
+    "seaborn>=0.13.2",
+    "setuptools>=80.10.2",
+    "tensorboard>=2.20.0",
+    "tensorboardx>=2.6.4",
+    "tensorrt-cu12==10.15.1.29",
+    "tensorrt-cu12-bindings==10.15.1.29",
+    "tensorrt-cu12-libs==10.15.1.29",
+    "timm>=1.0.24",
+    "toml>=0.10.2",
+    "torch>=2.10.0",
+    "torchvision>=0.25.0",
+    "tqdm>=4.67.2",
+    "wheel>=0.46.3",
+    "yacs>=0.1.8",
+    "rich",
+    "tensorflow>=2.20.0",
+    "yapf>=0.43.0",
+    "opencv-python>=4.13.0.92",
+    "psutil>=7.2.2",
+]
+
+[tool.uv]
+conflicts = [[{ extra = 'cpu' },  { extra = 'gpu' }]]
+compile-bytecode = true

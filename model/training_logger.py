@@ -111,6 +111,15 @@ class TrainingLogger:
         use_validation: Whether to expect validation metrics (set to False for self-supervised training)
     """
     
+    @staticmethod
+    def _format_value(value: float) -> str:
+        """Format a numeric value, using scientific notation for small values."""
+        if isinstance(value, int):
+            return str(value)
+        if abs(value) < 0.0001 and value != 0:
+            return f"{value:.2e}"
+        return f"{value:.4f}"
+    
     def __init__(
         self,
         log_dir: str,
@@ -297,7 +306,7 @@ class TrainingLogger:
         if self.progress_type == "tqdm":
             # Update batch progress bar with current metrics
             if self.batch_pbar is not None:
-                display_metrics = {k: (f"{v:.4f}" if not isinstance(v, int) else f"{v}") for k, v in metrics.items()}
+                display_metrics = {k: self._format_value(v) for k, v in metrics.items()}
                 self.batch_pbar.set_postfix(display_metrics)
                 self.batch_pbar.update(1)
         else:
@@ -323,7 +332,7 @@ class TrainingLogger:
                     # Get running average from accumulator
                     avg_value = sum(accum[key]) / len(accum[key])
                     column_name = f"{prefix}{key}" if prefix else key
-                    self.progress_table[column_name] = avg_value
+                    self.progress_table[column_name] = self._format_value(avg_value)
             
     def log_epoch(
         self,
@@ -395,10 +404,7 @@ class TrainingLogger:
                     for key, value in extra_metrics.items():
                         if isinstance(value, torch.Tensor):
                             value = value.item()
-                        if "lr" in key.lower():
-                            self.progress_table[f"Misc | {key}"] = f"{value:.2e}"
-                        else:
-                            self.progress_table[f"Misc | {key}"] = value
+                        self.progress_table[f"Misc | {key}"] = self._format_value(value)
                 
                 self.progress_table.next_row()
             
@@ -422,22 +428,19 @@ class TrainingLogger:
         # Add train metrics (only show 'Train' prefix if validation is enabled)
         for key, value in train_metrics.items():
             if self.use_validation:
-                parts.append(f"Train {key}: {value:.4f}")
+                parts.append(f"Train {key}: {self._format_value(value)}")
             else:
-                parts.append(f"{key}: {value:.4f}")
+                parts.append(f"{key}: {self._format_value(value)}")
             
         # Add val metrics (only if validation is enabled and metrics exist)
         if self.use_validation and val_metrics:
             for key, value in val_metrics.items():
-                parts.append(f"Val {key}: {value:.4f}")
+                parts.append(f"Val {key}: {self._format_value(value)}")
             
         # Add extra metrics
         if extra_metrics:
             for key, value in extra_metrics.items():
-                if "lr" in key.lower():
-                    parts.append(f"{key}: {value:.2e}")
-                else:
-                    parts.append(f"{key}: {value:.4f}")
+                parts.append(f"{key}: {self._format_value(value)}")
         
         tqdm.write(" | ".join(parts))
         

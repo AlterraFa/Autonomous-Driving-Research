@@ -9,8 +9,8 @@ import math
 import torch
 import torch.nn as nn
 
-from model.JEPA_ACT.models.utils.modules import Block, CrossAttention, CrossAttentionBlock
-from model.JEPA_ACT.utils.tensors import trunc_normal_
+from .utils.modules import Block, CrossAttention, CrossAttentionBlock
+from .utils.tensors import trunc_normal_
 
 
 class AttentivePooler(nn.Module):

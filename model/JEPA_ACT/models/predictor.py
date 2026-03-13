@@ -9,10 +9,10 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from model.JEPA_ACT.masks.utils import apply_masks
-from model.JEPA_ACT.models.utils.modules import Block
-from model.JEPA_ACT.models.utils.pos_embs import get_2d_sincos_pos_embed, get_3d_sincos_pos_embed
-from model.JEPA_ACT.utils.tensors import repeat_interleave_batch, trunc_normal_
+from ..masks.utils import apply_masks
+from .utils.modules import Block
+from .utils.pos_embs import get_2d_sincos_pos_embed, get_3d_sincos_pos_embed
+from .utils.tensors import repeat_interleave_batch, trunc_normal_
 
 
 class VisionTransformerPredictor(nn.Module):

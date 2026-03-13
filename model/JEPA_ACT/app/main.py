@@ -1,3 +1,8 @@
+import os, sys
+import resource
+root = os.path.abspath(os.path.join(os.path.dirname(__file__), "."))
+sys.path.insert(0, root)
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 import argparse
 import multiprocessing as mp
 import yaml

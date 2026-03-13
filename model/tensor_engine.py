@@ -23,7 +23,7 @@ sys.path.append(root_dir)
 
 from tqdm.auto import tqdm
 from rich import print
-from src.messages.logger import Logger
+from .logger import Logger
 if not hasattr(np, "float"): np.float = np.float64
 
 class TensorRTCore:

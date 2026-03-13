@@ -1,5 +1,5 @@
 ,0
-0,/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/Autonomous_Dataset/carla_clean/recording_20260204_085306_spatial/seq_00000
-1,/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/Autonomous_Dataset/carla_clean/recording_20260204_085306_spatial/seq_00001
-2,/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/Autonomous_Dataset/carla_clean/recording_20260204_085306_spatial/seq_00002
-3,/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/Autonomous_Dataset/carla_clean/recording_20260204_085306_spatial/seq_00003
+0,../Autonomous_Dataset/carla_clean/recording_20260204_085306_spatial/seq_00000
+1,../Autonomous_Dataset/carla_clean/recording_20260204_085306_spatial/seq_00001
+2,../Autonomous_Dataset/carla_clean/recording_20260204_085306_spatial/seq_00002
+3,../Autonomous_Dataset/carla_clean/recording_20260204_085306_spatial/seq_00003

@@ -11,7 +11,7 @@ from typing import Any
 import torch
 from torch.serialization import MAP_LOCATION
 
-from utils.messages.logger import Logger
+from .logger import Logger
 
 logger = Logger()
 
