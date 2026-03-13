@@ -8,8 +8,8 @@ from typing import Optional
 import torch
 import torchvision.transforms as transforms
 
-import model.JEPA_ACT.augmenter.transforms as video_transforms
-from model.JEPA_ACT.augmenter.randerase import RandomErasing
+from . import transforms as video_transforms
+from .randerase import RandomErasing
 
 
 

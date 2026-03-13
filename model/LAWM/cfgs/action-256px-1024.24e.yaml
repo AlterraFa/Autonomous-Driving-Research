@@ -21,31 +21,31 @@ train:
   random_jiggle: true
   datasets:
     - name: "carla"
-      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20251019_161905_best_spatial.csv"
+      path: "./csv_metadata/Carla_recording_20251019_161905_best_spatial.csv"
       fps: 2
     - name: "carla"
-      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20251025_142727_best_spatial.csv"
+      path: "./csv_metadata/Carla_recording_20251025_142727_best_spatial.csv"
       fps: 2
     - name: "carla"
-      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_005321_spatial.csv"
+      path: "./csv_metadata/Carla_recording_20260204_005321_spatial.csv"
       fps: 2
     - name: "carla"
-      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_010805_spatial.csv"
+      path: "./csv_metadata/Carla_recording_20260204_010805_spatial.csv"
       fps: 2
     - name: "carla"
-      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_085306_spatial.csv"
+      path: "./csv_metadata/Carla_recording_20260204_085306_spatial.csv"
       fps: 2
     - name: "carla"
-      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260204_090029_spatial.csv"
+      path: "./csv_metadata/Carla_recording_20260204_090029_spatial.csv"
       fps: 2
     - name: "carla"
-      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260312_163316_spatial.csv"
+      path: "./csv_metadata/Carla_recording_20260312_163316_spatial.csv"
       fps: 2
     - name: "carla"
-      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260312_164439_spatial.csv"
+      path: "./csv_metadata/Carla_recording_20260312_164439_spatial.csv"
       fps: 2
     - name: "carla"
-      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/Simulation/model/JEPA_ACT/csv_metadata/Carla_recording_20260312_170731_spatial.csv"
+      path: "./csv_metadata/Carla_recording_20260312_170731_spatial.csv"
       fps: 2
 
 val:
