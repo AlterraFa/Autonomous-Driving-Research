@@ -1,5 +1,8 @@
 from typing import Optional
-from ....augmenter.transforms_builder import VideoTransform
+from augmenter.transforms_builder import VideoTransform
+from utils.logger import Logger
+
+logger = Logger(__name__)
 
 def compile_transform(
     random_horizontal_flip=True,
@@ -25,4 +28,17 @@ def compile_transform(
         pad_frame_count=pad_frame_count,
         pad_frame_method=pad_frame_method,
     )
+    logger.INFO("Transform initialized with:")
+    logger.INFO({
+        "random_horizontal_flip": random_horizontal_flip,
+        "random_resize_aspect_ratio": random_resize_aspect_ratio,
+        "random_resize_scale": random_resize_scale,
+        "reprob": reprob,
+        "auto_augment": auto_augment,
+        "motion_shift": motion_shift,
+        "crop_size": crop_size,
+        "normalize": normalize,
+        "pad_frame_count": pad_frame_count,
+        "pad_frame_method": pad_frame_method,
+    })
     return _frames_augmentation

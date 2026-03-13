@@ -30,8 +30,8 @@ from model.training_logger import (
     create_self_supervised_logger,
     NoOpLogger
 )
-from ...utils.distributed import init_distributed
-from ...utils.logger import Logger
+from utils.distributed import init_distributed
+from utils.logger import Logger
 from model.early_stop import EarlyStopping
 
 logger = Logger(__name__)
@@ -273,6 +273,7 @@ def main(args: dict, yaml_path: str):
         )
         lpred_save = EarlyStopping(patience = epochs, freq = save_freq, min_delta = 0, path = os.path.join(log_dir, f"run{run_idx}/weights/lpred.pt"), weights_only = True)
         apred_save = EarlyStopping(patience = epochs, freq = save_freq, min_delta = 0, path = os.path.join(log_dir, f"run{run_idx}/weights/apred.pt"), weights_only = True)
+        os.system(f"cp {yaml_path} {os.path.join(log_dir, f'run{run_idx}')}")
     else:
         log_stats = NoOpLogger()
    
@@ -292,8 +293,8 @@ def main(args: dict, yaml_path: str):
             return h
 
         def forward_prediction(h: torch.Tensor):
-            def _step_action(h):
-                _a = apred(h)
+            def _step_action(h, g):
+                _a = apred(h, g)
                 return _a
             
             def _step_prediction(h, a):
@@ -304,7 +305,8 @@ def main(args: dict, yaml_path: str):
 
             # -- Teacher forcing entire timestep action + prediction
             h_ctx = h[:, :-tokens_pframe, :]
-            _a_tf = _step_action(h_ctx)
+            h_goal = h[:, -tokens_pframe:, :]
+            _a_tf = _step_action(h_ctx, h_goal)
             _z_tf = _step_prediction(h_ctx, _a_tf)
                 
             # -- Autoregressive rollout of each timestep action and prediction
@@ -361,7 +363,7 @@ def main(args: dict, yaml_path: str):
                 mean = a.mean() * lm_vcm
 
                 # -- Ensure each variable is independent (maximize information capacity)
-                # -- Cov is rank deficient => Condition B >> D must satisfied
+                # -- Cov is rank deficient => Condition N >> D must satisfied
                 a = a - a.mean(dim = 0)
                 cov = (a.T @ a) / (N - 1)
                 diag_mask = ~torch.eye(D, device = a.device).bool()
@@ -455,17 +457,17 @@ def main(args: dict, yaml_path: str):
                     logger.ERROR(f"Model failed to converge. {'nan' if np.isnan(loss) else 'inf' if np.isinf(loss) else ''} detected", exit_code = -213)
                 
                 log_stats.log_batch({
-                    "Learning Rate": curr_lr,
-                    "Weight Decay": curr_wd, 
+                    "LR": curr_lr,
+                    "WD": curr_wd, 
                     "Loss": loss,
-                    "Teach Force": loss_tf,
-                    "Autoregressive": loss_ar,
+                    "Teach Force|Z": loss_tf,
+                    "Autoregressive|Z": loss_ar,
                     "Action": loss_act,
-                    "Hinge": energy[0],
-                    "Sparsity": energy[1],
-                    "Variance": vcm[0],
-                    "Covariance": vcm[1],
-                    "Mean": vcm[2],
+                    "Hinge|Erg": energy[0],
+                    "Sparsity|Erg": energy[1],
+                    "Variance|VCM": vcm[0],
+                    "Covariance|VCM": vcm[1],
+                    "Mean|VCM": vcm[2],
                     "GPU timer": elapsed_time 
                 })
             

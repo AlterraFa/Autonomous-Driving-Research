@@ -4,7 +4,7 @@ import yaml
 import importlib
 import torch
 
-from ..utils.distributed import init_distributed
+from utils.distributed import init_distributed
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--fname", type=str, help="name of config file to load", default="configs.yaml")
@@ -22,7 +22,7 @@ def process(rank, fname, world_size, devices):
 
     os.environ['CUDA_VISIBLE_DEVICES'] = str(devices[rank].split(":")[-1])
     
-    from ..utils.logger import Logger
+    from utils.logger import Logger
     
     logger = Logger()
         
@@ -39,7 +39,7 @@ def process(rank, fname, world_size, devices):
 
         
     try:
-        importlib.import_module(f"JEPA_ACT.app.{params['app']}.train").main(params, fname)
+        importlib.import_module(f"app.{params['app']}.train").main(params, fname)
     except KeyboardInterrupt:
         logger.ERROR(f"Keyboard Interrupt detected on {rank=}")
     except Exception as e:

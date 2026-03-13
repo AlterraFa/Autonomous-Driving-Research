@@ -1,6 +1,8 @@
 import torch
-from ....utils.schedulers import WSDSchedule, CosineWDSchedule
+from utils.schedulers import WSDSchedule, CosineWDSchedule
+from utils.logger import Logger
 
+logger = Logger(__name__)
 
 def compile_opt(
     encoder,
@@ -66,5 +68,29 @@ def compile_opt(
         final_wd=final_wd,
         T_max=int(num_epochs * iterations_per_epoch),
     )
-    scaler = torch.cuda.amp.GradScaler() if mixed_precision else None
+    scaler = torch.amp.GradScaler() if mixed_precision else None
+
+    logger.INFO("Optimizer, weight decay and learning rate scheduler initialized with:")
+    logger.INFO({
+        "optimizer": {
+            "type": "AdamW",
+            "betas": betas,
+            "eps": eps,
+        },
+        "lr_scheduler": {
+            "type": "WSDSchedule",
+            "warmup_steps": int(warmup * iterations_per_epoch),
+            "anneal_steps": int(anneal * iterations_per_epoch),
+            "start_lr": start_lr,
+            "ref_lr": ref_lr,
+            "final_lr": final_lr,
+            "T_max": int(num_epochs * iterations_per_epoch),
+        },
+        "wd_scheduler": {
+            "type": "CosineWDSchedule",
+            "ref_wd": wd,
+            "final_wd": final_wd,
+            "T_max": int(num_epochs * iterations_per_epoch),
+        },
+    })
     return optimizer, scaler, scheduler, wd_scheduler

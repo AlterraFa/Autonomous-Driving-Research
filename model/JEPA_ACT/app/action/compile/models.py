@@ -1,11 +1,14 @@
 import torch
 import torch.nn as nn
 import copy
-from ....models.vision_transformer import VisionTransformer as Enc
-from ....models.latent_dreamer import VisionTransformerPredictorAC as LPred
-from ....models.action_predictor import TransformerActionPredictor as APred
+from models.vision_transformer import VisionTransformer as Enc
+from models.latent_dreamer import VisionTransformerPredictorAC as LPred
+from models.action_predictor import (
+    # TransformerActionPredictor as APred, 
+    ActionTransformerPredictorGC as APred
+)
 
-from ....utils.logger import Logger
+from utils.logger import Logger
 
 from torch import distributed as dist
 
@@ -73,8 +76,7 @@ def compile_model(
     action_predictor = APred(
         img_size=apred_cfg.get('crop_size', 224),
         patch_size=apred_cfg.get('patch_size', 16),
-        ctx_nframes=apred_cfg.get('ctx_fpcs', 1),
-        goal_nframes=apred_cfg.get('pred_fpcs', 1),
+        max_frame=apred_cfg.get('ctx_fpcs', 1) + apred_cfg.get('pred_fpcs', 1),
         tubelet_size=apred_cfg.get('tubelet_size', 2),
         action_per_step=apred_cfg.get('action_pframe', 1),
         embed_dim=encoder.embed_dim,

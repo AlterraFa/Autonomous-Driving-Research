@@ -50,5 +50,26 @@ def compile_optim(
         final_wd = final_wd,
         T_max  = int(epochs * ipe),
     )
+
+    logger.INFO("Optimizer, weight decay and learning rate scheduler initialized with:")
+    logger.INFO({
+        "optimizer": {
+            "type": "AdamW",
+            "lr": init_lr,
+            "betas": betas,
+        },
+        "lr_scheduler": {
+            "type": "CosineSchedule",
+            "ref_lr": init_lr,
+            "final_lr": final_lr,
+            "T_max": int(epochs * ipe),
+        },
+        "wd_scheduler": {
+            "type": "CosineWDSchedule",
+            "ref_wd": init_wd,
+            "final_wd": final_wd,
+            "T_max": int(epochs * ipe),
+        },
+    })
     
     return optimizer, scheduler, wd_scheduler

@@ -1,0 +1,1 @@
+- Action predictor is a bridge -> velocity cannot be controlled reliably if it is goal dependent
