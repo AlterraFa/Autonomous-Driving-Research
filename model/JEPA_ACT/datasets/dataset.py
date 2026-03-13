@@ -223,7 +223,6 @@ class VideoDataset(Dataset):
         self.samples = samples
         self.labels = labels
 
-    
     def __getitem__(self, index):
         """Load sample with retry logic"""
         for retry in range(5):
@@ -234,9 +233,8 @@ class VideoDataset(Dataset):
             except Exception as e:
                 if retry < 4:
                     print(f"Error loading sample at {index=}, retrying ({retry+1}/5): {e}")
-                else:
-                    print(f"Failed to load sample at {index=} after 5 retries")
-        return None
+
+        print(f"Failed to load sample at {index=}, dataset_path={self.samples[index]} after 5 retries")
 
     def load_image_sequences(self, index):
         """Load and process image sequences for given index"""
