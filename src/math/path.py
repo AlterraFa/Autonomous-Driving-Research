@@ -12,20 +12,12 @@ import time
 
 from scipy.interpolate import interp1d
 from scipy.spatial import cKDTree
-from scipy.optimize import least_squares
-from src.others.data_processor import CarlaDatasetCollector
-from src.math.coordinate_transform import global_2_local
 from src.messages.logger import Logger
 from src.control.world import World
 
 from numba import njit
 import pyclothoids
 
-conf = toml.load(os.path.join(parent, "../config/config.toml"))
-temporal_offset      = conf['Offsets']['temporal_offset']
-spatial_offset       = conf['Offsets']['spatial_offset']
-scout_offset_params  = conf['Offsets']['scout_offset_params']
-front_vehicle_offset = conf['Offsets']['front_vehicle_offset']
 
 def wrap_to_pi(theta):
     return (theta + np.pi) % (2 * np.pi) - np.pi
@@ -101,7 +93,6 @@ class NodeFinder:
                 if candidate_idx > self.position_idx and abs(group_distance[relative_candidate] - dists[relative_curr]) > self.update_dist:
                     self.position_idx = candidate_idx
                 return self.position_idx
-        
         return self.position_idx
 
 class PathHandler(NodeFinder):
@@ -112,7 +103,7 @@ class PathHandler(NodeFinder):
     """
     def __init__(self, defined_path: np.ndarray, extrapolate: bool = True):
         self.log = Logger()
-        super().__init__(10, defined_path[:, :3])
+        super().__init__(15, defined_path[:, :3])
 
         assert defined_path.ndim == 2 and defined_path.shape[1] in (3, 4), \
             "defined_path must be (N,3) [x,y,z] or (N,4) [x,y,z,t]"
@@ -671,168 +662,209 @@ class TurnClassify:
 
         return self.signal
 
-from src.messages.message_handler import MessageSubscriber, MessageSender
-from src.messages.all_messages import (
-    Location,
-    Heading,
-    ServerFps,
-    ClientFps,
-    SteerLog,
-    Velocity,
-    BrakeLog,
-    ThrottleLog,
-    TurnSignal,
-    PolylinesCmd,
-    ServerRuntime
-)
-class ReplayHandler:
+from scipy.interpolate import splprep, splev
+class WaypointsAlign:
+    """Handles routing, smoothing, and projection of waypoints separate from map visuals."""
+    def __init__(self, world: World, waypoint_distance):
+        self.world = world
 
-    turn_classify = True
-    __slot__ = ["road_type"]
-    
-    def __init__(self, world: World, true_trajectories: str, midlane_waypoints: np.ndarray = None, data_collect_dir: str = None, use_temporal: bool = False, debug: bool = False):
-        self.logger = Logger()
+        carla_map = world.world.get_map()
+        waypoints = carla_map.generate_waypoints(distance=waypoint_distance)
+
+        wp_dict = {(wp.transform.location.x, wp.transform.location.y): wp for wp in waypoints}
+        _wp_list = list(wp_dict.values())
+        _wps = np.array([[wp.transform.location.x, wp.transform.location.y] for wp in _wp_list])
+        _tree = cKDTree(_wps)
+
+        self._wp_list = _wp_list
+        self._tree = _tree
+
+    @staticmethod
+    def b_smooth(points: np.ndarray):
+        # NOTE: splprep will crash if consecutive points are identical. 
+        # Add deduplication here if you ever experience a ValueError.
+        x, y, z = points[:, 0], points[:, 1], points[:, 2]
+                    
+        tck, u = splprep([x, y, z], s=2.0, k=3)
         
-        self.true_trajectories = true_trajectories
-        self.path_handler = PathHandler(midlane_waypoints)
-        self.debug = debug
-        self.virt_world = world
-        self.use_temporal = use_temporal
-        self.scout_points = [i for i in range(*scout_offset_params)]
-        if not self.use_temporal:
-            self.offset   = spatial_offset
-        else:
-            self.offset   = temporal_offset
-        self.turn_classifier = TurnClassify(world=world, threshold_deg=20)
-        self.branching_path  = BranchingPath(self.virt_world)
-        self.data_collector = None
-        if data_collect_dir:
-            self.data_collector = CarlaDatasetCollector(save_dir=data_collect_dir, fps=20)
-
-        self._init_transmittor()
-        self.prev_dist = 0
-        self.additional_max = 20; self.addition_cnt = 0
-        self.start_time = self.sub_server_runtime.receive()
-
-    def _init_transmittor(self):
-        self.sub_location = MessageSubscriber(Location)
-        self.sub_heading  = MessageSubscriber(Heading)
-        self.sub_server_fps = MessageSubscriber(ServerFps)
-        self.sub_client_fps = MessageSubscriber(ClientFps)
-        self.sub_steer_logging = MessageSubscriber(SteerLog)
-        self.sub_throttle_logging = MessageSubscriber(ThrottleLog)
-        self.sub_brake_logging    = MessageSubscriber(BrakeLog)
-        self.sub_velocity         = MessageSubscriber(Velocity)
-        self.sub_polylines        = MessageSubscriber(PolylinesCmd)
-        self.sub_server_runtime = MessageSubscriber(ServerRuntime)
-        self.send_turn_signal     = MessageSender(TurnSignal)
+        new_u = np.linspace(0, 1, len(points))
+        smooth_x, smooth_y, smooth_z = splev(new_u, tck)
         
-
-    def step(self, **frame: np.ndarray):
-        vehicle_location = self.sub_location.receive()
-
-        # Convert yaw from degrees to radians for math functions
-        heading  = np.radians(self.sub_heading.receive())
-
-        # Distance from the center to the front of the car (adjust as per your vehicle)
-        front_offset = front_vehicle_offset  # meters
-
-        # Calculate offset in x and y directions
-        offset_x = front_offset * np.cos(heading - np.pi / 2)
-        offset_y = front_offset * np.sin(heading - np.pi / 2)
-
-        # Calculate front location coordinates
-        position = np.array([
-            vehicle_location[0] + offset_x,
-            vehicle_location[1] + offset_y,
-            vehicle_location[2]  # same height as center
-        ])
-        server_fps = self.sub_server_fps.receive()
-        if server_fps < 1: server_fps = self.sub_client_fps.receive()
+        dx = np.gradient(smooth_x)
+        dy = np.gradient(smooth_y)
+        smooth_yaw = np.degrees(np.arctan2(dy, dx))
         
-        
-        
-        curr_dist, *_ = self.path_handler.project(position)
-        mid_global_scout = self.path_handler.waypoints(
-            position, self.scout_points
-        )
-        
-        mid_global = self.path_handler.waypoints(
-            position, self.offset, use_time = self.use_temporal, merge = False
-        )
-        mid_ego = global_2_local(vehicle_location, mid_global, heading)
-        
-        path_branches  = self.branching_path.brancher(mid_global, mid_global_scout, persist_dist = 20)
-        ego_branches = np.empty_like(path_branches)[..., :2]
-        if path_branches.shape[0] > 1:
-            self.road_type = "multi"
-        else:
-            self.road_type = "uni"
-        for idx, branch in enumerate(path_branches):
-            ego_branches[idx] = global_2_local(vehicle_location, branch, heading)
+        group_meta = np.column_stack((smooth_x, smooth_y, smooth_z, smooth_yaw))
+        return group_meta
+
+    def get_jid_for_point(self, point):
+        segs = self.world.get_segments_from_points("junction", np.array([point]))
+        return segs[0].id if segs else None
+
+    def spatial_align(self, coordinates: np.ndarray):
+        junctions = self.world.get_segments_from_points("junction", coordinates)
+
+        # ========== Filter out duplicated adjacent junctions ============
+        last_jid = None
+        for junction_id in range(len(junctions) - 1, -1, -1):
+            if junctions[junction_id].id == last_jid:
+                junctions.pop(junction_id)
+            else:
+                last_jid = junctions[junction_id].id
+
+        jids =[self.get_jid_for_point(p) for p in coordinates]
+
+        # ================ Grouping coordinate to respective junctions =================
+        groups: list[np.ndarray] = []
+        current_group: list =[]
+        current_jid = jids[0]
+
+        if current_jid is not None:
+            current_group.append(coordinates[0])
+
+        for pt, jid in zip(coordinates[1:], jids[1:]):
+            if jid == current_jid:
+                if jid is not None:
+                    current_group.append(pt)
+            else:
+                if current_jid is not None and current_group:
+                    groups.append(np.array(current_group))
+                current_group = [pt] if jid is not None else[]
+                current_jid = jid
+
+        if current_jid is not None and current_group:
+            groups.append(np.array(current_group))
+
+        junctions_metadata_groups =[]
+
+        # -- Precompute the path through junctions
+        for idx, (coordinate_group, junction) in enumerate(zip(groups, junctions)):
+            wp_pairs = junction.get_waypoints(carla.LaneType.Driving)
+            possible_pairs = _find_entry_clusters(wp_pairs, coordinate_group[:1])
+            entry_wp, exit_wp = _find_exit(possible_pairs, coordinate_group[-1:])
+
+            # if idx in (1, ):
+            #     self.world.world.debug.draw_point(entry_wp.transform.location, size = 0.3, color = carla.Color(0, 255, 255), life_time = 60)
+            #     self.world.world.debug.draw_point(exit_wp.transform.location, size = 0.3, color = carla.Color(0, 255, 255), life_time = 60)
+
+            wp_in_junctions = waypoints_between(entry_wp, exit_wp)
+            # if idx == 1:
+            #     for point in wp_in_junctions:
+            #         self.world.world.debug.draw_point(point.transform.location, size = 0.3, color = carla.Color(0, 255, 255), life_time = 60)
+
+            raw_pts =[]
+            for wp in wp_in_junctions:
+                loc = wp.transform.location
+                yaw = wp.transform.rotation.yaw
+                raw_pts.append([loc.x, loc.y, loc.z, yaw])
+
+            raw_pts = np.array(raw_pts)
+                
+            junctions_metadata_groups.append(raw_pts)
+
+        # ============ Merge non-junction waypoints with junction metadata ============
+        combined_meta =[]
+        group_iter = iter(junctions_metadata_groups)
+
+        i = 0; k = 0
+        while i < len(coordinates):
+            jid = jids[i]
+            if jid is None:
+                x, y, z = coordinates[i]
+                _, idx = self._tree.query([x, y])
+                closest_wp = self._wp_list[idx]
+                loc = closest_wp.transform.location
+                yaw = closest_wp.transform.rotation.yaw
+                combined_meta.append([loc.x, loc.y, loc.z, yaw])
+                i += 1
+            else:
+                try:
+                    group_meta = next(group_iter)
+                except:
+                    break
+
                 
                 
-        if self.debug:
-            for path in path_branches:
-                path[:, 2] = vehicle_location[2] + 0.1
-                self.virt_world.draw_waypoints(path, 1.5 * (1 / server_fps), size = .1, color = (255, 0, 0))
+                if len(group_meta) > 0:
+                    j_tree = cKDTree(group_meta[:, :2])
+                start_jid = jid
+                while i < len(jids) and jids[i] == start_jid:
+                    x, y, z = coordinates[i]
+                    if len(group_meta) > 0:
+                        _, gi = j_tree.query([x, y])
+                        gx, gy, gz, gyaw = group_meta[int(gi)]
+                        combined_meta.append([float(gx), float(gy), float(gz), float(gyaw)])
+                    else:
+                        _, idx = self._tree.query([x, y])
+                        closest_wp = self._wp_list[idx]
+                        loc = closest_wp.transform.location
+                        yaw = closest_wp.transform.rotation.yaw
+                        combined_meta.append([loc.x, loc.y, loc.z, yaw])
+                    i += 1
 
-        if self.turn_classify:
-            global_scout = self.path_handler.waypoints(
-                position, self.scout_points
-            )
+                k += 1
+                
+
+        filtered_meta =[]
+        tol = 1e-2
+        for i in range(len(combined_meta)):
+            closest_wp = np.array(combined_meta[i], dtype = float)[:3]
+
+            j = i
+            backward_point = np.array(closest_wp)
+            while j != 0:
+                backward_point = np.array(combined_meta[j], dtype = float)[:3]
+                if not np.allclose(closest_wp, backward_point, atol = tol):
+                    break
+                j -= 1
             
-            is_at_junction , junction = self.virt_world.get_waypoint_junction(global_scout[14])
-            switch_junction, other_junction = self.virt_world.get_waypoint_junction(global_scout[19])
-            if is_at_junction and switch_junction:
-                junction = other_junction
-            not_exit_junction, _ = self.virt_world.get_waypoint_junction(global_scout[11])
-            is_exit_junction = not not_exit_junction
-            turn_signal = self.turn_classifier.turning_type(is_at_junction, junction, is_exit_junction, global_scout, debug = self.debug)
-        else:
-            turn_signal = -1
-        self.send_turn_signal.send(turn_signal)
+            k = i
+            forward_point = np.array(closest_wp)
+            while k < len(combined_meta) - 1:
+                k += 1
+                forward_point = np.array(combined_meta[k], dtype = float)[:3]
+                if not np.allclose(closest_wp, forward_point, atol = tol):
+                    break
 
+            choose_backward = PathHandler._edge_opposite_test(coordinates[i], backward_point, closest_wp)
+            choose_forward  = PathHandler._edge_opposite_test(coordinates[i], forward_point, closest_wp)
+            if choose_backward == choose_forward: 
+                Q = coordinates[i]
+            if choose_backward:
+                A = closest_wp
+                B = backward_point
+                P = np.array(coordinates[i], dtype = float)
+                Q = PathHandler._project_point_to_segment(P, A, B)
 
-        # Only save when it moves (Prevent saving all the time when stopping at red light or stop sign)
-        if self.data_collector:
-            steer    = self.sub_steer_logging.receive()
-            throttle = self.sub_throttle_logging.receive()
-            brake    = self.sub_brake_logging.receive()
-            velocity = self.sub_velocity.receive()
-            # if self.addition_cnt < self.additional_max:
-            #     if saved:
-            #         if curr_dist - self.prev_dist < 1e-2:
-            #             self.addition_cnt += 1
-            # if curr_dist - self.prev_dist > 1e-2:
-            #     self.addition_cnt = 0
+            if choose_forward:
+                A = closest_wp
+                B = forward_point
+                P = np.array(coordinates[i], dtype = float)
+                Q = PathHandler._project_point_to_segment(P, A, B)
+                
+            filtered_meta += [[Q[0], Q[1], Q[2], 0]]
 
-            saved = self.data_collector.maybe_save(
-                {
-                    "gt_data": {
-                        "midlane_wp" : mid_ego,
-                        "aux_wp"     : ego_branches,
-                        "steer"      : steer,
-                        "throttle"   : throttle,
-                        "brake"      : brake,
-                        "velocity"   : velocity,
-                    },
-                    "command": {
-                        "turn_signal": turn_signal,
-                        "polycmd"    : self.sub_polylines.receive(), 
-                    },
-                    "condition": {
-                        "GPS"        : vehicle_location,
-                        "heading"    : heading,
-                        "road_type"  : self.road_type,
-                    }, 
-                    "timestamp"  : self.sub_server_runtime.receive() - self.start_time
-                },
-                **frame
-            )
-            # self.prev_dist = curr_dist
-        return mid_ego
+        return np.array(filtered_meta)
+    
+    def temporal_align(self, trajectories: np.ndarray, time_vect: np.ndarray):
 
+        num_original = len(time_vect)
+        num_filtered = len(trajectories)
+        
+        original_indices = np.linspace(0, num_original - 1, num_original)
+        filtered_indices = np.linspace(0, num_original - 1, num_filtered)
+        temporal_aligned = trajectories.copy()
+        temporal_aligned[:, -1] = np.interp(filtered_indices, original_indices, time_vect)
+        return temporal_aligned
+
+    
+    def align(self, trajectories: np.ndarray):
+        spatial_aligned = self.spatial_align(trajectories[:, :3])
+
+        original_time = trajectories[:, -1]
+        temporal_aligned = self.temporal_align(spatial_aligned, original_time)
+
+        return spatial_aligned[:, :3], temporal_aligned
 
 def consecutive_angles(points: np.ndarray, signed: bool = False) -> np.ndarray:
     pts = points[:, :2]
@@ -911,7 +943,7 @@ def waypoint_heading(wp):
     yaw = np.arctan2(fwd.y, fwd.x)
     return yaw
 
-def waypoints_between(entry_wp, exit_wp, step=1.0):
+def waypoints_between(entry_wp, exit_wp, step=0.5):
     """
     Returns a list of waypoints between entry and exit inside a junction.
     Ensures inclusion of entry and exit waypoint
@@ -952,6 +984,7 @@ class OptimizePath:
         self.log = Logger()
         self.virt_world = world
         self.exclude_params = exclude_circle # (cx, cy, radius)
+        self.exclude_params = [0, 0, 0]
         
         # Initialize spatial hash grid for O(1) node lookups during building
         self._spatial_hash_grid = {}
