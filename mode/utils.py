@@ -12,7 +12,7 @@ from src.spawn.sensor_spawner import GNSS, IMU
 from src.math.world_map import Map
 from src.math.path import OptimizePath
 
-logger = Logger()
+logger = Logger("Global")
 
 # ── Root & config ──────────────────────────────────────────────────────────────
 _root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

@@ -7,7 +7,7 @@ from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 from src.messages.logger import Logger
 from src.spawn.sensor_spawner import SensorSpawn
 from src.control.vehicle_control import Vehicle
-from src.math.path import ReplayHandler
+from src.others.data_processor import ReplayHandler
 from src.render.viewer import VIEWER_REGISTRY
 
 from .utils import (
@@ -92,10 +92,10 @@ def run_replay(args, client, virt_world, sensors, spawner, folder, viewer_args):
         map_processor, path_optimizer = make_map_and_optimizer(virt_world)
         game_viewer.attach_plugins(path_optimizer=path_optimizer)
 
-        true_trajectories    = np.load(path_2_waypoints)
-        midlane_trajectories = map_processor.precompute_waypoints(true_trajectories)
-        replayer             = ReplayHandler(
-            virt_world, true_trajectories, midlane_trajectories,
+        recorded_traj = np.load(path_2_waypoints)
+        map_processor.register_wp(recorded_traj)
+        replayer = ReplayHandler(
+            virt_world, recorded_traj,
             dataset_dir, args.temporal,
             args.draw_waypoints if hasattr(args, "draw_waypoints") else False,
         )
@@ -125,7 +125,6 @@ def run_replay(args, client, virt_world, sensors, spawner, folder, viewer_args):
             lp_wrapper()
         progress.stop()
 
-        spawner.despawn_vehicles()
         time.sleep(1.0)
 
     return lp
