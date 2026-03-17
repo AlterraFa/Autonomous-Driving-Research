@@ -18,6 +18,50 @@ from mode import MODE_RUNNERS
 from mode.utils import FREQ, MEAN_DELAY, STDDEV_DELAY, LAT_STDDEV, LON_STDDEV
 
 
+class MainArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._subparsers_action = None
+
+    def add_subparsers(self, *args, **kwargs):
+        self._subparsers_action = super().add_subparsers(*args, **kwargs)
+        return self._subparsers_action
+
+    def format_help(self):
+        help_text = super().format_help().rstrip()
+
+        if self._subparsers_action and self._subparsers_action.choices:
+            mode_sections = ["\nMode-specific flags:"]
+
+            for mode_name, mode_parser in self._subparsers_action.choices.items():
+                mode_sections.append(f"\n  {mode_name}:")
+                for action in mode_parser._actions:
+                    if action.dest == "help":
+                        continue
+
+                    option_text = ", ".join(action.option_strings)
+                    if action.nargs in ["+", "*"]:
+                        metavar = action.metavar if action.metavar else action.dest.upper()
+                        option_text = f"{option_text} {metavar}"
+                    elif action.metavar:
+                        option_text = f"{option_text} {action.metavar}"
+                    elif action.option_strings and action.type is not None and action.nargs != 0:
+                        option_text = f"{option_text} {action.dest.upper()}"
+
+                    required_mark = " (required)" if getattr(action, "required", False) else ""
+                    help_line = action.help or ""
+                    mode_sections.append(f"    {option_text}{required_mark}"
+                                         + (f"\n      {help_line}" if help_line else ""))
+
+            help_text += "\n" + "\n".join(mode_sections)
+
+        return help_text + "\n"
+
+    def error(self, message):
+        self.print_help(sys.stderr)
+        self.exit(2, f"\n{self.prog}: error: {message}\n")
+
+
 def main(args):
     pygame.init()
     Logger.set_levels("INFO", "WARNING", "ERROR", "CUSTOM", "DEBUG" if args.debug else "INFO")
@@ -60,7 +104,7 @@ def main(args):
     
     
 if __name__ == "__main__":
-    argparser = argparse.ArgumentParser(description = "CARLA Runner")
+    argparser = MainArgumentParser(description = "CARLA Runner")
 
     # ====================================================== #
     #                   SHARED ARGUMENT
