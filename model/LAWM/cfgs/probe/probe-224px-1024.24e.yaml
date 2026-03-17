@@ -1,7 +1,7 @@
 common: &common_settings
   patch_size: 16
   tubelet_size: 2
-  crop_size: 256
+  crop_size: 224
   nclips: 1
   ctx_fpcs: 8
   pred_fpcs: 8
@@ -96,7 +96,7 @@ model:
     <<: *common_settings
     <<: *common_model
     pred_embed_dim: 1024
-    depth: 4
+    depth: 6
     num_heads: 16
     mlp_ratio: 4.0
     qkv_bias: true
@@ -114,7 +114,7 @@ model:
   action:
     <<: *common_settings
     <<: *common_model
-    depth: 4
+    depth: 8
     num_heads: 16
     mlp_ratio: 4.0
     qkv_bias: true
@@ -132,7 +132,7 @@ optimization:
   epochs: 20
   final_lr: 0.0
   final_weight_decay: 0.04
-  ipe: 600
+  ipe: 1600
   lr: 0.000425
   start_lr: 0.000075
   warmup: 15
@@ -144,7 +144,7 @@ loss:
   normalize_reps: true
   reg_coeff: 0.0
   l2: 1.0
-  l1: 0.05
+  l1: 0.02
   lv: 0.1
   lc: 0.01  # Increased from 0.001 to 0.01 (10x higher)
   lm: 0.1
