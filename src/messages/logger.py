@@ -39,27 +39,30 @@ class Logger(Console):
             return Logger._shared_console
         return self
     
-    def __init__(self):
+    def __init__(self, name = None):
         super().__init__()
-        frame = inspect.currentframe()
-        outer_frame = frame.f_back
-        while outer_frame:
-            if "self" in outer_frame.f_locals:
-                obj = outer_frame.f_locals["self"]
-                module = obj.__class__.__module__
-                class_name = obj.__class__.__name__
-                self.class_name = f"{module}.{class_name}"
-                break
-            elif "cls" in outer_frame.f_locals:
-                cls = outer_frame.f_locals["cls"]
-                module = cls.__module__
-                class_name = cls.__name__
-                self.class_name = f"{module}.{class_name}"
-                break
-            outer_frame = outer_frame.f_back
+        if name is None:
+            frame = inspect.currentframe()
+            outer_frame = frame.f_back
+            while outer_frame:
+                if "self" in outer_frame.f_locals:
+                    obj = outer_frame.f_locals["self"]
+                    module = obj.__class__.__module__
+                    class_name = obj.__class__.__name__
+                    self.class_name = f"{module}.{class_name}"
+                    break
+                elif "cls" in outer_frame.f_locals:
+                    cls = outer_frame.f_locals["cls"]
+                    module = cls.__module__
+                    class_name = cls.__name__
+                    self.class_name = f"{module}.{class_name}"
+                    break
+                outer_frame = outer_frame.f_back
+            else:
+                self.class_name = "Global"
         else:
-            self.class_name = "Global"
-
+            self.class_name = name
+            
     def __get_call_site__(self):
         frame = inspect.currentframe()
         outer_frame = frame.f_back.f_back

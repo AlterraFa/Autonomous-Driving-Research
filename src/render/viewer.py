@@ -61,8 +61,8 @@ from collections import deque
 from abc import ABC, abstractmethod
 
 from model.inference import AsyncInference
-from src.others.data_processor import TrajectoryBuffer
-from src.math import Map, ReplayHandler, OptimizePath
+from src.others.data_processor import TrajectoryBuffer, ReplayHandler
+from src.math import Map, OptimizePath
 
         
 conf = toml.load(os.path.join(parent, "../config/config.toml"))
