@@ -12,7 +12,7 @@ import torch
 import re
 from pathlib import Path
 from torch.utils.data import Dataset
-from torch.utils.data import random_split
+from torch.utils.data import Subset
 from .utils.decode import decode_batch
 from .utils.load_helper import (
     _calculate_frame_indices, 
@@ -119,12 +119,38 @@ class VideoDataset(Dataset):
         return len(self.samples)
 
     def split(self, train=0.9, val=0.1):
-        """Split dataset into train/val/test sets"""
-        n_total = len(self)
-        n_train = int(n_total * train)
-        n_val = int(n_total * val)
-        n_test = n_total - n_train - n_val
-        return random_split(self, [n_train, n_val, n_test])
+        """Split each source CSV independently into train/val/test sets"""
+        train_indices = []
+        val_indices = []
+        test_indices = []
+
+        # Group sample indices by originating CSV/dataset
+        indices_by_dataset = {}
+        for sample_idx, dataset_idx in enumerate(self.video_indices_map):
+            if dataset_idx not in indices_by_dataset:
+                indices_by_dataset[dataset_idx] = []
+            indices_by_dataset[dataset_idx].append(sample_idx)
+
+        # Split each CSV independently, then merge
+        for dataset_idx in sorted(indices_by_dataset.keys()):
+            dataset_indices = np.array(indices_by_dataset[dataset_idx], dtype=np.int64)
+            if len(dataset_indices) == 0:
+                continue
+
+            shuffled = np.random.permutation(dataset_indices)
+            n_total = len(shuffled)
+            n_train = int(n_total * train)
+            n_val = int(n_total * val)
+
+            train_indices.extend(shuffled[:n_train].tolist())
+            val_indices.extend(shuffled[n_train:n_train + n_val].tolist())
+            test_indices.extend(shuffled[n_train + n_val:].tolist())
+
+        return (
+            Subset(self, train_indices),
+            Subset(self, val_indices),
+            Subset(self, test_indices),
+        )
     
 class ActVideoDataset(Dataset):
     """Action-conditioned video dataset with context/prediction separation and metadata"""
@@ -352,7 +378,38 @@ class ProbeDataset(Dataset):
         
         return clip_buffers, gt_clips
 
-    
+    def split(self, train = 0.9, val = 0.1):
+        train_indices = []
+        val_indices = []
+        test_indices = []
+
+        # Group sample indices by originating CSV/dataset
+        indices_by_dataset = {}
+        for sample_idx, dataset_idx in enumerate(self.video_indices_map):
+            if dataset_idx not in indices_by_dataset:
+                indices_by_dataset[dataset_idx] = []
+            indices_by_dataset[dataset_idx].append(sample_idx)
+
+        # Split each CSV independently, then merge
+        for dataset_idx in sorted(indices_by_dataset.keys()):
+            dataset_indices = np.array(indices_by_dataset[dataset_idx], dtype=np.int64)
+            if len(dataset_indices) == 0:
+                continue
+
+            shuffled = np.random.permutation(dataset_indices)
+            n_total = len(shuffled)
+            n_train = int(n_total * train)
+            n_val = int(n_total * val)
+
+            train_indices.extend(shuffled[:n_train].tolist())
+            val_indices.extend(shuffled[n_train:n_train + n_val].tolist())
+            test_indices.extend(shuffled[n_train + n_val:].tolist())
+
+        return (
+            Subset(self, train_indices),
+            Subset(self, val_indices),
+            Subset(self, test_indices),
+        )
 
 if __name__ == "__main__":
     import yaml
@@ -420,5 +477,8 @@ if __name__ == "__main__":
         allow_clip_overlap = train_arg['allow_clip_overlap'],
         random_jiggle_part = train_arg['random_jiggle']
     )
-    sample = dset[9]
-    display_clip_opencv(sample[0][0])
+    
+    print(len(dset))
+    train, val, test = dset.split()
+    
+    print(len(train), len(val), len(test))
