@@ -13,7 +13,7 @@ import torch
 from torch.utils.data import _utils
 from torch.utils.data.dataloader import ExceptionWrapper, _DatasetKind, _MultiProcessingDataLoaderIter
 
-from model.JEPA_ACT.utils.monitoring import ResourceMonitoringThread
+from ...utils.monitoring import ResourceMonitoringThread
 
 
 class ConcatIndices:
