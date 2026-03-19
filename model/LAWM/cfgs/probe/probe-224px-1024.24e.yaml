@@ -3,10 +3,9 @@ common: &common_settings
   tubelet_size: 2
   crop_size: 224
   nclips: 1
-  ctx_fpcs: 8
-  pred_fpcs: 8
+  fpcs: 16
 
-app: action
+app: probe
 
 loader_setup: &loader_settings
   num_workers: 4
@@ -21,44 +20,26 @@ train:
   random_jiggle: true
   datasets:
     - name: "carla"
-      path: "./csv_metadata/Carla_recording_20251019_161905_best_spatial.csv"
+      path: "./csv_metadata/probe/Carla_recording_20251025_142727_best_spatial.csv"
       fps: 2
     - name: "carla"
-      path: "./csv_metadata/Carla_recording_20251025_142727_best_spatial.csv"
+      path: "./csv_metadata/probe/Carla_recording_20260116_213318_extra_spatial.csv"
       fps: 2
     - name: "carla"
-      path: "./csv_metadata/Carla_recording_20260204_005321_spatial.csv"
+      path: "./csv_metadata/probe/Carla_recording_20260204_090029_spatial.csv"
       fps: 2
     - name: "carla"
-      path: "./csv_metadata/Carla_recording_20260204_010805_spatial.csv"
+      path: "./csv_metadata/probe/Carla_recording_20260317_205100_best_spatial.csv"
       fps: 2
     - name: "carla"
-      path: "./csv_metadata/Carla_recording_20260204_085306_spatial.csv"
+      path: "./csv_metadata/probe/Carla_recording_20260317_214033_spatial.csv"
       fps: 2
     - name: "carla"
-      path: "./csv_metadata/Carla_recording_20260204_090029_spatial.csv"
+      path: "./csv_metadata/probe/Carla_recording_20260317_233603_spatial.csv"
       fps: 2
     - name: "carla"
-      path: "./csv_metadata/Carla_recording_20260312_163316_spatial.csv"
+      path: "./csv_metadata/probe/Carla_recording_20260318_083409_best_spatial.csv"
       fps: 2
-    - name: "carla"
-      path: "./csv_metadata/Carla_recording_20260312_164439_spatial.csv"
-      fps: 2
-    - name: "carla"
-      path: "./csv_metadata/Carla_recording_20260312_170731_spatial.csv"
-      fps: 2
-
-val:
-  <<: *common_settings
-  <<: *loader_settings
-  batch_size: 8
-  allow_clip_overlap: true
-  random_jiggle: false
-  datasets:
-    - name: "bdd100k"
-      path: "/mnt/HyperStorage_ntfs/Coding/Autonomous/model/JEPA_ACT/data_bdd100k.csv"
-      ctx_fpcs: 16
-      pred_fpcs: 8
 
 data_aug:
   auto_augment: false
