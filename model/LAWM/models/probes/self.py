@@ -35,7 +35,7 @@ class SelfPooler(nn.Module):
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
         self.mlp = MLP(in_features = embed_dim, hidden_features = int(embed_dim * mlp_ratio))
-        self.query_tokens = nn.Parameter(torch.zeros(1, self.timestep, embed_dim)) 
+        self.query_tokens = nn.Parameter(torch.randn(1, self.timestep, embed_dim) * init_std) 
         
         self.self_attn = Attention(
             dim = embed_dim, num_heads = num_heads, qkv_bias = qkv_bias

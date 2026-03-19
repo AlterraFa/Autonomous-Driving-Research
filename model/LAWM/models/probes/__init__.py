@@ -4,9 +4,11 @@ import pkgutil
 import re
 
 from .base import Prober
+from utils.logger import Logger
 
 _PROBE_REGISTRY: dict[str, type[Prober]] = {}
 _DISCOVERED = False
+_logger = Logger(__name__)
 
 
 def _normalize_name(name: str) -> str:
@@ -90,7 +92,36 @@ def get_probe_class(name: str) -> type[Prober]:
 
 
 def build_probe(name: str, **kwargs) -> Prober:
-    return get_probe_class(name)(**kwargs)
+    probe_cls = get_probe_class(name)
+    sig = inspect.signature(probe_cls.__init__)
+
+    accepted_args = set()
+    has_var_kwargs = False
+    for param in sig.parameters.values():
+        if param.name in {"self", "args", "kwargs"}:
+            continue
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            has_var_kwargs = True
+            continue
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            continue
+        accepted_args.add(param.name)
+
+    used_kwargs = {key: value for key, value in kwargs.items() if key in accepted_args}
+    unused_kwargs = {key: value for key, value in kwargs.items() if key not in accepted_args}
+
+    _logger.INFO(f"Building probe '{probe_cls.__name__}'")
+    _logger.INFO("Used args:", used_kwargs if used_kwargs else {})
+
+    if unused_kwargs:
+        _logger.WARNING("Unused args:", unused_kwargs)
+
+    if has_var_kwargs and unused_kwargs:
+        _logger.DEBUG(
+            f"{probe_cls.__name__} accepts **kwargs; unused args are intentionally not forwarded to avoid silent misconfiguration."
+        )
+
+    return probe_cls(**used_kwargs)
 
 
 def available_probe_classes() -> list[str]:
@@ -99,10 +130,49 @@ def available_probe_classes() -> list[str]:
     return sorted({cls.__name__ for cls in _PROBE_REGISTRY.values()})
 
 
+def probe_constructor_args() -> dict[str, list[str]]:
+    args_map: dict[str, list[str]] = {}
+    for class_name in available_probe_classes():
+        cls = get_probe_class(class_name)
+        sig = inspect.signature(cls.__init__)
+        args = []
+        for param in sig.parameters.values():
+            if param.name in {"self", "args", "kwargs"}:
+                continue
+            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                continue
+            args.append(param.name)
+        args_map[class_name] = args
+    return args_map
+
+
+def probe_argument_report() -> dict[str, object]:
+    args_map = probe_constructor_args()
+    if not args_map:
+        return {
+            "richest_probe": None,
+            "common_args": [],
+            "args_by_probe": {},
+        }
+
+    richest_name = max(args_map, key=lambda key: len(args_map[key]))
+    common_args = set(next(iter(args_map.values())))
+    for args in args_map.values():
+        common_args &= set(args)
+
+    return {
+        "richest_probe": richest_name,
+        "common_args": sorted(common_args),
+        "args_by_probe": args_map,
+    }
+
+
 __all__ = [
     "Prober",
     "discover_probe_classes",
     "get_probe_class",
     "build_probe",
     "available_probe_classes",
+    "probe_constructor_args",
+    "probe_argument_report",
 ]

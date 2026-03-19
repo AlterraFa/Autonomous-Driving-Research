@@ -135,8 +135,9 @@ def main(args: dict, yaml_path: str):
 
     model_cfg: dict = args.get("model", {})
     enc_cfg   = model_cfg.get('enc', {})
-    pred_cfg  = model_cfg.get('pred', {})
-    act_cfg   = model_cfg.get('action', {})
+    probe_cfg = model_cfg.get('probe', {})
+    pred_cfg  = model_cfg.get('pred', probe_cfg.get('pred', probe_cfg))
+    act_cfg   = model_cfg.get('action', probe_cfg.get('action', probe_cfg))
     common_cfg = model_cfg.get('common', {})
     action_pframe = common_cfg.get('action_pframe', 1)
 
@@ -295,6 +296,8 @@ def main(args: dict, yaml_path: str):
         def forward_prediction(h: torch.Tensor):
             def _step_action(h, g):
                 _a = apred(h, g)
+                if normalize_rep:
+                    _a = F.layer_norm(_a, (_a.size(-1), ))
                 return _a
             
             def _step_prediction(h, a):

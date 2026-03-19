@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from torch.nn.modules.utils import _pair
 
 from .utils.modules import ACBlock, GCBlock, build_gc_causal_attn_mask
-from .utils.pos_embs import get_3d_sincos_pos_embed, get_2d_sincos_pos_embed
 from .utils.tensors import trunc_normal_
 
 

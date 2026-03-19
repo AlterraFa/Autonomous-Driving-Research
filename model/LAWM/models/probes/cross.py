@@ -33,7 +33,7 @@ class CrossPooler(nn.Module):
         self.timestep = max_frames // tubelet_size
         self.embed_dim = embed_dim
 
-        self.query_tokens = nn.Parameter(torch.zeros(1, self.timestep, embed_dim))
+        self.query_tokens = nn.Parameter(torch.randn(1, self.timestep, embed_dim) * init_std)
 
         self.cross_attn = CrossAttentionBlock(
             dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, norm_layer=norm_layer

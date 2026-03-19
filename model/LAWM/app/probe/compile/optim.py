@@ -6,8 +6,7 @@ logger = Logger(__name__)
 
 def compile_opt(
     encoder,
-    apred,
-    lpred,
+    probe,
     iterations_per_epoch,
     start_lr,
     ref_lr,
@@ -21,24 +20,15 @@ def compile_opt(
     betas=(0.9, 0.999),
     eps=1e-8,
     zero_init_bias_wd=True,
-    enc_lr_scale=1.0,
+    lr_scale=1.0,
 ):
     param_groups = [
         {
-            "params": (p for n, p in lpred.named_parameters() if ("bias" not in n) and (len(p.shape) != 1)),
-            "lr_scale": enc_lr_scale,
+            "params": (p for n, p in probe.named_parameters() if ("bias" not in n) and (len(p.shape) != 1)),
+            "lr_scale": lr_scale,
         },
         {
-            "params": (p for n, p in apred.named_parameters() if ("bias" not in n) and (len(p.shape) != 1)),
-            "lr_scale": enc_lr_scale,
-        },
-        {
-            "params": (p for n, p in lpred.named_parameters() if ("bias" in n) or (len(p.shape) == 1)),
-            "WD_exclude": zero_init_bias_wd,
-            "weight_decay": 0,
-        },
-        {
-            "params": (p for n, p in apred.named_parameters() if ("bias" in n) or (len(p.shape) == 1)),
+            "params": (p for n, p in probe.named_parameters() if ("bias" in n) or (len(p.shape) == 1)),
             "WD_exclude": zero_init_bias_wd,
             "weight_decay": 0,
         },

@@ -32,7 +32,7 @@ class EfficientPooler(nn.Module):
         self.timestep = max_frames // tubelet_size
         self.embed_dim = embed_dim
 
-        self.query_tokens = nn.Parameter(torch.zeros(1, self.timestep, num_queries, embed_dim))
+        self.query_tokens = nn.Parameter(torch.randn(1, self.timestep, num_queries, embed_dim) * init_std)
         self.pos_encode = UnitEncoding(
             embed_dim = embed_dim, num_patches = self.num_patches
         )
@@ -115,9 +115,8 @@ class EfficientPooler(nn.Module):
         out = self.efficient_probe(x, cls_token=query_tokens)
         return out
 
-    def interp_q(self, queries: torch.Tensor, tgt_size: int):
+    def interp_q(self, queries: torch.Tensor, tgt_size: int) -> torch.Tensor:
         if self.timestep != tgt_size:
-            # Note: Need to support 4D queries 
             B, T, Q, D = queries.shape
             queries = queries.permute(0, 3, 2, 1).reshape(B, D * Q, T)
             queries = F.interpolate(queries, size=tgt_size, mode="linear", align_corners=False)
@@ -169,7 +168,7 @@ class EfficientProbe(Prober):
             ) for _ in range(output_dim)
         ])
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         pooled = self.pooler(x)
         head_outputs = [head(pooled) for head in self.linear]
         x = torch.cat(head_outputs, dim=-1)
