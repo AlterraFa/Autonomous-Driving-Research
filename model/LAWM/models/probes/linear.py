@@ -9,7 +9,9 @@ class LinearProbe(Prober):
         super().__init__(output_dim=output_dim, init_scales=init_scales, init_shifts=init_shifts)
         
         self.tokens_pframe = int(patch_size ** 2)
-        self.probe = nn.Linear(embed_dim, output_dim)
+        self.probe = nn.ModuleList([
+            nn.Linear(embed_dim, 1, bias=True) for _ in range(output_dim)
+        ])
         
     def forward(self, x: torch.Tensor):
         B, N, D = x.shape
@@ -17,7 +19,44 @@ class LinearProbe(Prober):
         x = x.view(B, N // self.tokens_pframe, self.tokens_pframe, D)
         x = x.mean(2).squeeze(dim = 2)
         
-        out = self.probe(x)
+        head_outputs = [head(x) for head in self.probe]
+        out = torch.cat(head_outputs, dim=-1)
+        return self.apply_output_affine(out)
+
+
+class NonLinearProbe(Prober):
+    def __init__(
+        self,
+        patch_size=16,
+        embed_dim=1024,
+        hidden_dim=None,
+        output_dim=1,
+        init_scales=None,
+        init_shifts=None,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(output_dim=output_dim, init_scales=init_scales, init_shifts=init_shifts)
+
+        self.tokens_pframe = int(patch_size ** 2)
+        hidden_dim = hidden_dim or (embed_dim // 2)
+        self.probe = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(embed_dim, hidden_dim, bias=True),
+                nn.LeakyReLU(),
+                nn.Linear(hidden_dim, 1, bias=True),
+            )
+            for _ in range(output_dim)
+        ])
+
+    def forward(self, x: torch.Tensor):
+        B, N, D = x.shape
+
+        x = x.view(B, N // self.tokens_pframe, self.tokens_pframe, D)
+        x = x.mean(2).squeeze(dim=2)
+
+        head_outputs = [head(x) for head in self.probe]
+        out = torch.cat(head_outputs, dim=-1)
         return self.apply_output_affine(out)
     
 if __name__ == '__main__':

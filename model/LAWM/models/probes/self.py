@@ -162,10 +162,18 @@ class SelfProbe(Prober):
             use_activation_checkpointing = use_activation_checkpointing,
         )
         
-        self.linear = nn.Linear(embed_dim, output_dim, bias = True)
+        self.linear = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(embed_dim, embed_dim // 2, bias = True),
+                nn.LeakyReLU(),
+                nn.Linear(embed_dim // 2, 1)
+            ) for _ in range(output_dim)
+        ])
 
     def forward(self, x):
-        x = self.linear(self.pooler(x))
+        pooled = self.pooler(x)
+        head_outputs = [head(pooled) for head in self.linear]
+        x = torch.cat(head_outputs, dim=-1)
         return self.apply_output_affine(x)
         
 if __name__ == '__main__':
