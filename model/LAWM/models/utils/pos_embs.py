@@ -3,7 +3,9 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import torch
 import numpy as np
+import torch.nn as nn
 
 
 def get_3d_sincos_pos_embed(embed_dim, grid_size, grid_depth, cls_token=False, uniform_power=False):
@@ -91,3 +93,38 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 
     emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
     return emb
+
+class UnitEncoding(nn.Module):
+    """Unit Encoding for Embedding positional encoding. 
+    Treating tokens as a continuous space frome 0 -> 1"""
+    def __init__(self, embed_dim, num_patches=16):
+        super().__init__()
+        self.num_patches = num_patches
+        # -- Ideas from NeRF (xyz -> embedding)
+        self.coord_proj = nn.Sequential(
+            nn.Linear(3, 128),
+            nn.GELU(),
+            nn.Linear(128, embed_dim)
+        )
+
+    def forward(self, x, target_timestep):
+        B, N, D = x.shape
+        device = x.device
+        grid_res = self.num_patches
+        HW = grid_res ** 2
+        
+        y_coords = torch.linspace(0, 1, grid_res, device=device)
+        x_coords = torch.linspace(0, 1, grid_res, device=device)
+        grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')
+        
+        t_coords = torch.linspace(0, 1, target_timestep, device=device)
+        
+        grid_x = grid_x.reshape(1, HW).expand(target_timestep, HW)
+        grid_y = grid_y.reshape(1, HW).expand(target_timestep, HW)
+        grid_t = t_coords.reshape(target_timestep, 1).expand(target_timestep, HW)
+        
+        coords = torch.stack([grid_x, grid_y, grid_t], dim=-1).reshape(N, 3)
+        
+        pos_encoding = self.coord_proj(coords)
+        
+        return x + pos_encoding.reshape(1, N, D)
