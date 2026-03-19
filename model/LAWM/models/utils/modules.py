@@ -8,10 +8,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from timm.layers import drop_path
 
-from torch.nn.functional import scaled_dot_product_attention
+from typing import Optional, Any
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-_USABLE_BACKENDS = [SDPBackend.CUDNN_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.FLASH_ATTENTION, SDPBackend.MATH]
+_USABLE_BACKENDS = [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.CUDNN_ATTENTION, SDPBackend.MATH]
 
 
 def build_action_block_causal_attention_mask(T, H, W, add_tokens=1):
@@ -65,10 +65,10 @@ def rotate_queries_or_keys(x, pos):
     # -- Fixing the bug would break compatibility with the pretrained model, but the fix can be applied by commenting
     # -- out the two lines below, and uncommenting the following two lines.
     # -- Thanks to @echosprint, original PR: https://github.com/facebookresearch/vjepa2/pull/15
-    emb_sin = emb_sin.squeeze(-1).repeat(1, 1, 1, 2)
-    emb_cos = emb_cos.squeeze(-1).repeat(1, 1, 1, 2)
-    # emb_sin = emb_sin.repeat_interleave(2, dim=-1)  # (..., N, D)
-    # emb_cos = emb_cos.repeat_interleave(2, dim=-1)  # (..., N, D)
+    # emb_sin = emb_sin.squeeze(-1).repeat(1, 1, 1, 2)
+    # emb_cos = emb_cos.squeeze(-1).repeat(1, 1, 1, 2)
+    emb_sin = emb_sin.repeat_interleave(2, dim=-1)  # (..., N, D)
+    emb_cos = emb_cos.repeat_interleave(2, dim=-1)  # (..., N, D)
 
     # --
     # -- [B, num_heads, T, D/2, 2]
@@ -192,7 +192,7 @@ class ACRoPEAttention(nn.Module):
         width_ids = (ids - tokens_per_frame * frame_ids) - tokens_per_row * height_ids
         return 1.0 * frame_ids, 1.0 * height_ids, 1.0 * width_ids
 
-    def forward(self, x, mask=None, attn_mask=None, T=None, H=None, W=None, action_tokens=0):
+    def forward(self, x: torch.Tensor, mask=None, attn_mask=None, T=None, H=None, W=None, action_tokens=0) -> torch.Tensor:
         B, N, C = x.size()
 
         # -- compute position of each frame token
@@ -250,7 +250,7 @@ class ACRoPEAttention(nn.Module):
         qw = rotate_queries_or_keys(q[..., s : s + self.w_dim], pos=w_mask)
         kw = rotate_queries_or_keys(k[..., s : s + self.w_dim], pos=w_mask)
         s += self.w_dim
-
+        
         # Combine rotated dimension
         if s < self.head_dim:
             qr = q[..., s:]
@@ -274,7 +274,7 @@ class ACRoPEAttention(nn.Module):
             v = merge_(v, action_v)
 
         if attn_mask is not None or self.use_sdpa:
-            with sdpa_kernel(_USABLE_BACKENDS):
+            with sdpa_kernel(_USABLE_BACKENDS, set_priority = True):
                 x = F.scaled_dot_product_attention(
                     q, k, v, dropout_p=self.proj_drop_prob, is_causal=self.is_causal, attn_mask=attn_mask
                 )
@@ -411,7 +411,7 @@ class RoPEAttention(nn.Module):
             k = torch.cat([kd, kh, kw], dim=-1)
 
         if attn_mask is not None or self.use_sdpa:
-            with sdpa_kernel(_USABLE_BACKENDS):
+            with sdpa_kernel(_USABLE_BACKENDS, set_priority = True):
                 x = F.scaled_dot_product_attention(
                     q, k, v, dropout_p=self.proj_drop_prob, is_causal=self.is_causal, attn_mask=attn_mask
                 )
@@ -583,7 +583,7 @@ class GCRoPEAttention(nn.Module):
             
         
         if self.use_sdpa:
-            with sdpa_kernel(_USABLE_BACKENDS):
+            with sdpa_kernel(_USABLE_BACKENDS, set_priority = True):
                 out = F.scaled_dot_product_attention(
                     q, k, v, dropout_p=self.proj_drop_prob, attn_mask=attn_mask
                 )
@@ -624,21 +624,24 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.use_sdpa = use_sdpa
         self.is_causal = is_causal
+        
+        self.debug = False
+        self.attn_map = None
 
     def forward(self, x, mask=None, attn_mask=None):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]  # [B, num_heads, N, D]
 
-        if attn_mask is not None or self.use_sdpa:
-            with sdpa_kernel(_USABLE_BACKENDS):
+        if self.use_sdpa and not self.debug:
+            with sdpa_kernel(_USABLE_BACKENDS, set_priority = True):
                 x = F.scaled_dot_product_attention(
                     q, k, v, dropout_p=self.proj_drop_prob, is_causal=self.is_causal, attn_mask=attn_mask
                 )
-                attn = None
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale  # [B, num_heads, D, D]
             attn = attn.softmax(dim=-1)
+            self.attn_map = attn
             attn = self.attn_drop(attn)
             x = attn @ v
 
@@ -850,15 +853,19 @@ class Block(nn.Module):
 
 
 class CrossAttention(nn.Module):
-    def __init__(self, dim, num_heads=12, qkv_bias=False, use_sdpa=True):
+    def __init__(self, dim, num_heads=12, qkv_bias=False, proj_drop=0.0, use_sdpa=True):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = head_dim**-0.5
         self.q = nn.Linear(dim, dim, bias=qkv_bias)
         self.kv = nn.Linear(dim, int(dim * 2), bias=qkv_bias)
-        # self.proj = nn.Linear(dim, dim)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
         self.use_sdpa = use_sdpa
+        
+        self.debug = False
+        self.attn_map = None
 
     def forward(self, q, x):
         B, n, C = q.shape
@@ -868,15 +875,18 @@ class CrossAttention(nn.Module):
         kv = self.kv(x).reshape(B, N, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         k, v = kv[0], kv[1]  # (batch_size, num_heads, seq_len, feature_dim_per_head)
 
-        if self.use_sdpa:
-            with sdpa_kernel(_USABLE_BACKENDS):
+        if self.use_sdpa and not self.debug:
+            with sdpa_kernel(_USABLE_BACKENDS, set_priority = True):
                 q = F.scaled_dot_product_attention(q, k, v)
         else:
             xattn = (q @ k.transpose(-2, -1)) * self.scale
             xattn = xattn.softmax(dim=-1)  # (batch_size, num_heads, query_len, seq_len)
+            self.attn_map = xattn
             q = xattn @ v
 
         q = q.transpose(1, 2).reshape(B, n, C)
+        q = self.proj(q)
+        q = self.proj_drop(q)
         return q
 
 
@@ -894,3 +904,57 @@ class CrossAttentionBlock(nn.Module):
         q = q + y
         q = q + self.mlp(self.norm2(q))
         return q
+
+
+class EfficientAttention(nn.Module):
+    """Efficient Attention for temporal latent"""
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 1,
+        qkv_bias: bool = False,
+        qk_scale: Optional[float] = None,
+        num_queries: int = 32,
+        num_subspace: float = 1,
+        use_sdpa = False
+    ):
+        super().__init__()
+        if num_heads > 1:
+            print("Warning: Efficient Attention works best with only 1 head.")
+        self.use_sdpa = use_sdpa
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim**-0.5
+        
+        self.num_subspace = num_subspace # -- reduces the output dimension
+        self.num_queries = num_queries # -- partition attention at different dim level
+        
+        self.v = nn.Linear(dim, int(dim * num_subspace), bias=qkv_bias)
+        self.debug = False
+        self.attn_map = None
+        
+    def forward(self, x: torch.Tensor, cls_token: torch.Tensor, **_: Any) -> torch.Tensor:
+        B, N, C = x.shape
+        T = cls_token.shape[1]
+
+        
+        q = cls_token.reshape(B, T, self.num_queries, self.num_heads, C // self.num_heads).permute(0, 2, 3, 1, 4) # -- B, Q, H, T, D // H
+        k = (x.reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)).unsqueeze(1) # -- B, 1, H, N, D // H
+        v = (self.v(x).reshape(
+            B, N, self.num_queries, self.num_heads, -1
+        ).permute(0, 2, 3, 1, 4)) # B, Q, H, N, D // (Q * H)
+
+        if self.use_sdpa and not self.debug:
+            with sdpa_kernel(_USABLE_BACKENDS, set_priority = True):
+                out = F.scaled_dot_product_attention(
+                    q, k, v, None, 0.0, is_causal = False, scale = self.scale
+                )
+        else: 
+            eattn = (q @ k.transpose(-2, -1)) * self.scale
+            eattn = eattn.softmax(dim=-1)
+            self.attn_map = eattn
+            out = torch.matmul(eattn, v)
+
+        out = out.view(B, T, -1)
+        
+        return out
