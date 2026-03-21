@@ -68,14 +68,14 @@ def _load_samples_and_labels(data_paths):
     return samples, labels, mapping
 
 
-def _extract_metadata(meta_paths):
+def _extract_metadata(meta_paths, meta):
     """Extract ground truth metadata from .npy files"""
     from .decode import _find_metadata_values
     extracted_data = []
     for path in meta_paths:
         try:
             metadata = np.load(path, allow_pickle=True)
-            gt_values = _find_metadata_values(metadata, ("steer", "velocity"))
+            gt_values = _find_metadata_values(metadata, meta)
             extracted_data.append(gt_values)
         except Exception as e:
             print(f"Error extracting metadata from {path}: {e}")

@@ -60,6 +60,8 @@ class VideoDataset(Dataset):
             
         # Load data from CSV files
         self.samples, self.labels, self.video_indices_map = _load_samples_and_labels(data_paths)
+        self.stats_cache = None
+        self.apply_gt_transform = False
     
     def __getitem__(self, index):
         """Load sample with retry logic"""
@@ -236,7 +238,7 @@ class ActVideoDataset(Dataset):
         # Load frames and metadata
         selected_paths = np.array(meta_paths)[buffer_indices]
         buffer = decode_batch(selected_paths)
-        gt_data = _extract_metadata(selected_paths)
+        gt_data = _extract_metadata(selected_paths, ("steer", "velocity"))
         
         if len(buffer) == 0:
             return None
@@ -349,7 +351,10 @@ class ProbeDataset(Dataset):
         # Load frames and metadata
         selected_paths = np.array(meta_paths)[buffer_indices]
         buffer = decode_batch(selected_paths)
-        gt_data = _extract_metadata(selected_paths)
+        gt_data = _extract_metadata(selected_paths, ("steer", "velocity", "lat_err"))
+
+        if hasattr(self, 'stats_cache'):
+            gt_data = [self._transform_gt_values(frame_gt) for frame_gt in gt_data]
         
         if len(buffer) == 0:
             return None
@@ -377,6 +382,28 @@ class ProbeDataset(Dataset):
             gt_clips.append(torch.utils.data.default_collate(gt_clip))
         
         return clip_buffers, gt_clips
+
+    def _transform_gt_values(self, frame_gt):
+        if not isinstance(frame_gt, dict):
+            return frame_gt
+
+        transformed = dict(frame_gt)
+        for key, stats in self.stats_cache.items():
+            if key not in transformed:
+                continue
+            value = transformed[key]
+            if value is None:
+                continue
+            mean = stats.get("mean")
+            std = stats.get("std")
+            if mean is None or std is None or std == 0:
+                continue
+            try:
+                transformed[key] = (float(value) - mean) / std
+            except (TypeError, ValueError):
+                continue
+
+        return transformed
 
     def split(self, train = 0.9, val = 0.1):
         train_indices = []
@@ -411,60 +438,95 @@ class ProbeDataset(Dataset):
             Subset(self, test_indices),
         )
 
+    def statistics(self, gt_types=("steer", "velocity", "lat_err"), unbiased=False, indices=None):
+        """Compute per-ground-truth mean and variance across all samples.
+
+        Args:
+            gt_types: Iterable of metadata keys to aggregate.
+            unbiased: If True, variance uses N-1 denominator (sample variance).
+            indices: Optional iterable of sample indices to restrict aggregation.
+
+        Returns:
+            Dict[str, Dict[str, float | int | None]] with count, mean, variance, std.
+        """
+        gt_types = tuple(gt_types)
+        running = {
+            key: {"count": 0, "mean": 0.0, "m2": 0.0}
+            for key in gt_types
+        }
+
+        def _meta_sort_key(path):
+            stem = path.rsplit('.', 1)[0]
+            nums = re.findall(r'\d+', stem)
+            if nums:
+                return (0, int(nums[-1]))
+            return (1, stem)
+
+        if indices is None:
+            sample_indices = range(len(self.samples))
+        else:
+            sample_indices = indices
+
+        for sample_index in sample_indices:
+            sample = self.samples[sample_index]
+            metadata_paths = _check_structure(sample)
+            if not metadata_paths:
+                continue
+
+            meta_paths = glob.glob(os.path.join(metadata_paths, "*"))
+            meta_paths = sorted(meta_paths, key=_meta_sort_key)
+            if not meta_paths:
+                continue
+
+            gt_data = _extract_metadata(meta_paths, gt_types)
+            for frame_gt in gt_data:
+                if not isinstance(frame_gt, dict):
+                    continue
+                for key in gt_types:
+                    value = frame_gt.get(key)
+                    if value is None:
+                        continue
+                    try:
+                        x = float(value)
+                    except (TypeError, ValueError):
+                        continue
+
+                    stat = running[key]
+                    stat["count"] += 1
+                    delta = x - stat["mean"]
+                    stat["mean"] += delta / stat["count"]
+                    delta2 = x - stat["mean"]
+                    stat["m2"] += delta * delta2
+
+        stats = {}
+        for key, stat in running.items():
+            count = stat["count"]
+            if count == 0:
+                stats[key] = {
+                    "count": 0,
+                    "mean": None,
+                    "variance": None,
+                    "std": None,
+                }
+                continue
+
+            denom = (count - 1) if unbiased else count
+            variance = stat["m2"] / denom if denom > 0 else 0.0
+            stats[key] = {
+                "count": count,
+                "mean": stat["mean"],
+                "variance": variance,
+                "std": float(np.sqrt(variance)),
+            }
+
+        self.stats_cache = stats
+        return stats
+
 if __name__ == "__main__":
     import yaml
     import cv2
 
-    def display_clip_opencv(clip, window_name="dataset clip"):
-        if isinstance(clip, torch.Tensor):
-            clip = clip.detach().cpu().numpy()
-
-        clip = np.asarray(clip)
-
-        if len(clip) == 0:
-            return
-
-        print("Controls: n/right/space = next, p/left = previous, q/esc = quit")
-
-        frame_idx = 0
-
-        while True:
-            frame = clip[frame_idx]
-
-            frame_to_show = frame
-            if frame_to_show.dtype != np.uint8:
-                frame_to_show = np.clip(frame_to_show, 0, 255).astype(np.uint8)
-
-            if frame_to_show.ndim == 3 and frame_to_show.shape[-1] == 3:
-                frame_to_show = cv2.cvtColor(frame_to_show, cv2.COLOR_RGB2BGR)
-
-            display_frame = frame_to_show.copy()
-            cv2.putText(
-                display_frame,
-                f"Frame {frame_idx + 1}/{len(clip)}",
-                (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 255, 0),
-                2,
-                cv2.LINE_AA,
-            )
-
-            cv2.imshow(window_name, display_frame)
-            key = cv2.waitKeyEx(0)
-
-            if key in (27, ord('q')):
-                break
-            if key in (32, ord('n'), 2555904):
-                frame_idx = min(frame_idx + 1, len(clip) - 1)
-                continue
-            if key in (ord('p'), 2424832):
-                frame_idx = max(frame_idx - 1, 0)
-                continue
-
-        cv2.destroyAllWindows()
-    
-    with open("./cfgs/probe/probe-256px-1024.24e.yaml", "r") as f:
+    with open("./cfgs/probe/probe-384px-1024.24e.yaml", "r") as f:
         args = yaml.safe_load(f)
 
     train_arg = args['train']
@@ -477,8 +539,26 @@ if __name__ == "__main__":
         allow_clip_overlap = train_arg['allow_clip_overlap'],
         random_jiggle_part = train_arg['random_jiggle']
     )
+    train, val, _ = dset.split(0.85, 0.15)
     
-    print(len(dset))
-    train, val, test = dset.split()
-    
-    print(len(train), len(val), len(test))
+    stats = val.dataset.statistics(indices=val.indices)
+    print("Val Ground-truth statistics:")
+    for key, values in stats.items():
+        print(
+            f"{key}: "
+            f"count={values['count']}, "
+            f"mean={values['mean']}, "
+            f"variance={values['variance']}, "
+            f"std={values['std']}"
+        )
+
+    stats = train.dataset.statistics(indices=train.indices)
+    print("Train Ground-truth statistics:")
+    for key, values in stats.items():
+        print(
+            f"{key}: "
+            f"count={values['count']}, "
+            f"mean={values['mean']}, "
+            f"variance={values['variance']}, "
+            f"std={values['std']}"
+        )
