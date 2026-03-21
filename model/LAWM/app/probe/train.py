@@ -23,16 +23,17 @@ from .compile import (
     compile_transform,
     compile_dataloader,
     compile_opt,
+    compile_grad_optimizer,
     compile_loss,
 )
-from model.training_logger import (
+from utils.training_logger import (
     get_next_run,
     create_supervised_logger,
     NoOpLogger
 )
 from utils.distributed import init_distributed
 from utils.logger import Logger
-from model.early_stop import EarlyStopping
+from utils.early_stop import EarlyStopping
 
 logger = Logger(__name__)
 
@@ -61,6 +62,10 @@ def _load_state_dict_compat(model, state_dict: dict):
             model.module.load_state_dict(raw_state)
             return
         raise
+
+
+def _unwrap_module(module):
+    return module.module if hasattr(module, "module") else module
 
 def gpu_timer(funct, log_timming = True):
     log_timming = log_timming and torch.cuda.is_available()
@@ -124,6 +129,49 @@ def load_checkpoint(
                 optimizer.load_state_dict(optimizer_payload.state_dict())
 
     return model, optimizer, start_epoch + 1, score, meta
+
+
+def _restore_resume_state(
+    resume_meta: dict,
+    scaler,
+    criterion,
+    lr_scheduler,
+    wd_scheduler,
+    start_epoch: int,
+    ipe: int,
+    rank: int,
+    run_idx: int,
+    resume_prefer_best: bool,
+):
+    scaler_payload = resume_meta.get("scaler", None)
+    if scaler is not None and scaler_payload is not None:
+        if isinstance(scaler_payload, dict):
+            scaler.load_state_dict(scaler_payload)
+        elif hasattr(scaler_payload, "state_dict"):
+            scaler.load_state_dict(scaler_payload.state_dict())
+
+    criterion_payload = resume_meta.get("criterion", None)
+    if criterion_payload is not None:
+        try:
+            if isinstance(criterion_payload, dict):
+                _load_state_dict_compat(criterion, criterion_payload)
+            elif hasattr(criterion_payload, "state_dict"):
+                _load_state_dict_compat(criterion, criterion_payload.state_dict())
+        except Exception:
+            logger.WARNING("Could not restore criterion state from checkpoint metadata. Continuing with current criterion state.")
+
+    resumed_iters = max(0, int(start_epoch) * int(ipe))
+    for _ in range(resumed_iters):
+        lr_scheduler.step()
+        wd_scheduler.step()
+
+    if rank == 0:
+        logger.INFO(
+            f"Resumed run{run_idx} from epoch {start_epoch} "
+            f"(prefer_best={resume_prefer_best}, restored_iters={resumed_iters})."
+        )
+
+    return resumed_iters
 
 
 def _resolve_action_key(action_map: dict, task_name: str) -> str:
@@ -235,6 +283,10 @@ def main(args: dict, yaml_path: str):
     weight_decay = optim_cfg.get('weight_decay', 0.0)
     betas        = optim_cfg.get('betas', (0.9, 0.999))
     eps          = optim_cfg.get('eps', 1.0e-8)
+    
+    grad_optim_cfg: dict = optim_cfg.get('gradient_optimizer', {})
+    grad_optim_name = grad_optim_cfg.get('type', 'normal')
+    grad_optim_params = grad_optim_cfg.get('params', {})
 
     loss_cfg: dict = args.get('loss', {})
     normalize_rep = loss_cfg.get('normalize_rep', False)
@@ -242,6 +294,7 @@ def main(args: dict, yaml_path: str):
     meta_cfg: dict = args.get('meta', {})
     dtype = meta_cfg.get('dtype', 'float32')
     save_freq = meta_cfg.get('save_every_freq', 2)
+    save_root_dir_cfg = meta_cfg.get('save_root_dir', "./Experiment")
     sync_gc   = meta_cfg.get('sync_gc', False)
     continue_train = bool(meta_cfg.get('continue_train', False))
     continue_from_run = meta_cfg.get('continue_from_run', None)
@@ -255,7 +308,10 @@ def main(args: dict, yaml_path: str):
     
 
     world_size, rank = init_distributed()
-    logger.CUSTOM("SUCCESS", f"Initialized distributed on rank {rank}")
+    if dist.is_available() and dist.is_initialized() and world_size > 1:
+        logger.CUSTOM("SUCCESS", f"DDP enabled (world_size={world_size}, rank={rank})")
+    else:
+        logger.INFO("DDP disabled (single-GPU/single-process mode)")
     
     
     if dtype.lower() == "bfloat16":
@@ -284,8 +340,9 @@ def main(args: dict, yaml_path: str):
         encoder.compile()
         probe.compile()
 
-    encoder = DDP(encoder, static_graph = True)
-    probe   = DDP(probe, static_graph = False, find_unused_parameters = True)
+    if dist.is_initialized() and world_size > 1:
+        encoder = DDP(encoder, static_graph = True)
+        probe   = DDP(probe, static_graph = False, find_unused_parameters = False)
     for p in encoder.parameters():
         p.requires_grad = False
     
@@ -329,13 +386,30 @@ def main(args: dict, yaml_path: str):
     )
 
     criterion = compile_loss(loss_cfg = loss_cfg, device = device)
+    if dist.is_initialized() and world_size > 1:
+        criterion = DDP(criterion, device_ids=[rank], output_device=rank, find_unused_parameters=False)
+    criterion_core = _unwrap_module(criterion)
+
+    n_tasks = len(criterion_core.enabled_tasks) if hasattr(criterion_core, 'enabled_tasks') else 1
     optim.add_param_group({
         "params": list(criterion.parameters()),
+        "lr_scale": 0.1,
         "weight_decay": 0.0,
     })
-    logger.INFO("Added uncertainty loss parameters to optimizer")
+    logger.INFO("Added uncertainty loss parameters to optimizer (lr_scale=0.1)")
 
-    log_dir = os.path.join(FOLDER_DIR, "../Experiment/probe/")
+    # Initialize gradient optimizer for multi-task learning
+    grad_optim = compile_grad_optimizer(
+        base_optimizer = optim,
+        optimizer_name = grad_optim_name,
+        n_tasks        = n_tasks,
+        device         = device_type,
+        **grad_optim_params
+    )
+
+    log_dir = os.path.join(save_root_dir_cfg, "probe")
+    logger.INFO(f"Probe save root directory: {log_dir}")
+
     if rank == 0:
         next_run_idx = get_next_run(log_dir)
         if continue_train:
@@ -347,7 +421,7 @@ def main(args: dict, yaml_path: str):
     else:
         run_idx_tensor = torch.tensor([0], dtype=torch.long, device=device)
 
-    if dist.is_initialized():
+    if dist.is_initialized() and world_size > 1:
         dist.broadcast(run_idx_tensor, src=0)
     run_idx = int(run_idx_tensor.item())
 
@@ -364,33 +438,19 @@ def main(args: dict, yaml_path: str):
             prefer_best=resume_prefer_best,
             map_location=device,
         )
-
-        scaler_payload = resume_meta.get("scaler", None)
-        if scaler is not None and scaler_payload is not None:
-            if isinstance(scaler_payload, dict):
-                scaler.load_state_dict(scaler_payload)
-            elif hasattr(scaler_payload, "state_dict"):
-                scaler.load_state_dict(scaler_payload.state_dict())
-
-        criterion_payload = resume_meta.get("criterion", None)
-        if criterion_payload is not None and hasattr(criterion_payload, "state_dict"):
-            try:
-                criterion.load_state_dict(criterion_payload.state_dict())
-            except Exception:
-                logger.WARNING("Could not restore criterion state from checkpoint metadata. Continuing with current criterion state.")
-
-        resumed_iters = max(0, int(start_epoch) * int(ipe))
-        for _ in range(resumed_iters):
-            lr_scheduler.step()
-            wd_scheduler.step()
-
-        if rank == 0:
-            logger.INFO(
-                f"Resumed run{run_idx} from epoch {start_epoch} "
-                f"(prefer_best={resume_prefer_best}, restored_iters={resumed_iters})."
-            )
+        _restore_resume_state(
+            resume_meta=resume_meta,
+            scaler=scaler,
+            criterion=criterion,
+            lr_scheduler=lr_scheduler,
+            wd_scheduler=wd_scheduler,
+            start_epoch=start_epoch,
+            ipe=ipe,
+            rank=rank,
+            run_idx=run_idx,
+            resume_prefer_best=resume_prefer_best,
+        )
     
-    loader = iter(video_loader)
 
     # Only create logger and run directories for rank 0 to avoid race conditions
     if rank == 0:
@@ -419,6 +479,7 @@ def main(args: dict, yaml_path: str):
     def train_step(clips, actions):
         _new_lr = lr_scheduler.step()
         _new_wd = wd_scheduler.step()
+        use_multi_task_grad = grad_optim_name.lower() in {"pcgrad", "gradnorm", "famo"}
         
         def forward_target(c: torch.Tensor):
             with torch.no_grad():
@@ -438,30 +499,42 @@ def main(args: dict, yaml_path: str):
         with torch.amp.autocast(device_type, dtype = dtype, enabled = mixed_precision):
             h = forward_target(clips)
             a = forward_prediction(h)
-            targets = _format_targets(a, actions, criterion.enabled_tasks)
+            targets = _format_targets(a, actions, criterion_core.enabled_tasks)
             loss, detail = regression(a, targets)
-            
-            
-        if mixed_precision:
-            scaler.scale(loss).backward()
-            scaler.unscale_(optim)
+            task_loss_map = criterion_core.compute_task_losses(a, targets, weighted=True) if use_multi_task_grad else None
+
+        grad_optim.zero_grad()
+
+        if use_multi_task_grad and task_loss_map is not None:
+            task_losses = [task_loss_map[task_name] for task_name in criterion_core.enabled_tasks]
+            if len(task_losses) == 1:
+                task_losses = [loss]
+
+            # For gradient-surgery methods, run native backward so task-specific
+            # hook-captured gradients remain consistent.
+            grad_optim.backward(*task_losses)
+            grad_optim.step()
         else:
-            loss.backward()
-            
-        if mixed_precision:
-            scaler.step(optim)
-            scaler.update()
-        else:
-            optim.step()
-        optim.zero_grad()
-        
+            if mixed_precision:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optim)
+                scaler.step(optim)
+                scaler.update()
+            else:
+                loss.backward()
+                grad_optim.step()
         
         loss_details = {
-            "Loss|Total": float(detail["total_loss"].item()),
+            "Total Loss": float(detail["total_loss"].item()),
         }
         for task_name, task_detail in detail["per_task"].items():
             task_title = task_name.replace("_", " ").title().replace(" ", "")
-            loss_details[f"{task_title}"] = float(task_detail["weighted_loss"].item())
+            loss_details[f"{task_title}"] = float(task_detail["base_loss"].item())
+        for task_name, task_detail in detail["per_task"].items():
+            task_title = task_name.replace("_", " ").title().replace(" ", "")
+            loss_details[f"{task_title}Weighted"] = float(task_detail["weighted_loss"].item())
+            loss_details[f"{task_title}LogVar"] = float(task_detail["log_var"].item())
+            loss_details[f"{task_title}Weight"] = float(task_detail["weight"].item())
 
         return (
             loss.item(),
@@ -477,7 +550,7 @@ def main(args: dict, yaml_path: str):
             if normalize_rep:
                 h = F.layer_norm(h, (h.size(-1), ))
             a = probe(h)
-            targets = _format_targets(a, actions, criterion.enabled_tasks)
+            targets = _format_targets(a, actions, criterion_core.enabled_tasks)
             loss, detail = criterion(a, targets)
 
         loss_details = {
@@ -485,10 +558,11 @@ def main(args: dict, yaml_path: str):
         }
         for task_name, task_detail in detail["per_task"].items():
             task_title = task_name.replace("_", " ").title().replace(" ", "")
-            loss_details[f"{task_title}"] = float(task_detail["weighted_loss"].item())
+            loss_details[f"{task_title}"] = float(task_detail["base_loss"].item())
 
         return float(loss.item()), loss_details
     
+    loader = iter(video_loader)
     with log_stats:
         log_stats.start_training("Training Latent Action WM")
         video_sampler.set_epoch(0)
@@ -497,8 +571,10 @@ def main(args: dict, yaml_path: str):
         curr_lr, curr_wd = 0.0, 0.0
         for epoch in range(start_epoch, epochs):
             
-            log_stats.start_epoch(epoch, len(video_loader), desc = "Training")
-            
+            # ==================================== #
+            #               TRAINING
+            # ==================================== #
+            log_stats.start_epoch(epoch, ipe, desc = "Training")
             for _ in log_stats.batch_iterator(range(ipe)):
                 
                 iter_retries = 0
@@ -541,8 +617,11 @@ def main(args: dict, yaml_path: str):
                     "GPU Timer": elapsed_time,
                     **loss_details,
                 }
-                log_stats.log_batch(batch_metrics, phase="train", phase_agnostic=["LR", "WD", "GPU Timer"])
+                log_stats.log_batch(batch_metrics, phase="train", phase_agnostic=["LR", "WD", "GPU Timer", "VelocityWeighted", "VelocityLogVar", "VelocityWeight", "SteerWeighted", "SteerLogVar", "SteerWeight"])
 
+            # ==================================== #
+            #               VALUATING
+            # ==================================== #
             if val_loader is not None and len(val_loader) > 0:
                 val_sampler.set_epoch(epoch)
                 log_stats.start_phase(len(val_loader), desc="Validation")
@@ -559,9 +638,7 @@ def main(args: dict, yaml_path: str):
                     }
                     log_stats.log_batch(val_metrics, phase="val")
 
-            log_stats.log_epoch(extra_metrics={
-                "GPU": torch.cuda.max_memory_allocated() / 1024.0 ** 2
-            })
+            log_stats.log_epoch()
 
             gc.collect()
 
@@ -579,6 +656,6 @@ def main(args: dict, yaml_path: str):
                     scaler=scaler,
                     loss=last_loss,
                     lr=curr_lr,
-                    criterion=criterion
+                    criterion=_unwrap_module(criterion).state_dict()
                 )
     

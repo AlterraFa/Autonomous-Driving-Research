@@ -25,14 +25,14 @@ from .compile import (
     compile_dataloader,
     compile_opt
 )
-from model.training_logger import (
+from utils.training_logger import (
     get_next_run,
     create_self_supervised_logger,
     NoOpLogger
 )
 from utils.distributed import init_distributed
 from utils.logger import Logger
-from model.early_stop import EarlyStopping
+from utils.early_stop import EarlyStopping
 
 logger = Logger(__name__)
 
@@ -183,7 +183,10 @@ def main(args: dict, yaml_path: str):
     
 
     world_size, rank = init_distributed()
-    logger.CUSTOM("SUCCESS", f"Initialized distributed on rank {rank}")
+    if dist.is_available() and dist.is_initialized() and world_size > 1:
+        logger.CUSTOM("SUCCESS", f"DDP enabled (world_size={world_size}, rank={rank})")
+    else:
+        logger.INFO("DDP disabled (single-GPU/single-process mode)")
     
     
     if dtype.lower() == "bfloat16":
@@ -214,9 +217,10 @@ def main(args: dict, yaml_path: str):
         lpred.compile()
         apred.compile()
 
-    encoder = DDP(encoder, static_graph = True)
-    lpred   = DDP(lpred, static_graph = False, find_unused_parameters = True)
-    apred   = DDP(apred, static_graph = False, find_unused_parameters = True)
+    if dist.is_initialized() and world_size > 1:
+        encoder = DDP(encoder, static_graph = True)
+        lpred   = DDP(lpred, static_graph = False, find_unused_parameters = True)
+        apred   = DDP(apred, static_graph = False, find_unused_parameters = True)
     for p in encoder.parameters():
         p.requires_grad = False
     

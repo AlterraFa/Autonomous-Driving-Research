@@ -31,6 +31,11 @@ def compile_dataloader(
     val_fraction = float(train_cfg.get('val_fraction', 0.1))
     train_set, val_set, test_set = dataset.split(train=train_fraction, val=val_fraction)
 
+    gt_stats = dataset.statistics(indices=train_set.indices)
+    if rank == 0:
+        logger.INFO("Train ground-truth statistics:")
+        logger.INFO(gt_stats)
+
     train_sampler = torch.utils.data.DistributedSampler(
         train_set, num_replicas = world_sz, rank = rank, shuffle = True
     )

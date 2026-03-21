@@ -17,11 +17,13 @@ def compile_model(
     device = torch.device('cpu')
 ):
     
-    name = enc_cfg.get('name', "Not found")
-    repo = enc_cfg.get('load_from', 'Not found')
+    name   = enc_cfg.get('name', "Not found")
+    repo   = enc_cfg.get('load_from', 'Not found')
+    source = enc_cfg.get('source', 'github')
     
     # -- Encoder has sdpa and grad checkpoint enabled
-    model = torch.hub.load(repo, name, trust_repo=True)
+    logger.INFO(f"Loading the model from {source}")
+    model = torch.hub.load(repo, name, source=source, pretrained=False, trust_repo=True, skip_validation = True)
     encoder: Enc = model[0]
     encoder.use_activation_checkpointing = enc_cfg['use_activation_checkpointing']
     

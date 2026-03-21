@@ -50,14 +50,18 @@ def process(rank, fname, world_size, devices):
     except Exception as e:
         logger.ERROR(f"Error on {rank=}", full_traceback = e)
     finally:
-        torch.distributed.barrier()
-        torch.distributed.destroy_process_group()
-        logger.DEBUG(f"Destroyed process group on {rank=}")
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            if torch.distributed.get_world_size() > 1:
+                torch.distributed.barrier()
+            torch.distributed.destroy_process_group()
+            logger.DEBUG(f"Destroyed process group on {rank=}")
 
 if __name__ == "__main__":
     args_parser = parser.parse_args()
-        
+
     num_gps = len(args_parser.devices)
+    devices = args_parser.devices
+
     mp.set_start_method("spawn")
     for rank in range(num_gps):
-        mp.Process(target = process, args = (rank, args_parser.fname, num_gps, args_parser.devices)).start()
+        mp.Process(target = process, args = (rank, args_parser.fname, num_gps, devices)).start()

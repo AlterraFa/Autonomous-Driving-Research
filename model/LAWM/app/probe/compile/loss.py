@@ -127,6 +127,32 @@ class UncertaintyWeightedProbeLoss(nn.Module):
 			raise KeyError(f"Missing index mapping for task '{task}'.")
 		return tensor_or_map[..., idx]
 
+	def compute_task_losses(
+		self,
+		prediction: torch.Tensor | dict[str, torch.Tensor],
+		target: torch.Tensor | dict[str, torch.Tensor],
+		weighted: bool = True,
+	) -> dict[str, torch.Tensor]:
+		"""
+		Return differentiable per-task losses.
+
+		If `weighted` is True, returns exp(-s_i) * L_i + s_i for each task.
+		If `weighted` is False, returns base task losses L_i.
+		"""
+		losses: dict[str, torch.Tensor] = {}
+		for task in self.enabled_tasks:
+			pred_t = self._get_task_tensor(prediction, task)
+			tgt_t = self._get_task_tensor(target, task)
+			base = self._base_loss(task, pred_t, tgt_t)
+
+			if weighted:
+				log_var = torch.clamp(self.log_vars[task], min=-2.0, max=2.0)
+				losses[task] = torch.exp(-log_var) * base + log_var
+			else:
+				losses[task] = base
+
+		return losses
+
 	def forward(
 		self,
 		prediction: torch.Tensor | dict[str, torch.Tensor],
@@ -144,6 +170,7 @@ class UncertaintyWeightedProbeLoss(nn.Module):
 
 			base = self._base_loss(task, pred_t, tgt_t)
 			log_var = self.log_vars[task]
+			log_var = torch.clamp(log_var, min=-5.0, max=5.0) 
 			weighted = torch.exp(-log_var) * base + log_var
 
 			total = total + weighted
