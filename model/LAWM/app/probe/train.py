@@ -89,6 +89,7 @@ def main(args: dict, yaml_path: str):
     random_aspect_ratio = augment_cfg.get('random_resize_aspect_ratio', (1.0, 1.0))
     random_resize_scale = augment_cfg.get('random_resize_scale', (1.0, 1.0))
     reprob              = augment_cfg.get('reprob', 0.0)
+    normalize_targets   = augment_cfg.get('normalize_targets', False)
     
     optim_cfg: dict = args.get('optimization', {})
     anneal       = optim_cfg.get('annel', optim_cfg.get('anneal', 1))
@@ -184,7 +185,8 @@ def main(args: dict, yaml_path: str):
         persistance_workers = persistent_workers,
         pin_memory = pin_mem,
         world_sz = world_size,
-        rank = rank
+        rank = rank,
+        normalize_targets = normalize_targets,
     )
     
     optim, scaler, lr_scheduler, wd_scheduler = compile_opt(

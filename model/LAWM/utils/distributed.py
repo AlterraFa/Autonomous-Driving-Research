@@ -40,6 +40,9 @@ def init_distributed(port=37129, rank_and_world_size=(None, None)):
             world_size, rank = 1, 0
             return world_size, rank
 
+    if int(world_size) <= 1:
+        return 1, int(rank)
+
     try:
         os.environ["MASTER_PORT"] = str(port)
         torch.distributed.init_process_group(

@@ -4,6 +4,7 @@ import glob
 
 def create_csv(directory, name, save_path = "."):
     recording_dirs = glob.glob(directory)
+    os.makedirs(save_path, exist_ok = True)
     for record in recording_dirs:
         seq_dirs = glob.glob(os.path.join(record, "*"))
         seq_dirs = sorted(seq_dirs, key = lambda x: int(x.split("/")[-1][4:]))
@@ -17,4 +18,4 @@ def create_csv(directory, name, save_path = "."):
         df.to_csv(record_path)
         
     
-create_csv("../Autonomous_Dataset/carla_clean/*", "Carla.csv", "csv_metadata")
+create_csv("../Autonomous_Dataset/jepa_probe/*", "Carla.csv", "csv_metadata/probe")

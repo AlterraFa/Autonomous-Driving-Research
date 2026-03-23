@@ -14,7 +14,8 @@ def compile_dataloader(
     persistance_workers,
     pin_memory,
     world_sz,
-    rank
+    rank,
+    normalize_targets=False,
 ):
     
     dataset = ProbeDataset(
@@ -31,10 +32,11 @@ def compile_dataloader(
     val_fraction = float(train_cfg.get('val_fraction', 0.1))
     train_set, val_set, test_set = dataset.split(train=train_fraction, val=val_fraction)
 
-    # gt_stats = dataset.statistics(indices=train_set.indices)
-    # if rank == 0:
-    #     logger.INFO("Train ground-truth statistics:")
-    #     logger.INFO(gt_stats)
+    if normalize_targets:
+        gt_stats = dataset.statistics(indices=train_set.indices)
+        if rank == 0:
+            logger.INFO("Train ground-truth statistics (used for affine target normalization):")
+            logger.INFO(gt_stats)
 
     train_sampler = torch.utils.data.DistributedSampler(
         train_set, num_replicas = world_sz, rank = rank, shuffle = True
@@ -74,6 +76,7 @@ def compile_dataloader(
             "nclips": nclips,
             "allow_clip_overlap": train_cfg['allow_clip_overlap'],
             "random_jiggle_part": train_cfg['random_jiggle'],
+            "normalize_targets": bool(normalize_targets),
             "train_fraction": train_fraction,
             "val_fraction": val_fraction,
             "train_samples": len(train_set),

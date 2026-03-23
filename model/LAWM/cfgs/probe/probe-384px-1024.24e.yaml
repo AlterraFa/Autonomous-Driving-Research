@@ -59,6 +59,7 @@ data_aug:
   auto_augment: false
   horizontal_flip: false
   motion_shift: false
+  normalize_targets: false
   random_resize_aspect_ratio:
   - 1.0
   - 1.0
