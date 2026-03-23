@@ -5,10 +5,11 @@ from .base import Prober
 
 
 class LinearProbe(Prober):
-    def __init__(self, patch_size = 16, embed_dim = 1024, output_dim = 1, init_scales=None, init_shifts=None, *args, **kwargs):
+    def __init__(self, patch_size = 16, embed_dim = 1024, output_dim = 1, dropout = 0.0, init_scales=None, init_shifts=None, *args, **kwargs):
         super().__init__(output_dim=output_dim, init_scales=init_scales, init_shifts=init_shifts)
         
         self.tokens_pframe = int(patch_size ** 2)
+        self.dropout_layer = nn.Dropout(dropout) if dropout > 0 else None
         self.probe = nn.ModuleList([
             nn.Linear(embed_dim, 1, bias=True) for _ in range(output_dim)
         ])
@@ -18,6 +19,9 @@ class LinearProbe(Prober):
         
         x = x.view(B, N // self.tokens_pframe, self.tokens_pframe, D)
         x = x.mean(2).squeeze(dim = 2)
+        
+        if self.dropout_layer is not None:
+            x = self.dropout_layer(x)
         
         head_outputs = [head(x) for head in self.probe]
         out = torch.cat(head_outputs, dim=-1)
@@ -31,6 +35,7 @@ class NonLinearProbe(Prober):
         embed_dim=1024,
         hidden_dim=None,
         output_dim=1,
+        dropout=0.0,
         init_scales=None,
         init_shifts=None,
         *args,
@@ -44,6 +49,7 @@ class NonLinearProbe(Prober):
             nn.Sequential(
                 nn.Linear(embed_dim, hidden_dim, bias=True),
                 nn.LeakyReLU(),
+                nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
                 nn.Linear(hidden_dim, 1, bias=True),
             )
             for _ in range(output_dim)
@@ -58,6 +64,7 @@ class NonLinearProbe(Prober):
         head_outputs = [head(x) for head in self.probe]
         out = torch.cat(head_outputs, dim=-1)
         return self.apply_output_affine(out)
+    
     
 if __name__ == '__main__':
     device = torch.device('cuda')

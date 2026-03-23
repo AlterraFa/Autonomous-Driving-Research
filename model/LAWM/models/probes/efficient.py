@@ -24,6 +24,7 @@ class EfficientPooler(nn.Module):
         init_std = 0.02,
         qkv_bias = True,
         use_activation_checkpointing = False,
+        dropout = 0.0,
     ):
         super().__init__()
 
@@ -31,6 +32,7 @@ class EfficientPooler(nn.Module):
         self.num_patches = num_patches
         self.timestep = max_frames // tubelet_size
         self.embed_dim = embed_dim
+        self.dropout_layer = nn.Dropout(dropout) if dropout > 0 else None
 
         self.query_tokens = nn.Parameter(torch.randn(1, self.timestep, num_queries, embed_dim) * init_std)
         self.pos_encode = UnitEncoding(
@@ -113,6 +115,8 @@ class EfficientPooler(nn.Module):
         query_tokens = query_tokens.repeat(batch_size, 1, 1, 1)
 
         out = self.efficient_probe(x, cls_token=query_tokens)
+        if self.dropout_layer is not None:
+            out = self.dropout_layer(out)
         return out
 
     def interp_q(self, queries: torch.Tensor, tgt_size: int) -> torch.Tensor:
@@ -140,6 +144,7 @@ class EfficientProbe(Prober):
         init_std = 0.02,
         qkv_bias = True,
         use_activation_checkpointing=False,
+        dropout=0.0,
         init_scales = None,
         init_shifts = None,
         *args, **kwargs
@@ -158,12 +163,14 @@ class EfficientProbe(Prober):
             init_std=init_std,
             qkv_bias=qkv_bias,
             use_activation_checkpointing=use_activation_checkpointing,
+            dropout=dropout,
         )
 
         self.linear = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(embed_dim, embed_dim // 2, bias = True),
                 nn.LeakyReLU(),
+                nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
                 nn.Linear(embed_dim // 2, 1)
             ) for _ in range(output_dim)
         ])

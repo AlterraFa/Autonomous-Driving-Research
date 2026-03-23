@@ -24,6 +24,7 @@ class SelfPooler(nn.Module):
         init_std = 0.02,
         qkv_bias = True,
         use_activation_checkpointing = False,
+        dropout = 0.0,
     ):
         super().__init__()
         
@@ -35,6 +36,7 @@ class SelfPooler(nn.Module):
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
         self.mlp = MLP(in_features = embed_dim, hidden_features = int(embed_dim * mlp_ratio))
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else None
         self.query_tokens = nn.Parameter(torch.randn(1, self.timestep, embed_dim) * init_std) 
         
         self.self_attn = Attention(
@@ -115,7 +117,11 @@ class SelfPooler(nn.Module):
 
         out = torch.cat([frame_tokens, query_tokens], dim=2).reshape(batch_size, -1, embed_dim)
         out = out + self.self_attn(self.norm1(out))
+        if self.dropout is not None:
+            out = self.dropout(out)
         out = out + self.mlp(self.norm2(out))
+        if self.dropout is not None:
+            out = self.dropout(out)
         out = out.reshape(batch_size, target_timestep, -1, embed_dim)
 
         return out[:, :, -1, :]
@@ -143,6 +149,7 @@ class SelfProbe(Prober):
         init_std = 0.02,
         qkv_bias = True,
         use_activation_checkpointing=False,
+        dropout=0.0,
         init_scales = None, 
         init_shifts = None,
         *args, **kwargs
@@ -160,12 +167,14 @@ class SelfProbe(Prober):
             init_std = init_std,
             qkv_bias = qkv_bias,
             use_activation_checkpointing = use_activation_checkpointing,
+            dropout = dropout,
         )
         
         self.linear = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(embed_dim, embed_dim // 2, bias = True),
                 nn.LeakyReLU(),
+                nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
                 nn.Linear(embed_dim // 2, 1)
             ) for _ in range(output_dim)
         ])
