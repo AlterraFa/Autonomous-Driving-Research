@@ -120,8 +120,8 @@ def _decode(path):
         print(f"Error processing {path=}: {e}")
         return None
  
-    
+ 
+_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.cpu_count() // 2))
 def decode_batch(paths):
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        frames = np.asarray(list(executor.map(_decode, paths)), dtype=np.uint8)
+    frames = np.asarray(list(_EXECUTOR.map(_decode, paths)), dtype=np.uint8)
     return frames
