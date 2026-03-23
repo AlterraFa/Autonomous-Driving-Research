@@ -24,11 +24,11 @@ class UncertaintyWeightedProbeLoss(nn.Module):
 	where s_i is a learnable log-variance parameter.
 	"""
 
-	DEFAULT_TASK_ORDER = ("velocity", "steer", "lateral_error")
+	DEFAULT_TASK_ORDER = ("velocity", "steer", "lat err")
 	DEFAULT_TASK_INDEX = {
 		"velocity": 0,
 		"steer": 1,
-		"lateral_error": 2,
+		"lat err": 2,
 	}
 	SUPPORTED_LOSSES = {"log_cosh", "mae", "mse", "smooth_l1"}
 
@@ -48,13 +48,13 @@ class UncertaintyWeightedProbeLoss(nn.Module):
 		enabled = enabled or {
 			"velocity": True,
 			"steer": True,
-			"lateral_error": True,
+			"lat err": True,
 		}
 
 		task_to_loss = task_to_loss or {
 			"velocity": "log_cosh",
 			"steer": "mae",
-			"lateral_error": "mae",
+			"lat err": "mae",
 		}
 
 		task_to_index = task_to_index or dict(self.DEFAULT_TASK_INDEX)
@@ -192,25 +192,25 @@ def compile_loss(loss_cfg: dict | None = None, device: torch.device | None = Non
 	enabled = {
 		"velocity": bool(loss_cfg.get("enable_velocity", True)),
 		"steer": bool(loss_cfg.get("enable_steer", True)),
-		"lateral_error": bool(loss_cfg.get("enable_lateral_error", True)),
+		"lat err": bool(loss_cfg.get("enable_lateral_error", True)),
 	}
 
 	task_to_loss = {
 		"velocity": loss_cfg.get("velocity_loss", "log_cosh"),
 		"steer": loss_cfg.get("steer_loss", "mae"),
-		"lateral_error": loss_cfg.get("lateral_error_loss", "mae"),
+		"lat err": loss_cfg.get("lateral_error_loss", "mae"),
 	}
 
 	task_to_index = {
 		"velocity": int(loss_cfg.get("velocity_idx", 0)),
 		"steer": int(loss_cfg.get("steer_idx", 1)),
-		"lateral_error": int(loss_cfg.get("lateral_error_idx", 2)),
+		"lat err": int(loss_cfg.get("lateral_error_idx", 2)),
 	}
 
 	initial_log_vars = {
 		"velocity": float(loss_cfg.get("velocity_log_var", 0.0)),
 		"steer": float(loss_cfg.get("steer_log_var", 0.0)),
-		"lateral_error": float(loss_cfg.get("lateral_error_log_var", 0.0)),
+		"lat err": float(loss_cfg.get("lateral_error_log_var", 0.0)),
 	}
 
 	criterion = UncertaintyWeightedProbeLoss(
@@ -226,3 +226,69 @@ def compile_loss(loss_cfg: dict | None = None, device: torch.device | None = Non
 
 	return criterion
 
+
+def _resolve_action_key(action_map: dict, task_name: str) -> str:
+    aliases = {
+        "velocity": ["velocity", "vel", "speed"],
+        "steer": ["steer", "steering", "steering_angle"],
+        "lat err": ["lateral_error", "lat_err", "cte", "cross_track_error", "lateral"],
+    }
+    for key in aliases.get(task_name, [task_name]):
+        if key in action_map:
+            return key
+    raise KeyError(
+        f"Could not map task '{task_name}' to action keys. "
+        f"Available keys: {sorted(action_map.keys())}"
+    )
+
+def _norm_target_shape(target: torch.Tensor, batch_size: int) -> torch.Tensor:
+    if target.ndim == 0:
+        target = target.view(1, 1).expand(batch_size, 1)
+    elif target.ndim == 1:
+        target = target.unsqueeze(0)
+    elif target.ndim >= 3:
+        if target.shape[0] == 1 and target.shape[1] == batch_size:
+            target = target[0]
+        else:
+            target = target.reshape(batch_size, -1)
+
+    if target.ndim == 2 and target.shape[0] != batch_size and target.shape[1] == batch_size:
+        target = target.transpose(0, 1)
+
+    if target.ndim != 2:
+        target = target.reshape(batch_size, -1)
+
+    return target
+
+def format_targets(pred: torch.Tensor, action_input, enabled_tasks):
+    action_map = action_input
+    if isinstance(action_input, list):
+        if len(action_input) == 0:
+            raise ValueError("Received empty action list")
+        if isinstance(action_input[0], dict):
+            action_map = action_input[0]
+        else:
+            raise TypeError(f"Unsupported action list element type: {type(action_input[0])}")
+
+    if not isinstance(action_map, dict):
+        raise TypeError(f"Unsupported action container type: {type(action_map)}")
+
+    B, T_pred, _ = pred.shape
+    target_map = {}
+
+    for task_name in enabled_tasks:
+        action_key = _resolve_action_key(action_map, task_name)
+        raw_target = action_map[action_key].to(device=pred.device, dtype=pred.dtype)
+        target = _norm_target_shape(raw_target, B)
+
+        if target.shape[1] != T_pred:
+            target = F.interpolate(
+                target.unsqueeze(1),
+                size=T_pred,
+                mode="linear",
+                align_corners=False,
+            ).squeeze(1)
+
+        target_map[task_name] = target
+
+    return target_map

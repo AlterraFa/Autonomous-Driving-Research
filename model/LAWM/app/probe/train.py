@@ -2,7 +2,6 @@ import os, sys
 import resource
 import time
 import gc
-import glob
 from functools import partial
 from pathlib import Path
 
@@ -24,7 +23,8 @@ from .compile import (
     compile_dataloader,
     compile_opt,
     compile_grad_optimizer,
-    compile_loss,
+    compile_loss, format_targets,
+    load_checkpoint, restore_resume_state
 )
 from utils.training_logger import (
     get_next_run,
@@ -36,32 +36,6 @@ from utils.logger import Logger
 from utils.early_stop import EarlyStopping
 
 logger = Logger(__name__)
-
-
-def _normalize_state_dict_for_model(model, state_dict: dict) -> dict:
-    target_keys = list(model.state_dict().keys())
-    target_has_module = any(k.startswith("module.") for k in target_keys)
-    source_keys = list(state_dict.keys())
-    source_has_module = any(k.startswith("module.") for k in source_keys)
-
-    if target_has_module and not source_has_module:
-        return {f"module.{k}": v for k, v in state_dict.items()}
-    if not target_has_module and source_has_module:
-        return {k.removeprefix("module."): v for k, v in state_dict.items()}
-    return state_dict
-
-
-def _load_state_dict_compat(model, state_dict: dict):
-    adjusted = _normalize_state_dict_for_model(model, state_dict)
-    try:
-        model.load_state_dict(adjusted)
-        return
-    except RuntimeError:
-        if hasattr(model, "module"):
-            raw_state = {k.removeprefix("module."): v for k, v in adjusted.items()}
-            model.module.load_state_dict(raw_state)
-            return
-        raise
 
 
 def _unwrap_module(module):
@@ -85,162 +59,7 @@ def gpu_timer(funct, log_timming = True):
     return result, elapsed_time
 
 
-def load_checkpoint(
-    model,
-    optimizer,
-    checkpoint_dir,
-    checkpoint_name="probe.pt",
-    prefer_best=True,
-    map_location=None,
-):
-    basename = "checkpoint.pt"
-    meta_path = os.path.join(checkpoint_dir, basename)
-    if not os.path.exists(meta_path):
-        raise FileNotFoundError(f"Missing {meta_path}")
 
-    meta = torch.load(meta_path, map_location=map_location, weights_only=False)
-    score = meta.get("score")
-    start_epoch = meta.get("epoch", 0)
-
-    prefix = "best_" if prefer_best else "last_"
-    model_path = os.path.join(checkpoint_dir, f"{prefix}{checkpoint_name}")
-    if not os.path.exists(model_path):
-        candidates = sorted(glob.glob(os.path.join(checkpoint_dir, f"{prefix}*.pt")))
-        if not candidates:
-            raise FileNotFoundError(f"Missing checkpoint weights under {checkpoint_dir} with prefix '{prefix}'")
-        model_path = candidates[-1]
-
-    loaded_state = torch.load(model_path, map_location=map_location, weights_only=False)
-    if isinstance(loaded_state, dict):
-        _load_state_dict_compat(model, loaded_state)
-    elif hasattr(loaded_state, "state_dict"):
-        _load_state_dict_compat(model, loaded_state.state_dict())
-    else:
-        raise TypeError(f"Unsupported checkpoint payload type for model weights: {type(loaded_state)}")
-
-    if optimizer is not None:
-        optimizer_payload = meta.get("optimizer_state_dict", None)
-        if optimizer_payload is None:
-            optimizer_payload = meta.get("optimizer", None)
-        if optimizer_payload is not None:
-            if isinstance(optimizer_payload, dict):
-                optimizer.load_state_dict(optimizer_payload)
-            elif hasattr(optimizer_payload, "state_dict"):
-                optimizer.load_state_dict(optimizer_payload.state_dict())
-
-    return model, optimizer, start_epoch + 1, score, meta
-
-
-def _restore_resume_state(
-    resume_meta: dict,
-    scaler,
-    criterion,
-    lr_scheduler,
-    wd_scheduler,
-    start_epoch: int,
-    ipe: int,
-    rank: int,
-    run_idx: int,
-    resume_prefer_best: bool,
-):
-    scaler_payload = resume_meta.get("scaler", None)
-    if scaler is not None and scaler_payload is not None:
-        if isinstance(scaler_payload, dict):
-            scaler.load_state_dict(scaler_payload)
-        elif hasattr(scaler_payload, "state_dict"):
-            scaler.load_state_dict(scaler_payload.state_dict())
-
-    criterion_payload = resume_meta.get("criterion", None)
-    if criterion_payload is not None:
-        try:
-            if isinstance(criterion_payload, dict):
-                _load_state_dict_compat(criterion, criterion_payload)
-            elif hasattr(criterion_payload, "state_dict"):
-                _load_state_dict_compat(criterion, criterion_payload.state_dict())
-        except Exception:
-            logger.WARNING("Could not restore criterion state from checkpoint metadata. Continuing with current criterion state.")
-
-    resumed_iters = max(0, int(start_epoch) * int(ipe))
-    for _ in range(resumed_iters):
-        lr_scheduler.step()
-        wd_scheduler.step()
-
-    if rank == 0:
-        logger.INFO(
-            f"Resumed run{run_idx} from epoch {start_epoch} "
-            f"(prefer_best={resume_prefer_best}, restored_iters={resumed_iters})."
-        )
-
-    return resumed_iters
-
-
-def _resolve_action_key(action_map: dict, task_name: str) -> str:
-    aliases = {
-        "velocity": ["velocity", "vel", "speed"],
-        "steer": ["steer", "steering", "steering_angle"],
-        "lateral_error": ["lateral_error", "cte", "cross_track_error", "lateral"],
-    }
-    for key in aliases.get(task_name, [task_name]):
-        if key in action_map:
-            return key
-    raise KeyError(
-        f"Could not map task '{task_name}' to action keys. "
-        f"Available keys: {sorted(action_map.keys())}"
-    )
-
-
-def _normalize_target_shape(target: torch.Tensor, batch_size: int) -> torch.Tensor:
-    if target.ndim == 0:
-        target = target.view(1, 1).expand(batch_size, 1)
-    elif target.ndim == 1:
-        target = target.unsqueeze(0)
-    elif target.ndim >= 3:
-        if target.shape[0] == 1 and target.shape[1] == batch_size:
-            target = target[0]
-        else:
-            target = target.reshape(batch_size, -1)
-
-    if target.ndim == 2 and target.shape[0] != batch_size and target.shape[1] == batch_size:
-        target = target.transpose(0, 1)
-
-    if target.ndim != 2:
-        target = target.reshape(batch_size, -1)
-
-    return target
-
-
-def _format_targets(pred: torch.Tensor, action_input, enabled_tasks):
-    action_map = action_input
-    if isinstance(action_input, list):
-        if len(action_input) == 0:
-            raise ValueError("Received empty action list")
-        if isinstance(action_input[0], dict):
-            action_map = action_input[0]
-        else:
-            raise TypeError(f"Unsupported action list element type: {type(action_input[0])}")
-
-    if not isinstance(action_map, dict):
-        raise TypeError(f"Unsupported action container type: {type(action_map)}")
-
-    B, T_pred, _ = pred.shape
-    target_map = {}
-
-    for task_name in enabled_tasks:
-        action_key = _resolve_action_key(action_map, task_name)
-        raw_target = action_map[action_key].to(device=pred.device, dtype=pred.dtype)
-        target = _normalize_target_shape(raw_target, B)
-
-        if target.shape[1] != T_pred:
-            target = F.interpolate(
-                target.unsqueeze(1),
-                size=T_pred,
-                mode="linear",
-                align_corners=False,
-            ).squeeze(1)
-
-        target_map[task_name] = target
-
-    return target_map
     
 GLOBAL_SEED = 12
 random.seed(GLOBAL_SEED)
@@ -292,17 +111,17 @@ def main(args: dict, yaml_path: str):
     normalize_rep = loss_cfg.get('normalize_rep', False)
 
     meta_cfg: dict = args.get('meta', {})
-    dtype = meta_cfg.get('dtype', 'float32')
-    save_freq = meta_cfg.get('save_every_freq', 2)
-    save_root_dir_cfg = meta_cfg.get('save_root_dir', "./Experiment")
-    sync_gc   = meta_cfg.get('sync_gc', False)
-    continue_train = bool(meta_cfg.get('continue_train', False))
-    continue_from_run = meta_cfg.get('continue_from_run', None)
-    resume_prefer_best = bool(meta_cfg.get('resume_prefer_best', True))
+    dtype                     = meta_cfg.get('dtype', 'float32')
+    save_freq                 = meta_cfg.get('save_every_freq', 2)
+    save_root_dir_cfg         = meta_cfg.get('save_root_dir', "./Experiment")
+    sync_gc                   = meta_cfg.get('sync_gc', False)
+    continue_from_path = meta_cfg.get('continue_from_path', None)
+    continue_train                 = bool(continue_from_path)
+    resume_prefer_best             = bool(meta_cfg.get('resume_prefer_best', True))
 
     logging_cfg: dict = args.get('logging', {})
-    progress_type = logging_cfg.get('progress_type', 'table')
-    save_csv = logging_cfg.get('save_csv', True)
+    progress_type  = logging_cfg.get('progress_type', 'table')
+    save_csv       = logging_cfg.get('save_csv', True)
     save_batch_csv = logging_cfg.get('save_batch_csv', False)
     save_epoch_csv = logging_cfg.get('save_epoch_csv', True)
     
@@ -410,12 +229,26 @@ def main(args: dict, yaml_path: str):
     log_dir = os.path.join(save_root_dir_cfg, "probe")
     logger.INFO(f"Probe save root directory: {log_dir}")
 
+    continue_run_dir = None
+    continue_run_name = None
+    if continue_train:
+        continue_run_dir = os.path.abspath(os.path.expanduser(continue_from_path))
+        if os.path.basename(continue_run_dir) == "weights":
+            continue_run_dir = os.path.dirname(continue_run_dir)
+        if not os.path.isdir(continue_run_dir):
+            raise FileNotFoundError(f"continue_from_path does not exist: {continue_from_path}")
+        continue_run_name = os.path.basename(continue_run_dir)
+        if not continue_run_name.startswith("run"):
+            raise ValueError(
+                f"Expected continue_from_path to point to a run directory like '.../run1', got: {continue_run_dir}"
+            )
+
     if rank == 0:
-        next_run_idx = get_next_run(log_dir)
         if continue_train:
-            resolved_run_idx = int(continue_from_run) if continue_from_run is not None else max(1, next_run_idx - 1)
-            logger.INFO(f"Resuming requested. Selected run index: run{resolved_run_idx}")
+            resolved_run_idx = int(continue_run_name.removeprefix("run"))
+            logger.INFO(f"Resuming requested. Selected run directory: {continue_run_dir}")
         else:
+            next_run_idx = get_next_run(log_dir)
             resolved_run_idx = next_run_idx
         run_idx_tensor = torch.tensor([resolved_run_idx], dtype=torch.long, device=device)
     else:
@@ -427,9 +260,15 @@ def main(args: dict, yaml_path: str):
 
     start_epoch = 0
     resume_score = None
+    run_name = f"run{run_idx}"
+    run_dir = os.path.join(log_dir, run_name)
+
+    if continue_train and continue_run_dir is not None:
+        run_dir = continue_run_dir
+        run_name = os.path.basename(run_dir)
 
     if continue_train:
-        resume_dir = os.path.join(log_dir, f"run{run_idx}", "weights")
+        resume_dir = os.path.join(run_dir, "weights")
         probe, optim, start_epoch, resume_score, resume_meta = load_checkpoint(
             model=probe,
             optimizer=optim,
@@ -438,7 +277,7 @@ def main(args: dict, yaml_path: str):
             prefer_best=resume_prefer_best,
             map_location=device,
         )
-        _restore_resume_state(
+        restore_resume_state(
             resume_meta=resume_meta,
             scaler=scaler,
             criterion=criterion,
@@ -457,17 +296,23 @@ def main(args: dict, yaml_path: str):
         log_stats = create_supervised_logger(
             log_dir = log_dir,
             epochs = epochs,
-            run_name = f"run{run_idx}",
+            run_name = run_name,
             progress_type = progress_type,
             save_csv = save_csv,
             save_batch_csv = save_batch_csv,
             save_epoch_csv = save_epoch_csv,
         )
-        probe_save = EarlyStopping(patience = epochs, freq = save_freq, min_delta = 0, path = os.path.join(log_dir, f"run{run_idx}/weights/probe.pt"), weights_only = True)
+        probe_save = EarlyStopping(
+            patience = epochs,
+            freq = save_freq,
+            min_delta = 0,
+            path = os.path.join(run_dir, "weights/probe.pt"),
+            weights_only = True,
+        )
         if resume_score is not None:
             probe_save.best_loss = resume_score
         if not continue_train:
-            os.system(f"cp {yaml_path} {os.path.join(log_dir, f'run{run_idx}')}")
+            os.system(f"cp {yaml_path} {run_dir}")
     else:
         log_stats = NoOpLogger()
    
@@ -499,7 +344,7 @@ def main(args: dict, yaml_path: str):
         with torch.amp.autocast(device_type, dtype = dtype, enabled = mixed_precision):
             h = forward_target(clips)
             a = forward_prediction(h)
-            targets = _format_targets(a, actions, criterion_core.enabled_tasks)
+            targets = format_targets(a, actions, criterion_core.enabled_tasks)
             loss, detail = regression(a, targets)
             task_loss_map = criterion_core.compute_task_losses(a, targets, weighted=True) if use_multi_task_grad else None
 
@@ -528,14 +373,12 @@ def main(args: dict, yaml_path: str):
             "Total Loss": float(detail["total_loss"].item()),
         }
         for task_name, task_detail in detail["per_task"].items():
-            task_title = task_name.replace("_", " ").title().replace(" ", "")
+            task_title = task_name.replace("_", " ").title()
             loss_details[f"{task_title}"] = float(task_detail["base_loss"].item())
         for task_name, task_detail in detail["per_task"].items():
-            task_title = task_name.replace("_", " ").title().replace(" ", "")
-            loss_details[f"{task_title}Weighted"] = float(task_detail["weighted_loss"].item())
-            loss_details[f"{task_title}LogVar"] = float(task_detail["log_var"].item())
-            loss_details[f"{task_title}Weight"] = float(task_detail["weight"].item())
-
+            task_title = task_name.replace("_", " ").title()
+            loss_details[f"Weight {task_title}"] = float(task_detail["weighted_loss"].item())
+        
         return (
             loss.item(),
             _new_lr,
@@ -549,8 +392,8 @@ def main(args: dict, yaml_path: str):
             h = encoder(clips)
             if normalize_rep:
                 h = F.layer_norm(h, (h.size(-1), ))
-            a = probe(h)
-            targets = _format_targets(a, actions, criterion_core.enabled_tasks)
+            a  = probe(h)
+            targets = format_targets(a, actions, criterion_core.enabled_tasks)
             loss, detail = criterion(a, targets)
 
         loss_details = {
@@ -617,7 +460,7 @@ def main(args: dict, yaml_path: str):
                     "GPU Timer": elapsed_time,
                     **loss_details,
                 }
-                log_stats.log_batch(batch_metrics, phase="train", phase_agnostic=["LR", "WD", "GPU Timer", "VelocityWeighted", "VelocityLogVar", "VelocityWeight", "SteerWeighted", "SteerLogVar", "SteerWeight"])
+                log_stats.log_batch(batch_metrics, phase="train", phase_agnostic=["LR", "WD", "GPU Timer", "Weight Lat Err", "Weight Velocity", "Weight Steer"])
 
             # ==================================== #
             #               VALUATING

@@ -8,6 +8,8 @@ import multiprocessing as mp
 import yaml
 import importlib
 import torch
+import glob
+import re
 
 from utils.distributed import init_distributed
 
@@ -20,9 +22,56 @@ parser.add_argument(
     default=["cuda:0"],
     help="which devices to use on local machine",
 )
+parser.add_argument(
+    "--continue",
+    dest="continue_path",
+    type=str,
+    default=None,
+    help="path to a previous run directory (e.g. ./Experiment/probe/run1 or ./Experiment/run1)",
+)
 
 
-def process(rank, fname, world_size, devices): 
+def _resolve_continue_run_dir(continue_path: str) -> str:
+    raw_path = os.path.abspath(os.path.expanduser(continue_path))
+
+    if os.path.isdir(raw_path):
+        if os.path.basename(raw_path) == "weights":
+            return os.path.dirname(raw_path)
+        return raw_path
+
+    run_name = os.path.basename(raw_path)
+    run_name_match = re.fullmatch(r"run\d+", run_name)
+    if run_name_match:
+        base_dir = os.path.dirname(raw_path)
+        candidates = [
+            os.path.join(base_dir, mode, run_name)
+            for mode in ("action", "probe", "pretraining")
+            if os.path.isdir(os.path.join(base_dir, mode, run_name))
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise ValueError(
+                f"Ambiguous continue path '{continue_path}'. Matches: {candidates}. "
+                "Please pass the full run path including mode folder."
+            )
+
+    raise FileNotFoundError(
+        f"Could not resolve continue run directory from '{continue_path}'."
+    )
+
+
+def _find_run_yaml(run_dir: str) -> str:
+    yaml_candidates = sorted(glob.glob(os.path.join(run_dir, "*.yaml")))
+    yaml_candidates.extend(sorted(glob.glob(os.path.join(run_dir, "*.yml"))))
+    if not yaml_candidates:
+        raise FileNotFoundError(
+            f"No YAML config found in run directory: {run_dir}"
+        )
+    return yaml_candidates[0]
+
+
+def process(rank, fname, world_size, devices, continue_path=None): 
     import os, sys
 
     os.environ['CUDA_VISIBLE_DEVICES'] = str(devices[rank].split(":")[-1])
@@ -30,10 +79,24 @@ def process(rank, fname, world_size, devices):
     from utils.logger import Logger
     
     logger = Logger()
-        
-    with open(fname, "r") as f:
+
+    config_path = fname
+    resolved_continue_dir = None
+    if continue_path:
+        resolved_continue_dir = _resolve_continue_run_dir(continue_path)
+        config_path = _find_run_yaml(resolved_continue_dir)
+        logger.INFO(f"Continuing from run directory: {resolved_continue_dir}")
+        logger.INFO(f"Loading run config from: {config_path}")
+
+    with open(config_path, "r") as f:
         params = yaml.load(f, Loader = yaml.FullLoader)
         logger.INFO(f"Rank {rank} Loaded parameters")
+
+    if resolved_continue_dir is not None:
+        meta_cfg = params.setdefault("meta", {})
+        meta_cfg.pop("continue_train", None)
+        meta_cfg.pop("continue_from_run", None)
+        meta_cfg["continue_from_path"] = resolved_continue_dir
 
     world_size, rank = init_distributed(rank_and_world_size = (rank, world_size))
 
@@ -44,7 +107,7 @@ def process(rank, fname, world_size, devices):
 
         
     try:
-        importlib.import_module(f"app.{params['app']}.train").main(params, fname)
+            importlib.import_module(f"app.{params['app']}.train").main(params, config_path)
     except KeyboardInterrupt:
         logger.ERROR(f"Keyboard Interrupt detected on {rank=}")
     except Exception as e:
@@ -64,4 +127,7 @@ if __name__ == "__main__":
 
     mp.set_start_method("spawn")
     for rank in range(num_gps):
-        mp.Process(target = process, args = (rank, args_parser.fname, num_gps, devices)).start()
+        mp.Process(
+            target=process,
+            args=(rank, args_parser.fname, num_gps, devices, args_parser.continue_path),
+        ).start()
