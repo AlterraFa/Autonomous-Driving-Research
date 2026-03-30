@@ -10,6 +10,13 @@ class ServerFps(Enum):
     msgType = (int, float)
     default = 0
 
+class ClearNPCs(Enum):
+    Queue = "General"
+    Owner = "Global"
+    msgID = 100
+    msgType = (bool, )
+    default = 0
+
 class ClientFps(Enum):
     Queue = "General"
     Owner = "HUD"
@@ -101,12 +108,32 @@ class Location(Enum):
     msgType = (list, np.ndarray, torch.Tensor)
     default = staticmethod(lambda: np.zeros(3, dtype=float))
 
+class GlobalWP(Enum):
+    Queue = "General"
+    Owner = "ReplayHandler"
+    msgID = 13
+    msgType = (list, np.ndarray, torch.Tensor)
+    default = staticmethod(lambda: np.zeros((3, 2), dtype=float))
 
 #################################### Control ####################################
 class Throttle(Enum):
     Queue = "General"
     Owner = "HUD"
     msgID = 20
+    msgType = (float, int, np.ndarray, torch.Tensor)
+    default = 0.0
+
+class SteerAngle(Enum):
+    Queue = "General"
+    Owner = "HUD"
+    msgID = 25
+    msgType = (float, int, np.ndarray, torch.Tensor)
+    default = 0.0
+    
+class SpeedLimit(Enum):
+    Queue = "General"
+    Owner = "HUD"
+    msgID = 30
     msgType = (float, int, np.ndarray, torch.Tensor)
     default = 0.0
 

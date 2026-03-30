@@ -36,7 +36,7 @@ class TrajectoryBuffer:
     def __init__(self, save_dir: str, init_cap = int(8192 * 8), dist_thresh_m = 0, min_dt_s = 0.05):
         self.log = Logger()
         self.log.DEBUG("SAVING VEHICLE TRAJECTORY")
-        self.arr = np.empty((init_cap, 4), dtype=np.float32)
+        self.arr = np.empty((init_cap, 7), dtype=np.float32)
         self.n = 0
         self.last = None
         self.last_t = 0.0
@@ -49,7 +49,7 @@ class TrajectoryBuffer:
         dx, dy, dz = a[0]-b[0], a[1]-b[1], a[2]-b[2]
         return (dx*dx + dy*dy + dz*dz) ** 0.5
 
-    def update(self, loc: np.ndarray) -> None:
+    def update(self, loc: np.ndarray, rot: np.ndarray) -> None:
         t = time.time()
         p = [loc[0], loc[1], loc[2]]
         if self.last is not None:
@@ -59,9 +59,10 @@ class TrajectoryBuffer:
                 return
             
         p.append(t - self.last_t)
+        p.extend(rot)
         self.last, self.last_t = p, t
         if self.n >= self.arr.shape[0]:
-            new = np.empty((self.arr.shape[0]*2, 4), dtype=np.float32)
+            new = np.empty((self.arr.shape[0]*2, 7), dtype=np.float32)
             new[:self.n] = self.arr[:self.n]
             self.arr = new
         self.arr[self.n] = p
@@ -154,10 +155,9 @@ class CarlaDatasetCollector:
             fname = f"{key}/{self.sample_idx:06d}_{key}.jpg"
             fpath = self.img_dir / fname
             img_copy = img.copy() 
-            # self._savers[key].save(
-            #     cv2.imwrite, str(fpath), img_copy, self.encode_param
-            # )
-            cv2.imwrite(str(fpath), img_copy, self.encode_param)
+            self._savers[key].save(
+                cv2.imwrite, str(fpath), img_copy, self.encode_param
+            )
             saved_files[key] = str(fpath.relative_to(self.save_dir))
 
 
@@ -208,7 +208,9 @@ from src.messages.all_messages import (
     ThrottleLog,
     TurnSignal,
     PolylinesCmd,
-    ServerRuntime
+    ServerRuntime,
+    SteerAngle,
+    GlobalWP
 )
 class ReplayHandler:
 
@@ -218,8 +220,7 @@ class ReplayHandler:
     def __init__(self, world: World, true_trajectories: np.ndarray, data_collect_dir: str = None, use_temporal: bool = False, debug: bool = False):
         self.logger = Logger()
         
-        midlane_waypoints, _ = WaypointsAlign(world, 2.0).align(true_trajectories)
-        
+        _, midlane_waypoints = WaypointsAlign(world, 2.0).align(true_trajectories)
         self.path_handler = PathHandler(midlane_waypoints)
         self.path_handler.position_idx = position_idx
         self.debug = debug
@@ -242,17 +243,19 @@ class ReplayHandler:
         self.start_time = self.sub_server_runtime.receive()
 
     def _init_transmittor(self):
-        self.sub_location = MessageSubscriber(Location)
-        self.sub_heading  = MessageSubscriber(Heading)
-        self.sub_server_fps = MessageSubscriber(ServerFps)
-        self.sub_client_fps = MessageSubscriber(ClientFps)
-        self.sub_steer_logging = MessageSubscriber(SteerLog)
+        self.sub_location         = MessageSubscriber(Location)
+        self.sub_heading          = MessageSubscriber(Heading)
+        self.sub_server_fps       = MessageSubscriber(ServerFps)
+        self.sub_client_fps       = MessageSubscriber(ClientFps)
+        self.sub_steer_logging    = MessageSubscriber(SteerLog)
         self.sub_throttle_logging = MessageSubscriber(ThrottleLog)
         self.sub_brake_logging    = MessageSubscriber(BrakeLog)
         self.sub_velocity         = MessageSubscriber(Velocity)
         self.sub_polylines        = MessageSubscriber(PolylinesCmd)
-        self.sub_server_runtime = MessageSubscriber(ServerRuntime)
-        self.send_turn_signal     = MessageSender(TurnSignal)
+        self.sub_server_runtime   = MessageSubscriber(ServerRuntime)
+        self.sub_steer_angle      = MessageSubscriber(SteerAngle)
+        self.send_turn_signal         = MessageSender(TurnSignal)
+        self.send_global_wp           = MessageSender(GlobalWP)
         
 
     def step(self, **frame: np.ndarray):
@@ -285,7 +288,7 @@ class ReplayHandler:
         )
         
         mid_global = self.path_handler.waypoints(
-            position, self.offset, use_time = self.use_temporal, merge = False
+            position, self.offset, use_time = self.use_temporal, merge = True
         )
         mid_ego = global_2_local(vehicle_location, mid_global, heading)
         
@@ -317,6 +320,8 @@ class ReplayHandler:
             turn_signal = self.turn_classifier.turning_type(is_at_junction, junction, is_exit_junction, global_scout, debug = self.debug)
         else:
             turn_signal = -1
+
+        self.send_global_wp.send(mid_global)
         self.send_turn_signal.send(turn_signal)
 
 
@@ -326,12 +331,14 @@ class ReplayHandler:
             throttle = self.sub_throttle_logging.receive()
             brake    = self.sub_brake_logging.receive()
             velocity = self.sub_velocity.receive()
+            steer_angle = self.sub_steer_angle.receive()
             # if self.addition_cnt < self.additional_max:
             #     if saved:
             #         if curr_dist - self.prev_dist < 1e-2:
             #             self.addition_cnt += 1
             # if curr_dist - self.prev_dist > 1e-2:
             #     self.addition_cnt = 0
+            self.logger.DEBUG(f"Lat Err: {lat_err:.3f}m", frequency = 5)
 
             saved = self.data_collector.maybe_save(
                 {
@@ -339,6 +346,7 @@ class ReplayHandler:
                         "midlane_wp" : mid_ego,
                         "aux_wp"     : ego_branches,
                         "steer"      : steer,
+                        "steer_angle": steer_angle,
                         "throttle"   : throttle,
                         "brake"      : brake,
                         "velocity"   : velocity,

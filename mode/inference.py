@@ -23,7 +23,7 @@ def run_inference(args, client, virt_world, sensors, spawner, folder, viewer_arg
     controlling_vehicle = Vehicle(spawner.single_vehicle, virt_world.world)
 
     game_viewer = VIEWER_REGISTRY["inference"](**{**viewer_args, "vehicle": controlling_vehicle})
-    game_viewer.init_sensor({rgb_sensor: None, gnss_sensor: None, imu_sensor: None})
+    game_viewer.init_sensor({rgb_sensor: [None, True], gnss_sensor: [None, True], imu_sensor: [None, True]})
 
     lp = line_profiler.LineProfiler()
     lp.add_function(game_viewer.run)

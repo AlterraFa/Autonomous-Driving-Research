@@ -9,7 +9,7 @@ import numpy as np
 
 from traceback import print_exc
 from scipy.signal import butter, lfilter, lfilter_zi
-from src.messages.message_handler import MessageSubscriber
+from src.messages.message_handler import MessageSubscriber, MessageSender
 from src.messages.all_messages import (
     Throttle,
     Steer,
@@ -18,6 +18,7 @@ from src.messages.all_messages import (
     Handbrake,
     ModelSpeed,
     ModelSteer,
+    SpeedLimit
 )
 from src.others.others import get_nested_config
 
@@ -85,6 +86,8 @@ class Vehicle:
         self.sub_model_speed = MessageSubscriber(ModelSpeed)
         self.sub_model_steer = MessageSubscriber(ModelSteer)
         
+        self.send_speed_lim = MessageSender(SpeedLimit)
+        
     def set_autopilot(self, enable: bool):
         self.vehicle.set_autopilot(enable)
         self._autopilot = enable
@@ -125,6 +128,7 @@ class Vehicle:
         manual     = control.manual_gear_shift
         gear       = control.gear
 
+        self.send_speed_lim.send(self.vehicle.get_speed_limit())
         if filter:
             throttle   = self.throttle_filter.step(throttle)
             brake      = self.brake_filter.step(brake)

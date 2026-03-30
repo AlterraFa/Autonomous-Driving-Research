@@ -74,7 +74,8 @@ class Logger(Console):
         
     @property
     def current_timestamp(self):
-        return datetime.now().strftime("[%Y/%m/%d-%H:%M:%S]")
+        now = datetime.now()
+        return f"[{now.strftime('%d/%m/%Y-%H:%M:%S')}.{now.microsecond // 1000:03d}]"
     
     def __print_once(self, message_func, *args, **kwargs):
         """Print the log only once per unique call site."""

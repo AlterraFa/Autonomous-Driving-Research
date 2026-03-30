@@ -10,12 +10,9 @@ import pygame
 from src.messages.logger import Logger
 logger = Logger()
 
-from src.spawn.actor_spawner import Spawn
-from src.spawn.sensor_spawner import RGB, GNSS, IMU
 from src.control.world import World
 
 from mode import MODE_RUNNERS
-from mode.utils import FREQ, MEAN_DELAY, STDDEV_DELAY, LAT_STDDEV, LON_STDDEV
 
 
 class MainArgumentParser(argparse.ArgumentParser):
@@ -72,21 +69,10 @@ def main(args):
     virt_world = World(client, args.traffic_port)
     virt_world.sync           = args.sync
     virt_world.delta          = args.delay
-    virt_world.disable_render = True
+    virt_world.disable_render = False
     virt_world.apply_settings()
 
-    rgb_sensor  = RGB(virt_world.world)
-    gnss_sensor = GNSS(virt_world.world, freq_hz=FREQ, mu_ms=MEAN_DELAY, sigma_ms=STDDEV_DELAY)
-    gnss_sensor.set_attribute("noise_lat_stddev", LAT_STDDEV / 111320.0)
-    gnss_sensor.set_attribute("noise_lon_stddev", LON_STDDEV / 111320.0)
-    imu_sensor  = IMU(virt_world.world)
-    imu_sensor.set_attribute("noise_gyro_bias_x", 0.005)
-    imu_sensor.set_attribute("noise_gyro_bias_y", 0.005)
-    sensors = (rgb_sensor, gnss_sensor, imu_sensor)
-
     folder  = os.path.dirname(os.path.abspath(__file__))
-    spawner = Spawn(virt_world.world)
-    spawner.despawn_vehicles()
 
     viewer_args = {
         "world"  : virt_world,
@@ -96,11 +82,10 @@ def main(args):
         "fps"    : args.fps,
     }
 
-    lp = MODE_RUNNERS[args.mode](args, client, virt_world, sensors, spawner, folder, viewer_args)
+    lp = MODE_RUNNERS[args.mode](args, client, virt_world, folder, viewer_args)
 
     if lp is not None:
         lp.dump_stats("profile_results.lprof")
-    spawner.despawn_vehicles()
     
     
 if __name__ == "__main__":
@@ -218,7 +203,16 @@ if __name__ == "__main__":
         action = "store_true",
         help = "Enable Pygame headless rendering"
     )
-    
+    replay_parser.add_argument(
+        "--clear-npcs",
+        action = "store_true",
+        help = "Clear out all NPCs rendering"
+    )
+    replay_parser.add_argument(
+        "--redo-traj",
+        action = "store_true",
+        help = "Redo Trajectory logging"
+    )
 
     # ====================================================== #
     #                  INFERENCE ARGUMENT

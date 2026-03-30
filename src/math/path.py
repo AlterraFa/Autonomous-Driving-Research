@@ -10,6 +10,7 @@ import networkx as nx
 import math
 import time
 
+from scipy.optimize import linear_sum_assignment
 from scipy.interpolate import interp1d
 from scipy.spatial import cKDTree
 from src.messages.logger import Logger
@@ -17,6 +18,16 @@ from src.control.world import World
 
 from numba import njit
 import pyclothoids
+# --- Global Tuning Configurations ---
+JUNCTION_TURN_ANGLE_THRESHOLD = 50.0
+SPLINE_MIN_POINTS = 20
+SPLINE_POINTS_MULTIPLIER = 5
+SMOOTHING_BLEND_HALF_WINDOW = 4
+SMOOTHING_WINDOW_SIZE = 3
+ALIGN_TOLERANCE = 1e-2
+SPLINE_DEDUPLICATION_TOLERANCE = 1e-3
+B_SMOOTH_S = 2.0
+B_SMOOTH_K = 3
 
 
 def wrap_to_pi(theta):
@@ -133,12 +144,18 @@ class PathHandler(NodeFinder):
         self.seg_len = np.linalg.norm(self.seg_vec, axis=1)
 
         # --- interpolation in s ---
-        self.x_of_s = interp1d(self.s, self.path_xyz[:, 0], kind="linear",
-                               bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 0], self.path_xyz[-1, 0]))
-        self.y_of_s = interp1d(self.s, self.path_xyz[:, 1], kind="linear",
-                               bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 1], self.path_xyz[-1, 1]))
-        self.z_of_s = interp1d(self.s, self.path_xyz[:, 2], kind="linear",
-                               bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 2], self.path_xyz[-1, 2]))
+        from scipy.interpolate import PchipInterpolator
+        if len(self.s) >= 4:
+            self.x_of_s = PchipInterpolator(self.s, self.path_xyz[:, 0], extrapolate=extrapolate)
+            self.y_of_s = PchipInterpolator(self.s, self.path_xyz[:, 1], extrapolate=extrapolate)
+            self.z_of_s = PchipInterpolator(self.s, self.path_xyz[:, 2], extrapolate=extrapolate)
+        else:
+            self.x_of_s = interp1d(self.s, self.path_xyz[:, 0], kind="linear",
+                                   bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 0], self.path_xyz[-1, 0]))
+            self.y_of_s = interp1d(self.s, self.path_xyz[:, 1], kind="linear",
+                                   bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 1], self.path_xyz[-1, 1]))
+            self.z_of_s = interp1d(self.s, self.path_xyz[:, 2], kind="linear",
+                                   bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 2], self.path_xyz[-1, 2]))
 
         # --- interpolation in t if available ---
         if self.has_time:
@@ -148,13 +165,20 @@ class PathHandler(NodeFinder):
             t_col = defined_path[:, -1].astype(float)[keep]
             self.t = np.cumsum(t_col)
             
-            self.x_of_t = interp1d(self.t, self.path_xyz[:, 0], kind="linear",
-                                   bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 0], self.path_xyz[-1, 0]))
-            self.y_of_t = interp1d(self.t, self.path_xyz[:, 1], kind="linear",
-                                   bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 1], self.path_xyz[-1, 1]))
-            self.z_of_t = interp1d(self.t, self.path_xyz[:, 2], kind="linear",
-                                   bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 2], self.path_xyz[-1, 2]))
-            self.t_of_s = interp1d(self.s, self.t, kind = "linear",
+            if len(self.t) >= 4:
+                self.x_of_t = PchipInterpolator(self.t, self.path_xyz[:, 0], extrapolate=extrapolate)
+                self.y_of_t = PchipInterpolator(self.t, self.path_xyz[:, 1], extrapolate=extrapolate)
+                self.z_of_t = PchipInterpolator(self.t, self.path_xyz[:, 2], extrapolate=extrapolate)
+            else:
+                self.x_of_t = interp1d(self.t, self.path_xyz[:, 0], kind="linear",
+                                       bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 0], self.path_xyz[-1, 0]))
+                self.y_of_t = interp1d(self.t, self.path_xyz[:, 1], kind="linear",
+                                       bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 1], self.path_xyz[-1, 1]))
+                self.z_of_t = interp1d(self.t, self.path_xyz[:, 2], kind="linear",
+                                       bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 2], self.path_xyz[-1, 2]))
+            
+            # keep time interpolation linear to prevent non-monotonic mappings
+            self.t_of_s = interp1d(self.s, self.t, kind="linear",
                                    bounds_error=False, fill_value="extrapolate" if extrapolate else (t_col[0], t_col[-1]))
 
         else:
@@ -461,6 +485,8 @@ class BranchingPath:
         segment_lengths = np.linalg.norm(diffs, axis=1)
         return np.cumsum(np.concatenate([[0], segment_lengths]))
                 
+from src.messages.all_messages import ServerFps
+from src.messages.message_handler import MessageSubscriber
 class TurnClassify:
     def __init__(self, world: World, threshold_deg: float = 45):
         self.thresh_deg = threshold_deg
@@ -477,6 +503,7 @@ class TurnClassify:
             'exit_wp_id': None
         }
         self.log = Logger()
+        self.sub_server_fps = MessageSubscriber(ServerFps)
 
     def _interpolate_junction_path(self, entry_wp, exit_wp, step: float = 0.5):
         """
@@ -582,18 +609,19 @@ class TurnClassify:
             possible_pairs = _find_entry_clusters(wp_pairs, waypoints)                    
             choosen_pairs = _find_exit(possible_pairs, waypoints)
 
+            server_fps = self.sub_server_fps.receive()
             if debug:
                 self.virt_world.world.debug.draw_point(
                     choosen_pairs[0].transform.location,
                     size=0.18,
                     color=carla.Color(0, 0, 255),
-                    life_time=1.5 * (1 / 70)
+                    life_time=3.0 * (1 / server_fps)
                 )
                 self.virt_world.world.debug.draw_point(
                     choosen_pairs[1].transform.location,
                     size=0.18,
                     color=carla.Color(0, 0, 255),
-                    life_time=1.5 * (1 / 70)
+                    life_time=3.0 * (1 / server_fps)
                 )
             
             entry_wp = choosen_pairs[0]
@@ -671,9 +699,9 @@ class WaypointsAlign:
         carla_map = world.world.get_map()
         waypoints = carla_map.generate_waypoints(distance=waypoint_distance)
 
-        wp_dict = {(wp.transform.location.x, wp.transform.location.y): wp for wp in waypoints}
+        wp_dict = {(wp.transform.location.x, wp.transform.location.y, wp.transform.location.z): wp for wp in waypoints}
         _wp_list = list(wp_dict.values())
-        _wps = np.array([[wp.transform.location.x, wp.transform.location.y] for wp in _wp_list])
+        _wps = np.array([[wp.transform.location.x, wp.transform.location.y, wp.transform.location.z] for wp in _wp_list])
         _tree = cKDTree(_wps)
 
         self._wp_list = _wp_list
@@ -685,7 +713,7 @@ class WaypointsAlign:
         # Add deduplication here if you ever experience a ValueError.
         x, y, z = points[:, 0], points[:, 1], points[:, 2]
                     
-        tck, u = splprep([x, y, z], s=2.0, k=3)
+        tck, u = splprep([x, y, z], s=B_SMOOTH_S, k=B_SMOOTH_K)
         
         new_u = np.linspace(0, 1, len(points))
         smooth_x, smooth_y, smooth_z = splev(new_u, tck)
@@ -701,10 +729,10 @@ class WaypointsAlign:
         segs = self.world.get_segments_from_points("junction", np.array([point]))
         return segs[0].id if segs else None
 
-    def spatial_align(self, coordinates: np.ndarray):
+    def _filter_valid_junctions(self, coordinates: np.ndarray):
+        
         junctions = self.world.get_segments_from_points("junction", coordinates)
 
-        # ========== Filter out duplicated adjacent junctions ============
         last_jid = None
         for junction_id in range(len(junctions) - 1, -1, -1):
             if junctions[junction_id].id == last_jid:
@@ -712,109 +740,193 @@ class WaypointsAlign:
             else:
                 last_jid = junctions[junction_id].id
 
-        jids =[self.get_jid_for_point(p) for p in coordinates]
+        valid_jids = set()
+        for j in junctions:
+            is_turn = False
+            for entry_wp, exit_wp in j.get_waypoints(carla.LaneType.Driving):
+                y1 = entry_wp.transform.rotation.yaw
+                y2 = exit_wp.transform.rotation.yaw
+                diff = abs((y2 - y1 + 180) % 360 - 180)
+                if diff > JUNCTION_TURN_ANGLE_THRESHOLD:
+                    is_turn = True
+                    break
+            if is_turn:
+                valid_jids.add(j.id)
 
-        # ================ Grouping coordinate to respective junctions =================
-        groups: list[np.ndarray] = []
-        current_group: list =[]
+        jids = [self.get_jid_for_point(p) for p in coordinates]
+        jids = [jid if jid in valid_jids else None for jid in jids]
+        junction_by_id = {j.id: j for j in junctions}
+        
+        return jids, junction_by_id
+
+    def _group_coordinates_by_junction(self, coordinates: np.ndarray, heading: np.ndarray, jids: list):
+        groups: list[tuple] = []
+        current_group: list = []
         current_jid = jids[0]
+        group_start = 0
 
         if current_jid is not None:
-            current_group.append(coordinates[0])
+            current_group.append(np.stack([coordinates[0], heading[0]]))
 
-        for pt, jid in zip(coordinates[1:], jids[1:]):
+        for ci, (pt, head, jid) in enumerate(zip(coordinates[1:], heading[1:], jids[1:]), start=1):
+            transform = np.stack([pt, head])
             if jid == current_jid:
                 if jid is not None:
-                    current_group.append(pt)
+                    current_group.append(transform)
             else:
                 if current_jid is not None and current_group:
-                    groups.append(np.array(current_group))
-                current_group = [pt] if jid is not None else[]
+                    groups.append((current_jid, np.array(current_group), ci))
+                current_group = [transform] if jid is not None else []
                 current_jid = jid
+                group_start = ci
 
         if current_jid is not None and current_group:
-            groups.append(np.array(current_group))
+            groups.append((current_jid, np.array(current_group), len(coordinates)))
 
-        junctions_metadata_groups =[]
+        return groups
 
-        # -- Precompute the path through junctions
-        for idx, (coordinate_group, junction) in enumerate(zip(groups, junctions)):
+    def _precompute_junction_paths(self, groups: list, junction_by_id: dict):
+        junctions_metadata_groups = []
+
+        for idx, (group_jid, coordinate_group, group_end) in enumerate(groups):
+            junction = junction_by_id.get(group_jid)
+            if junction is None:
+                junctions_metadata_groups.append(np.array([]))
+                continue
+
             wp_pairs = junction.get_waypoints(carla.LaneType.Driving)
-            possible_pairs = _find_entry_clusters(wp_pairs, coordinate_group[:1])
-            entry_wp, exit_wp = _find_exit(possible_pairs, coordinate_group[-1:])
+            possible_pairs = _find_entry_clusters(wp_pairs, coordinate_group[:1, :3])
 
-            # if idx in (1, ):
-            #     self.world.world.debug.draw_point(entry_wp.transform.location, size = 0.3, color = carla.Color(0, 255, 255), life_time = 60)
-            #     self.world.world.debug.draw_point(exit_wp.transform.location, size = 0.3, color = carla.Color(0, 255, 255), life_time = 60)
+            best_fit = float("inf")
+            best_entry_wp = None
+            best_exit_wp = None
+            best_wp_path = []
 
-            wp_in_junctions = waypoints_between(entry_wp, exit_wp)
-            # if idx == 1:
-            #     for point in wp_in_junctions:
-            #         self.world.world.debug.draw_point(point.transform.location, size = 0.3, color = carla.Color(0, 255, 255), life_time = 60)
+            for entry_wp_cand, exit_wp_cand in possible_pairs:
+                wp_path = waypoints_between(entry_wp_cand, exit_wp_cand)
+                path_pts = np.array([[wp.transform.location.x, wp.transform.location.y, wp.transform.location.z] for wp in wp_path])
 
-            raw_pts =[]
+                if len(path_pts) < 2:
+                    continue
+
+                path_tree = cKDTree(path_pts[:, :3])
+                dists, _ = path_tree.query(coordinate_group[:, :3])
+                fit = dists.mean()
+
+                if fit < best_fit:
+                    best_fit = fit
+                    best_entry_wp = entry_wp_cand
+                    best_exit_wp = exit_wp_cand
+                    best_wp_path = wp_path
+
+            if best_entry_wp is None:
+                entry_wp, exit_wp = _find_exit(possible_pairs, coordinate_group[-1:])
+                wp_in_junctions = waypoints_between(entry_wp, exit_wp)
+            else:
+                wp_in_junctions = best_wp_path
+
+            raw_pts = []
             for wp in wp_in_junctions:
                 loc = wp.transform.location
-                yaw = wp.transform.rotation.yaw
-                raw_pts.append([loc.x, loc.y, loc.z, yaw])
+                rot = wp.transform.rotation
+                raw_pts.append([loc.x, loc.y, loc.z, rot.roll, rot.pitch, rot.yaw])
 
-            raw_pts = np.array(raw_pts)
-                
-            junctions_metadata_groups.append(raw_pts)
+            junctions_metadata_groups.append(np.array(raw_pts))
 
-        # ============ Merge non-junction waypoints with junction metadata ============
-        combined_meta =[]
+        return junctions_metadata_groups
+
+    def _align_coordinates(self, coordinates: np.ndarray, jids: list, junctions_metadata_groups: list):
+        combined_meta = []
         group_iter = iter(junctions_metadata_groups)
 
-        i = 0; k = 0
+        i = 0
         while i < len(coordinates):
             jid = jids[i]
             if jid is None:
                 x, y, z = coordinates[i]
-                _, idx = self._tree.query([x, y])
+                _, idx = self._tree.query([x, y, z])
                 closest_wp = self._wp_list[idx]
                 loc = closest_wp.transform.location
-                yaw = closest_wp.transform.rotation.yaw
-                combined_meta.append([loc.x, loc.y, loc.z, yaw])
+                rot = closest_wp.transform.rotation
+                combined_meta.append([loc.x, loc.y, loc.z, rot.roll, rot.pitch, rot.yaw])
                 i += 1
             else:
                 try:
                     group_meta = next(group_iter)
-                except:
+                except StopIteration:
                     break
 
-                
-                
                 if len(group_meta) > 0:
-                    j_tree = cKDTree(group_meta[:, :2])
+                    junc_xyz = group_meta[:, :3]
+                    junc_seg = np.diff(junc_xyz, axis=0)
+                    junc_seglen = np.linalg.norm(junc_seg, axis=1)
+                    junc_arc = np.concatenate(([0.0], np.cumsum(junc_seglen)))
+                    junc_prev_s = 0.0
+                    junc_search = 0
+
                 start_jid = jid
                 while i < len(jids) and jids[i] == start_jid:
                     x, y, z = coordinates[i]
                     if len(group_meta) > 0:
-                        _, gi = j_tree.query([x, y])
-                        gx, gy, gz, gyaw = group_meta[int(gi)]
-                        combined_meta.append([float(gx), float(gy), float(gz), float(gyaw)])
+                        pt = np.array([x, y, z], dtype=float)
+                        best_s = junc_prev_s
+                        best_dist2 = np.inf
+                        best_seg = junc_search
+
+                        for si in range(junc_search, len(junc_seg)):
+                            A = junc_xyz[si]
+                            AB = junc_seg[si]
+                            ab_len2 = junc_seglen[si] ** 2
+
+                            if ab_len2 < 1e-18:
+                                tc = 0.0
+                            else:
+                                tc = float(np.clip(np.dot(pt - A, AB) / ab_len2, 0.0, 1.0))
+
+                            proj = A + tc * AB
+                            d2 = float(np.dot(pt - proj, pt - proj))
+                            cand_s = junc_arc[si] + tc * junc_seglen[si]
+
+                            if cand_s >= junc_prev_s - 1e-6 and d2 < best_dist2:
+                                best_dist2 = d2
+                                best_s = cand_s
+                                best_seg = si
+
+                        best_s = max(best_s, junc_prev_s)
+                        junc_prev_s = best_s
+                        junc_search = max(0, best_seg - 1)
+
+                        seg_idx = min(np.searchsorted(junc_arc[1:], best_s), len(junc_seg) - 1)
+                        local_t = (best_s - junc_arc[seg_idx]) / (junc_seglen[seg_idx] + 1e-12)
+                        local_t = float(np.clip(local_t, 0.0, 1.0))
+
+                        row_a = group_meta[seg_idx]
+                        row_b = group_meta[seg_idx + 1]
+                        interp_row = row_a + local_t * (row_b - row_a)
+                        
+                        combined_meta.append([float(x), float(y), float(z), 
+                                              float(interp_row[3]), float(interp_row[4]), float(interp_row[5])])
                     else:
-                        _, idx = self._tree.query([x, y])
+                        _, idx = self._tree.query([x, y, z])
                         closest_wp = self._wp_list[idx]
                         loc = closest_wp.transform.location
-                        yaw = closest_wp.transform.rotation.yaw
-                        combined_meta.append([loc.x, loc.y, loc.z, yaw])
+                        rot = closest_wp.transform.rotation
+                        combined_meta.append([x, y, z, rot.roll, rot.pitch, rot.yaw])
                     i += 1
 
-                k += 1
-                
+        return combined_meta
 
-        filtered_meta =[]
-        tol = 1e-2
+    def _filter_and_smooth_trajectory(self, coordinates: np.ndarray, combined_meta: list, jids: list):
+        filtered_meta = []
+        tol = ALIGN_TOLERANCE
         for i in range(len(combined_meta)):
-            closest_wp = np.array(combined_meta[i], dtype = float)[:3]
+            closest_wp = np.array(combined_meta[i], dtype=float)[:3]
 
             j = i
             backward_point = np.array(closest_wp)
             while j != 0:
-                backward_point = np.array(combined_meta[j], dtype = float)[:3]
-                if not np.allclose(closest_wp, backward_point, atol = tol):
+                backward_point = np.array(combined_meta[j], dtype=float)[:3]
+                if not np.allclose(closest_wp, backward_point, atol=tol):
                     break
                 j -= 1
             
@@ -822,29 +934,60 @@ class WaypointsAlign:
             forward_point = np.array(closest_wp)
             while k < len(combined_meta) - 1:
                 k += 1
-                forward_point = np.array(combined_meta[k], dtype = float)[:3]
-                if not np.allclose(closest_wp, forward_point, atol = tol):
+                forward_point = np.array(combined_meta[k], dtype=float)[:3]
+                if not np.allclose(closest_wp, forward_point, atol=tol):
                     break
 
             choose_backward = PathHandler._edge_opposite_test(coordinates[i], backward_point, closest_wp)
             choose_forward  = PathHandler._edge_opposite_test(coordinates[i], forward_point, closest_wp)
-            if choose_backward == choose_forward: 
-                Q = coordinates[i]
-            if choose_backward:
-                A = closest_wp
-                B = backward_point
-                P = np.array(coordinates[i], dtype = float)
-                Q = PathHandler._project_point_to_segment(P, A, B)
+            P = np.array(coordinates[i], dtype=float)
 
-            if choose_forward:
-                A = closest_wp
-                B = forward_point
-                P = np.array(coordinates[i], dtype = float)
-                Q = PathHandler._project_point_to_segment(P, A, B)
+            if choose_backward and choose_forward:
+                Q_bk = PathHandler._project_point_to_segment(P, closest_wp, backward_point)
+                Q_fw = PathHandler._project_point_to_segment(P, closest_wp, forward_point)
+                d_bk = np.dot(P - Q_bk, P - Q_bk)
+                d_fw = np.dot(P - Q_fw, P - Q_fw)
+                Q = Q_bk if d_bk < d_fw else Q_fw
+            elif choose_backward:
+                Q = PathHandler._project_point_to_segment(P, closest_wp, backward_point)
+            elif choose_forward:
+                Q = PathHandler._project_point_to_segment(P, closest_wp, forward_point)
+            else:
+                Q = closest_wp
                 
             filtered_meta += [[Q[0], Q[1], Q[2], 0]]
+        
+        filtered_meta = np.array(filtered_meta)
+        
+        N = SMOOTHING_BLEND_HALF_WINDOW
+        boundaries = [b for b in range(1, len(jids)) if (jids[b] is None) != (jids[b-1] is None)]
+        
+        for b in boundaries:
+            start = max(0, b - N)
+            end = min(len(filtered_meta), b + N)
+            if end - start < 3: 
+                continue
+            
+            window_size = SMOOTHING_WINDOW_SIZE
+            pad = window_size // 2
+            
+            for _ in range(2):
+                window = filtered_meta[start:end, :3]
+                new_window = np.copy(window)
+                for dim in range(3):
+                    padded = np.pad(window[:, dim], (pad, pad), mode='edge')
+                    new_window[:, dim] = np.convolve(padded, np.ones(window_size)/window_size, mode='valid')
+                filtered_meta[start:end, :3] = new_window
 
-        return np.array(filtered_meta)
+        return filtered_meta
+
+    def spatial_align(self, coordinates: np.ndarray, headings: np.ndarray):
+        jids, junction_by_id = self._filter_valid_junctions(coordinates)
+        groups = self._group_coordinates_by_junction(coordinates, headings, jids)
+        
+        junctions_metadata_groups = self._precompute_junction_paths(groups, junction_by_id)
+        combined_meta = self._align_coordinates(coordinates, jids, junctions_metadata_groups)
+        return self._filter_and_smooth_trajectory(coordinates, combined_meta, jids)
     
     def temporal_align(self, trajectories: np.ndarray, time_vect: np.ndarray):
 
@@ -859,9 +1002,9 @@ class WaypointsAlign:
 
     
     def align(self, trajectories: np.ndarray):
-        spatial_aligned = self.spatial_align(trajectories[:, :3])
+        spatial_aligned = self.spatial_align(trajectories[:, :3], trajectories[:, 4: ])
 
-        original_time = trajectories[:, -1]
+        original_time = trajectories[:, 3]
         temporal_aligned = self.temporal_align(spatial_aligned, original_time)
 
         return spatial_aligned[:, :3], temporal_aligned
@@ -918,9 +1061,14 @@ def _find_entry_clusters(wp_pairs, waypoints):
             
     return cluster
 
-def _find_exit(wp_pairs, waypoints):
-    
-    best_dist = float("inf")
+def _find_exit(wp_pairs, waypoints, trajectory_dir=None):
+    """
+    Find the exit waypoint pair closest to waypoints.
+    If trajectory_dir (2D unit vector) is provided, exits whose heading
+    doesn't match the trajectory direction receive a distance penalty,
+    preventing overshoot from selecting the wrong roundabout exit.
+    """
+    best_score = float("inf")
     best_entry = None
     best_loc = None
     best_exit = None
@@ -930,14 +1078,80 @@ def _find_exit(wp_pairs, waypoints):
         exit_xyz = np.array([loc.x, loc.y, loc.z])
         dists = np.linalg.norm(waypoints - exit_xyz, axis=1)
         min_d = dists.min()
-        if min_d < best_dist:
-            best_dist = min_d
+
+        score = min_d
+        if trajectory_dir is not None:
+            exit_fwd = exit_wp.transform.get_forward_vector()
+            exit_dir = np.array([exit_fwd.x, exit_fwd.y])
+            exit_norm = np.linalg.norm(exit_dir)
+            if exit_norm > 1e-6:
+                exit_dir /= exit_norm
+                cos_sim = np.dot(trajectory_dir, exit_dir)
+                # cos_sim: 1 = same dir, -1 = opposite
+                # Penalty: 0 for perfect match, up to dir_weight for opposite
+                dir_weight = 5.0
+                score += dir_weight * (1.0 - cos_sim) / 2.0
+
+        if score < best_score:
+            best_score = score
             best_entry = entry_wp
             best_exit = exit_wp
             best_loc = exit_xyz
 
     return best_entry, best_exit
 
+def get_fwd_vec(pitch_deg, yaw_deg):
+    """Converts CARLA Euler angles (degrees) to a normalized forward vector."""
+    p = np.radians(pitch_deg)
+    y = np.radians(yaw_deg)
+    
+    fx = np.cos(p) * np.cos(y)
+    fy = np.cos(p) * np.sin(y)
+    fz = np.sin(p)
+    return np.array([fx, fy, fz])
+
+def _unified_entry_exit_finder(wp_pairs, wp_metadata: np.ndarray):
+    # waypoints include location and may or may not have rotation (use cos sim)
+    traj_start_loc = wp_metadata[0, :3]
+    traj_end_loc   = wp_metadata[-1, :3]
+    
+    # Calculate vehicle heading at start and end
+    traj_start_fwd = get_fwd_vec(wp_metadata[0, 4], wp_metadata[0, 5])
+    traj_end_fwd   = get_fwd_vec(wp_metadata[-1, 4], wp_metadata[-1, 5])
+
+    best_pair = None
+    min_score = float('inf')
+    
+    for entry_wp, exit_wp in wp_pairs:
+        en_loc = np.array([entry_wp.transform.location.x, 
+                           entry_wp.transform.location.y, 
+                           entry_wp.transform.location.z])
+        ex_loc = np.array([exit_wp.transform.location.x, 
+                           exit_wp.transform.location.y, 
+                           exit_wp.transform.location.z])
+        
+        en_fwd_carla = entry_wp.transform.get_forward_vector()
+        en_fwd = np.array([en_fwd_carla.x, en_fwd_carla.y, en_fwd_carla.z])
+        
+        ex_fwd_carla = exit_wp.transform.get_forward_vector()
+        ex_fwd = np.array([ex_fwd_carla.x, ex_fwd_carla.y, ex_fwd_carla.z])
+        
+        dist_score = np.linalg.norm(en_loc - traj_start_loc) + \
+                     np.linalg.norm(ex_loc - traj_end_loc)
+                     
+        start_align = np.dot(en_fwd, traj_start_fwd)
+        end_align   = np.dot(ex_fwd, traj_end_fwd)
+        
+        orientation_penalty = (1.0 - start_align) + (1.0 - end_align)
+        
+        total_score = dist_score + (orientation_penalty * 5.0)
+
+        if total_score < min_score:
+            min_score = total_score
+            best_pair = (entry_wp, exit_wp)
+            
+    return best_pair, min_score
+        
 def waypoint_heading(wp):
     fwd = wp.transform.get_forward_vector()
     yaw = np.arctan2(fwd.y, fwd.x)
@@ -1009,7 +1223,10 @@ class OptimizePath:
                 if 'pos' in attrs:
                     coord_dict[nid] = attrs['pos']
                 elif 'x' in attrs and 'y' in attrs:
-                    coord_dict[nid] = (attrs['x'], attrs['y'])
+                    if 'z' in attrs:
+                        coord_dict[nid] = (attrs['x'], attrs['y'], attrs['z'])
+                    else:
+                        coord_dict[nid] = (attrs['x'], attrs['y'])
                 else:
                     raise ValueError(f"Node {nid} has no coordinate data")
             
@@ -1026,29 +1243,35 @@ class OptimizePath:
         """Find existing node within epsilon distance or create new one.
         Uses spatial hash grid for O(1) average lookup during building.
         """
-        x, y = loc.x, loc.y
+        x, y, z = loc.x, loc.y, loc.z
         
         # Compute grid cell coordinates
         grid_x = int(x / self._grid_size)
         grid_y = int(y / self._grid_size)
+        grid_z = int(z / self._grid_size)
         
-        # Check nearby grid cells (3x3 neighborhood for safety)
+        # Check nearby grid cells (3x3x3 neighborhood for safety)
         for dx in [-1, 0, 1]:
             for dy in [-1, 0, 1]:
-                cell_key = (grid_x + dx, grid_y + dy)
-                if cell_key in self._spatial_hash_grid:
-                    # Check all nodes in this cell
-                    for nid in self._spatial_hash_grid[cell_key]:
-                        node_x, node_y = nodes[nid]
-                        if math.hypot(x - node_x, y - node_y) < epsilon:
-                            return nid
+                for dz in [-1, 0, 1]:
+                    cell_key = (grid_x + dx, grid_y + dy, grid_z + dz)
+                    if cell_key in self._spatial_hash_grid:
+                        # Check all nodes in this cell
+                        for nid in self._spatial_hash_grid[cell_key]:
+                            node_x, node_y, node_z = nodes[nid]
+                            # Use 3D distance
+                            dx_node = x - node_x
+                            dy_node = y - node_y
+                            dz_node = z - node_z
+                            if (dx_node*dx_node + dy_node*dy_node + dz_node*dz_node) ** 0.5 < epsilon:
+                                return nid
         
         # Create new node
         nid = len(nodes)
-        nodes[nid] = (x, y)
+        nodes[nid] = (x, y, z)
         
         # Add to spatial hash grid
-        cell_key = (grid_x, grid_y)
+        cell_key = (grid_x, grid_y, grid_z)
         if cell_key not in self._spatial_hash_grid:
             self._spatial_hash_grid[cell_key] = []
         self._spatial_hash_grid[cell_key].append(nid)
@@ -1093,7 +1316,7 @@ class OptimizePath:
                 
                 # Only add node if new
                 if nid not in G.nodes:
-                    G.add_node(nid, x=nodes[nid][0], y=nodes[nid][1], pos=nodes[nid])
+                    G.add_node(nid, x=nodes[nid][0], y=nodes[nid][1], z=nodes[nid][2], pos=nodes[nid])
                 
                 if prev_id is not None and prev_id != nid:
                     edges_to_add.append((prev_id, nid))
@@ -1106,14 +1329,16 @@ class OptimizePath:
         return G, nodes
 
     def update_coordinates(self, new_coords_dict):
-        for nid, (x, y) in new_coords_dict.items():
+        for nid, coords in new_coords_dict.items():
             if nid in self.network.nodes:
-                self.network.nodes[nid]['x'] = x
-                self.network.nodes[nid]['y'] = y  
-                self.network.nodes[nid]['pos'] = (x, y)
+                self.network.nodes[nid]['x'] = coords[0]
+                self.network.nodes[nid]['y'] = coords[1]
+                if len(coords) > 2:
+                    self.network.nodes[nid]['z'] = coords[2]
+                self.network.nodes[nid]['pos'] = coords
 
     def get_positions(self):
-        return {nid: data.get('pos', (0, 0)) for nid, data in self.network.nodes(data=True)}
+        return {nid: data.get('pos', (0, 0, 0)) for nid, data in self.network.nodes(data=True)}
 
     def bfs_shortest_path(self, start, goal):
         from collections import deque
@@ -1169,8 +1394,8 @@ class OptimizePath:
         min_dist = float('inf')
         nearest_node = None
 
-        for node_id, (x, y) in coords_dict.items():
-            node_pos = np.array([x, y])
+        for node_id, coords in coords_dict.items():
+            node_pos = np.array(coords[:len(pos_array)])
             dist = np.linalg.norm(pos_array - node_pos)
             if dist < min_dist and dist <= max_distance:
                 min_dist = dist
@@ -1219,13 +1444,13 @@ class OptimizePath:
         pos_array = np.array(position, dtype=float)
         distant_nodes = []
 
-        for node_id, (x, y) in coords_dict.items():
-            node_pos = np.array([x, y])
+        for node_id, coords in coords_dict.items():
+            node_pos = np.array(coords[:len(pos_array)])
             dist = np.linalg.norm(pos_array - node_pos)
             
             if dist >= min_distance:
                 if max_distance is None or dist <= max_distance:
-                    distant_nodes.append((node_id, dist, (x, y)))
+                    distant_nodes.append((node_id, dist, coords))
 
         # Sort by distance
         distant_nodes.sort(key=lambda x: x[1])

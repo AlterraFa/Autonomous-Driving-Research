@@ -127,10 +127,12 @@ def reinit_sensors(virt_world, *sensors):
 
 def load_recording(args, client, virt_world, spawner, folder, replay_dir):
     map_name = replay_dir.split("/")[-2]
-    logger.INFO(f"Loading map: {map_name}")
-    client.load_world(map_name)
 
-    refresh_world_references(client, virt_world, spawner)
+    current_map = virt_world.world.get_map().name.split("/")[-1]
+    if map_name not in current_map:
+        logger.INFO(f"Loading map: {map_name}")
+        client.load_world(map_name)
+        refresh_world_references(client, virt_world, spawner)
 
     logger.INFO("Stabilizing world after map load...")
     for _ in range(20):

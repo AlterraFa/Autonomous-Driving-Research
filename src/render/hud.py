@@ -27,6 +27,7 @@ from src.messages.all_messages import (
     RegulateSpeedLog,
     TurnSignal,
     ModelAutopilot,
+    SpeedLimit
 )
 
 class HUD:
@@ -68,6 +69,7 @@ class HUD:
         self.sub_autopilot_logging      = MessageSubscriber(AutopilotLog)
         self.sub_regulate_speed_logging = MessageSubscriber(RegulateSpeedLog)
         self.sub_turn_signal            = MessageSubscriber(TurnSignal)
+        self.sub_speed_lim              = MessageSubscriber(SpeedLimit)
         
         # Model
         self.sub_model_autopilot_logging = MessageSubscriber(ModelAutopilot)
@@ -134,7 +136,7 @@ class HUD:
     def _read(self, sub, default="N/A"):
         """Helper to read latest subscriber value or fallback."""
         val = sub.receive()
-        return val if val is not None else default
+        return val if val is not None or val != "N/A" else default
 
     def draw_measurement(self):
         # Transparent overlay
@@ -154,6 +156,7 @@ class HUD:
         geo          = self._read(self.sub_geo, "N/A")
         client_runtime = self._read(self.sub_client_runtime, 0.0)
         server_runtime = self._read(self.sub_server_runtime, 0.0)
+        speed_lim      = self._read(self.sub_speed_lim, 0.0)
 
         accel_str = accel if isinstance(accel, str) else f"( {accel[0]: 6.2f}, {accel[1]: 6.2f}, {accel[2]: 6.2f} )"
         gyro_str  = gyro  if isinstance(gyro, str)  else f"( {gyro[0]: 6.2f}, {gyro[1]: 6.2f}, {gyro[2]: 6.2f} )"
@@ -176,7 +179,7 @@ class HUD:
             ("Server runtime:", f"{server_time_str} s", 3),
             ("Vehicle name:",   vehicle_name, 5),
             ("World name:",     world_name,   6),
-            ("Velocity:",       f"{velocity:.2f} (km/h)", 8),
+            ("Velocity:",       f"{velocity:.2f}/{speed_lim:.2f} (km/h)", 8),
             ("Heading:",        f"{heading:.1f}° {self.heading_to_cardinal(heading)}", 9),
             ("Acceleration:",   accel_str, 10),
             ("Gyroscope:",      gyro_str, 11),

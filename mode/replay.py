@@ -1,10 +1,15 @@
+import os, sys
 import time
 import numpy as np
 import line_profiler
+import carla
 
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 
 from src.messages.logger import Logger
+from src.messages.message_handler import MessageSender
+from src.messages.all_messages import ClearNPCs
+from src.others.data_processor import TrajectoryBuffer
 from src.spawn.sensor_spawner import SensorSpawn
 from src.control.vehicle_control import Vehicle
 from src.others.data_processor import ReplayHandler
@@ -13,19 +18,26 @@ from src.render.viewer import VIEWER_REGISTRY
 from .utils import (
     logger,
     start_at, stop_at,
+    MIN_SAVING_DIST,
     get_recording_duration,
-    reinit_sensors,
     load_recording,
     expand_replay_dirs,
     make_map_and_optimizer,
 )
 
+from src.spawn.actor_spawner import Spawn
+from src.spawn.sensor_spawner import RGB, GNSS, IMU
+from mode.utils import FREQ, MEAN_DELAY, STDDEV_DELAY, LAT_STDDEV, LON_STDDEV
 
-def run_replay(args, client, virt_world, sensors, spawner, folder, viewer_args):
-    global start_at, stop_at
-    rgb_sensor, gnss_sensor, imu_sensor = sensors
+temp_stop = stop_at
+
+def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
+    global start_at, stop_at, temp_stop
     replay_dirs = expand_replay_dirs(args.replay_dir)
     lp = None
+
+    spawner = Spawn(virt_world.world)
+    spawner.despawn_vehicles()
 
     for idx, replay_dir in enumerate(replay_dirs, start=1):
 
@@ -36,20 +48,17 @@ def run_replay(args, client, virt_world, sensors, spawner, folder, viewer_args):
         if not ret:
             logger.ERROR(f"Failed to load log at {path_2_recording}")
             continue
-
-        rgb_sensor, gnss_sensor, imu_sensor = reinit_sensors(
-            virt_world, rgb_sensor, gnss_sensor, imu_sensor
-        )
+        
 
         full_duration = get_recording_duration(path_2_recording)
         client.show_recorder_file_info(path_2_recording, False)
 
-        if stop_at < 0:
-            stop_at = full_duration
+        if temp_stop < 0:
+            temp_stop = full_duration
         if full_duration <= 0:
             logger.ERROR(f"Skip replay (duration <= 0): {replay_dir}")
             continue
-        actual_duration = stop_at - start_at
+        actual_duration = temp_stop - start_at
 
         spawner.despawn_vehicles()
         client.replay_file(path_2_recording, start_at, actual_duration + 10, 0)
@@ -79,7 +88,18 @@ def run_replay(args, client, virt_world, sensors, spawner, folder, viewer_args):
         }
         game_viewer = VIEWER_REGISTRY["replay"](**per_viewer_args)
 
-        sensors_metadata = {rgb_sensor: None, gnss_sensor: None, imu_sensor: None}
+        # -- Init sensors
+        rgb_sensor  = RGB(virt_world.world)
+        gnss_sensor = GNSS(virt_world.world, freq_hz=FREQ, mu_ms=MEAN_DELAY, sigma_ms=STDDEV_DELAY)
+        gnss_sensor.set_attribute("noise_lat_stddev", LAT_STDDEV / 111320.0)
+        gnss_sensor.set_attribute("noise_lon_stddev", LON_STDDEV / 111320.0)
+        imu_sensor  = IMU(virt_world.world)
+        imu_sensor.set_attribute("noise_gyro_bias_x", 0.005)
+        imu_sensor.set_attribute("noise_gyro_bias_y", 0.005)
+
+        sensors_metadata = {rgb_sensor: [None, True], gnss_sensor: [None, True], imu_sensor: [None, True]}
+        if args.clear_npcs:
+            sensors_metadata = sensors_metadata | {RGB(virt_world.world): [None, False]}
         if not SensorSpawn.test_sensor(game_viewer, sensors_metadata):
             logger.ERROR(f"Skipping replay due to sensor initialization failure: {replay_dir}")
             continue
@@ -99,6 +119,9 @@ def run_replay(args, client, virt_world, sensors, spawner, folder, viewer_args):
             dataset_dir, args.temporal,
             args.draw_waypoints if hasattr(args, "draw_waypoints") else False,
         )
+        if args.redo_traj:
+            traj_logger = TrajectoryBuffer(replay_dir, min_dt_s = MIN_SAVING_DIST)
+        else: traj_logger = None
 
         progress = Progress(
             TextColumn("[progress.description]{task.description}"),
@@ -118,13 +141,17 @@ def run_replay(args, client, virt_world, sensors, spawner, folder, viewer_args):
             replayer      = replayer,
             pbar          = (progress, pbar),
             map_processor = map_processor,
+            traj_logger   = traj_logger
         )
         lp.add_function(game_viewer.map_processor.retrieve_map)
 
         with progress:
+            send_clear_npcs = MessageSender(ClearNPCs)
+            send_clear_npcs.send(args.clear_npcs)
             lp_wrapper()
         progress.stop()
 
         time.sleep(1.0)
+        temp_stop = stop_at
 
     return lp

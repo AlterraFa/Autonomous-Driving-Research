@@ -15,9 +15,23 @@ from .utils import (
     make_map_and_optimizer,
 )
 
+from src.spawn.actor_spawner import Spawn
+from src.spawn.sensor_spawner import RGB, GNSS, IMU
+from mode.utils import FREQ, MEAN_DELAY, STDDEV_DELAY, LAT_STDDEV, LON_STDDEV
 
-def run_manual(args, client, virt_world, sensors, spawner, folder, viewer_args):
-    rgb_sensor, gnss_sensor, imu_sensor = sensors
+
+def run_manual(args, client, virt_world, folder, viewer_args):
+
+    rgb_sensor  = RGB(virt_world.world)
+    gnss_sensor = GNSS(virt_world.world, freq_hz=FREQ, mu_ms=MEAN_DELAY, sigma_ms=STDDEV_DELAY)
+    gnss_sensor.set_attribute("noise_lat_stddev", LAT_STDDEV / 111320.0)
+    gnss_sensor.set_attribute("noise_lon_stddev", LON_STDDEV / 111320.0)
+    imu_sensor  = IMU(virt_world.world)
+    imu_sensor.set_attribute("noise_gyro_bias_x", 0.005)
+    imu_sensor.set_attribute("noise_gyro_bias_y", 0.005)
+
+    spawner = Spawn(virt_world.world)
+    spawner.despawn_vehicles()
 
     spawner.spawn_mass_vehicle(num_npc, exclude=[VClass.Large, VClass.Tiny])
     spawner.spawn_single_vehicle(
@@ -28,7 +42,7 @@ def run_manual(args, client, virt_world, sensors, spawner, folder, viewer_args):
     controlling_vehicle = Vehicle(spawner.single_vehicle, virt_world.world)
 
     game_viewer = VIEWER_REGISTRY["manual"](**{**viewer_args, "vehicle": controlling_vehicle})
-    game_viewer.init_sensor({rgb_sensor: None, gnss_sensor: None, imu_sensor: None})
+    game_viewer.init_sensor({rgb_sensor: [None, True], gnss_sensor: [None, True], imu_sensor: [None, True]})
 
     lp = line_profiler.LineProfiler()
     lp.add_function(game_viewer.run)

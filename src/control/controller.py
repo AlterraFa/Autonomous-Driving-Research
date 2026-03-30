@@ -43,7 +43,7 @@ class Controller:
         self.view_name = "FIRST_PERSON"; self.view_changed = False
         self.camera_step = 1; self.camera_changed = False
         self.prev_keys_view = pygame.key.get_pressed()
-        self.toggle_map = False
+        self.toggle_map = True
         
         self.autopilot = False; self.model_autopilot = False
         self.throt_ctrl = 0; self.steer_ctrl = 0; self.brake_ctrl = 0
