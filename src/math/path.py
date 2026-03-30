@@ -116,11 +116,18 @@ class PathHandler(NodeFinder):
         self.log = Logger()
         super().__init__(15, defined_path[:, :3])
 
-        assert defined_path.ndim == 2 and defined_path.shape[1] in (3, 4), \
-            "defined_path must be (N,3) [x,y,z] or (N,4) [x,y,z,t]"
+        assert defined_path.ndim == 2 and defined_path.shape[1] in (3, 4, 6, 7), \
+            "defined_path must be (N,3) [x,y,z], (N,4) [x,y,z,t], (N,6) [x,y,z,r,p,y], or (N,7) [x,y,z,r,p,y,t]"
         
         self.path_xyz = defined_path[:, :3].astype(float)
-        self.has_time = defined_path.shape[1] == 4
+        self.has_rot = defined_path.shape[1] in (6, 7)
+        if self.has_rot:
+            self.path_rpy = defined_path[:, 3:6].astype(float)
+            self.path_rpy[:, 0] = np.rad2deg(np.unwrap(np.deg2rad(self.path_rpy[:, 0])))
+            self.path_rpy[:, 1] = np.rad2deg(np.unwrap(np.deg2rad(self.path_rpy[:, 1])))
+            self.path_rpy[:, 2] = np.rad2deg(np.unwrap(np.deg2rad(self.path_rpy[:, 2])))
+            
+        self.has_time = defined_path.shape[1] in (4, 7)
 
         # --- arc-length for projection ---
         diffs   = np.diff(self.path_xyz, axis=0)
@@ -140,6 +147,9 @@ class PathHandler(NodeFinder):
 
         self.path_xyz = self.path_xyz[keep]
         self.s = s[keep]
+        if self.has_rot:
+            self.path_rpy = self.path_rpy[keep]
+            
         self.seg_vec = np.diff(self.path_xyz, axis=0)
         self.seg_len = np.linalg.norm(self.seg_vec, axis=1)
 
@@ -149,6 +159,10 @@ class PathHandler(NodeFinder):
             self.x_of_s = PchipInterpolator(self.s, self.path_xyz[:, 0], extrapolate=extrapolate)
             self.y_of_s = PchipInterpolator(self.s, self.path_xyz[:, 1], extrapolate=extrapolate)
             self.z_of_s = PchipInterpolator(self.s, self.path_xyz[:, 2], extrapolate=extrapolate)
+            if self.has_rot:
+                self.roll_of_s = PchipInterpolator(self.s, self.path_rpy[:, 0], extrapolate=extrapolate)
+                self.pitch_of_s = PchipInterpolator(self.s, self.path_rpy[:, 1], extrapolate=extrapolate)
+                self.yaw_of_s = PchipInterpolator(self.s, self.path_rpy[:, 2], extrapolate=extrapolate)
         else:
             self.x_of_s = interp1d(self.s, self.path_xyz[:, 0], kind="linear",
                                    bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 0], self.path_xyz[-1, 0]))
@@ -156,6 +170,10 @@ class PathHandler(NodeFinder):
                                    bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 1], self.path_xyz[-1, 1]))
             self.z_of_s = interp1d(self.s, self.path_xyz[:, 2], kind="linear",
                                    bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 2], self.path_xyz[-1, 2]))
+            if self.has_rot:
+                self.roll_of_s = interp1d(self.s, self.path_rpy[:, 0], kind="linear", bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_rpy[0, 0], self.path_rpy[-1, 0]))
+                self.pitch_of_s = interp1d(self.s, self.path_rpy[:, 1], kind="linear", bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_rpy[0, 1], self.path_rpy[-1, 1]))
+                self.yaw_of_s = interp1d(self.s, self.path_rpy[:, 2], kind="linear", bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_rpy[0, 2], self.path_rpy[-1, 2]))
 
         # --- interpolation in t if available ---
         if self.has_time:
@@ -169,6 +187,10 @@ class PathHandler(NodeFinder):
                 self.x_of_t = PchipInterpolator(self.t, self.path_xyz[:, 0], extrapolate=extrapolate)
                 self.y_of_t = PchipInterpolator(self.t, self.path_xyz[:, 1], extrapolate=extrapolate)
                 self.z_of_t = PchipInterpolator(self.t, self.path_xyz[:, 2], extrapolate=extrapolate)
+                if self.has_rot:
+                    self.roll_of_t = PchipInterpolator(self.t, self.path_rpy[:, 0], extrapolate=extrapolate)
+                    self.pitch_of_t = PchipInterpolator(self.t, self.path_rpy[:, 1], extrapolate=extrapolate)
+                    self.yaw_of_t = PchipInterpolator(self.t, self.path_rpy[:, 2], extrapolate=extrapolate)
             else:
                 self.x_of_t = interp1d(self.t, self.path_xyz[:, 0], kind="linear",
                                        bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 0], self.path_xyz[-1, 0]))
@@ -176,6 +198,10 @@ class PathHandler(NodeFinder):
                                        bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 1], self.path_xyz[-1, 1]))
                 self.z_of_t = interp1d(self.t, self.path_xyz[:, 2], kind="linear",
                                        bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 2], self.path_xyz[-1, 2]))
+                if self.has_rot:
+                    self.roll_of_t = interp1d(self.t, self.path_rpy[:, 0], kind="linear", bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_rpy[0, 0], self.path_rpy[-1, 0]))
+                    self.pitch_of_t = interp1d(self.t, self.path_rpy[:, 1], kind="linear", bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_rpy[0, 1], self.path_rpy[-1, 1]))
+                    self.yaw_of_t = interp1d(self.t, self.path_rpy[:, 2], kind="linear", bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_rpy[0, 2], self.path_rpy[-1, 2]))
             
             # keep time interpolation linear to prevent non-monotonic mappings
             self.t_of_s = interp1d(self.s, self.t, kind="linear",
@@ -189,24 +215,44 @@ class PathHandler(NodeFinder):
     
     def pose(self, query: float, use_time: bool = False):
         """
-        Return [x, y, z].
+        Return [x, y, z] or [x, y, z, roll, pitch, yaw].
         If use_time=False -> query is arc-length s.
         If use_time=True  -> query is timestamp t (requires time column).
         """
         if use_time:
             if self.t is None:
                 raise RuntimeError("This path has no time column.")
-            return np.stack([
+            xyz = np.stack([
                 self.x_of_t(query),
                 self.y_of_t(query),
                 self.z_of_t(query)
             ], axis = -1)
+            
+            if self.has_rot:
+                rpy = np.stack([
+                    self.roll_of_t(query),
+                    self.pitch_of_t(query),
+                    self.yaw_of_t(query)
+                ], axis = -1)
+                rpy = (rpy + 180) % 360 - 180
+                return xyz, rpy
+            return xyz, None
         else:
-            return np.stack([
+            xyz = np.stack([
                 self.x_of_s(query),
                 self.y_of_s(query),
                 self.z_of_s(query)
             ], axis = -1)
+            
+            if self.has_rot:
+                rpy = np.stack([
+                    self.roll_of_s(query),
+                    self.pitch_of_s(query),
+                    self.yaw_of_s(query)
+                ], axis = -1)
+                rpy = (rpy + 180) % 360 - 180
+                return xyz, rpy
+            return xyz, None
 
     def project(self, point_xyz: np.ndarray):
         """
@@ -218,7 +264,7 @@ class PathHandler(NodeFinder):
           idx: segment index used
         """
 
-        p = np.asarray(point_xyz, dtype=float)
+        p = np.asarray(point_xyz, dtype=float)[:3]
 
         idx = self.update_state(p)
 
@@ -312,22 +358,45 @@ class PathHandler(NodeFinder):
         dist_travelled, *_, side_val = self.project(position)
         if not use_time:
             dist_offset = dist_travelled + np.array(offsets)
-            wp = self.pose(dist_offset)
+            wp, wp_rpy = self.pose(dist_offset)
         else: 
             if self.has_time == False:
                 self.log.ERROR(f"Temporal mode was disabled but you enabled `use_time` argument. Exiting...", exit_code = -1)
                 
             current_time = self.t_of_s(dist_travelled)
             time_offset = current_time + offsets
-            wp = self.pose(time_offset, True)
+            wp, wp_rpy = self.pose(time_offset, True)
 
         if merge:
-            wp = self._apply_merging(wp, side_val, offsets)
+            wp = self._loc_merging(wp, side_val, offsets)
+            if self.has_rot:
+                wp_rpy = self._rot_merging(wp, wp_rpy)
                 
         wp = np.asarray(wp)
-        return wp
+        return wp, wp_rpy
 
-    def _apply_merging(self, centerline_wps: np.ndarray, current_side_val: float, offsets: list[float], merge_fraction: float = 1.0):
+    def _rot_merging(self, merged_wps: list, centerline_rpy: np.ndarray):
+        """
+        Updates the yaw in centerline_rpy to match the new trajectory tangent defined by merged_wps.
+        """
+        if centerline_rpy is None: 
+            return None
+            
+        merged_rpy = np.copy(centerline_rpy)
+        for i in range(len(merged_wps)):
+            if i < len(merged_wps) - 1:
+                tangent = merged_wps[i+1][:3] - merged_wps[i][:3]
+            else:
+                tangent = merged_wps[i][:3] - merged_wps[i-1][:3]
+                
+            norm = np.linalg.norm(tangent)
+            if norm > 1e-6:
+                yaw = np.degrees(np.arctan2(tangent[1], tangent[0]))
+                merged_rpy[i, 2] = yaw
+                
+        return merged_rpy
+
+    def _loc_merging(self, centerline_wps: np.ndarray, current_side_val: float, offsets: list[float], merge_fraction: float = 1.0):
         """
         Shifts centerline waypoints laterally.
         merge_fraction: 0.0 to 1.0. Determines how far into the offsets the path 
@@ -352,9 +421,9 @@ class PathHandler(NodeFinder):
 
             # 3. Find the 'Right' vector
             if i < len(centerline_wps) - 1:
-                tangent = centerline_wps[i+1] - p_center
+                tangent = centerline_wps[i+1][:3] - p_center[:3]
             else:
-                tangent = p_center - centerline_wps[i-1]
+                tangent = p_center[:3] - centerline_wps[i-1][:3]
 
             up = np.array([0, 0, 1]) 
             right_vec = np.cross(tangent, up)
@@ -362,7 +431,8 @@ class PathHandler(NodeFinder):
             norm = np.linalg.norm(right_vec)
             if norm > 1e-6:
                 right_vec /= norm
-                p_merged = p_center + (right_vec * active_offset)
+                p_merged = np.copy(p_center)
+                p_merged[:3] = p_merged[:3] + (right_vec * active_offset)
             else:
                 p_merged = p_center
                 
@@ -451,23 +521,23 @@ class BranchingPath:
         closest_wp = waypoints[closest_idx]
 
         j = closest_idx
-        backward_point = closest_wp
+        closest_backward = closest_wp
         while j != 0:
-            backward_point = waypoints[j]
-            if not np.allclose(closest_wp, backward_point, atol = 1e-2):
+            closest_backward = waypoints[j]
+            if not np.allclose(closest_wp, closest_backward, atol = 1e-2):
                 break
             j -= 1
             
         k = closest_idx
-        forward_point = np.array(closest_wp)
+        closest_forward = np.array(closest_wp)
         while k != len(waypoints):
-            forward_point = waypoints[k]
-            if not np.allclose(closest_wp, forward_point, atol = 1e-2):
+            closest_forward = waypoints[k]
+            if not np.allclose(closest_wp, closest_forward, atol = 1e-2):
                 break
             k += 1
             
-        choose_backward = PathHandler._edge_opposite_test(compare_point, backward_point, closest_wp)
-        choose_forward  = PathHandler._edge_opposite_test(compare_point, forward_point, closest_wp)
+        choose_backward = PathHandler._edge_opposite_test(compare_point, closest_backward, closest_wp)
+        choose_forward  = PathHandler._edge_opposite_test(compare_point, closest_forward, closest_wp)
         if choose_backward == choose_forward: # Projected point too close to coordinates
             insert_idx  = closest_idx
         elif choose_backward:
@@ -880,12 +950,14 @@ class WaypointsAlign:
 
                         row_a = group_meta[seg_idx]
                         row_b = group_meta[seg_idx + 1]
-                        interp_row = row_a + local_t * (row_b - row_a)
+                        interp_xyz = row_a[:3] + local_t * (row_b[:3] - row_a[:3])
                         
-                        # combined_meta.append([float(x), float(y), float(z), 
-                        #                       float(interp_row[3]), float(interp_row[4]), float(interp_row[5])])
-                        combined_meta.append([float(interp_row[0]), float(interp_row[1]), float(interp_row[2]), 
-                                              float(interp_row[3]), float(interp_row[4]), float(interp_row[5])])
+                        rpy_A, rpy_B = row_a[3:6], row_b[3:6]
+                        diff_rpy = (rpy_B - rpy_A + 180) % 360 - 180
+                        interp_rpy = rpy_A + local_t * diff_rpy
+                        
+                        combined_meta.append([float(interp_xyz[0]), float(interp_xyz[1]), float(interp_xyz[2]), 
+                                              float(interp_rpy[0]), float(interp_rpy[1]), float(interp_rpy[2])])
                     else:
                         _, idx = self._tree.query([x, y, z])
                         closest_wp = self._wp_list[idx]
@@ -896,46 +968,75 @@ class WaypointsAlign:
 
         return combined_meta
 
+    @staticmethod
+    def _project_and_interpolate(P, A, B, rpy_A, rpy_B):
+        AB = B - A
+        denom = float(np.dot(AB, AB))
+        if denom < 1e-9:
+            return A.copy(), np.array(rpy_A).copy()
+        
+        t = float(np.dot(P - A, AB) / denom)
+        t = float(np.clip(t, 0.0, 1.0))
+        
+        Q = A + t * AB
+        
+        rpy_A = np.array(rpy_A, dtype=float)
+        rpy_B = np.array(rpy_B, dtype=float)
+        
+        diff = (rpy_B - rpy_A + 180) % 360 - 180
+        rpy_Q = rpy_A + t * diff
+        
+        return Q, rpy_Q
+
     def _filter_and_smooth_trajectory(self, coordinates: np.ndarray, combined_meta: list, jids: list):
         filtered_meta = []
         tol = ALIGN_TOLERANCE
         for i in range(len(combined_meta)):
             closest_wp = np.array(combined_meta[i], dtype=float)[:3]
+            rpy_closest = np.array(combined_meta[i], dtype=float)[3:6]
 
             j = i
-            backward_point = np.array(closest_wp)
+            closest_backward = np.array(closest_wp)
+            rpy_backward = rpy_closest
             while j != 0:
-                backward_point = np.array(combined_meta[j], dtype=float)[:3]
-                if not np.allclose(closest_wp, backward_point, atol=tol):
+                closest_backward = np.array(combined_meta[j], dtype=float)[:3]
+                if not np.allclose(closest_wp, closest_backward, atol=tol):
+                    rpy_backward = np.array(combined_meta[j], dtype=float)[3:6]
                     break
                 j -= 1
             
             k = i
-            forward_point = np.array(closest_wp)
+            closest_forward = np.array(closest_wp)
+            rpy_forward = rpy_closest
             while k < len(combined_meta) - 1:
                 k += 1
-                forward_point = np.array(combined_meta[k], dtype=float)[:3]
-                if not np.allclose(closest_wp, forward_point, atol=tol):
+                closest_forward = np.array(combined_meta[k], dtype=float)[:3]
+                if not np.allclose(closest_wp, closest_forward, atol=tol):
+                    rpy_forward = np.array(combined_meta[k], dtype=float)[3:6]
                     break
 
-            choose_backward = PathHandler._edge_opposite_test(coordinates[i], backward_point, closest_wp)
-            choose_forward  = PathHandler._edge_opposite_test(coordinates[i], forward_point, closest_wp)
+            choose_backward = PathHandler._edge_opposite_test(coordinates[i], closest_backward, closest_wp)
+            choose_forward  = PathHandler._edge_opposite_test(coordinates[i], closest_forward, closest_wp)
             P = np.array(coordinates[i], dtype=float)
 
             if choose_backward and choose_forward:
-                Q_bk = PathHandler._project_point_to_segment(P, closest_wp, backward_point)
-                Q_fw = PathHandler._project_point_to_segment(P, closest_wp, forward_point)
+                Q_bk, rpy_bk = WaypointsAlign._project_and_interpolate(P, closest_wp, closest_backward, rpy_closest, rpy_backward)
+                Q_fw, rpy_fw = WaypointsAlign._project_and_interpolate(P, closest_wp, closest_forward, rpy_closest, rpy_forward)
                 d_bk = np.dot(P - Q_bk, P - Q_bk)
                 d_fw = np.dot(P - Q_fw, P - Q_fw)
-                Q = Q_bk if d_bk < d_fw else Q_fw
+                if d_bk < d_fw:
+                    Q, rpy = Q_bk, rpy_bk
+                else:
+                    Q, rpy = Q_fw, rpy_fw
             elif choose_backward:
-                Q = PathHandler._project_point_to_segment(P, closest_wp, backward_point)
+                Q, rpy = WaypointsAlign._project_and_interpolate(P, closest_wp, closest_backward, rpy_closest, rpy_backward)
             elif choose_forward:
-                Q = PathHandler._project_point_to_segment(P, closest_wp, forward_point)
+                Q, rpy = WaypointsAlign._project_and_interpolate(P, closest_wp, closest_forward, rpy_closest, rpy_forward)
             else:
                 Q = closest_wp
+                rpy = rpy_closest
                 
-            filtered_meta += [[Q[0], Q[1], Q[2], 0]]
+            filtered_meta += [[Q[0], Q[1], Q[2], rpy[0], rpy[1], rpy[2]]]
         
         filtered_meta = np.array(filtered_meta)
         
@@ -976,8 +1077,9 @@ class WaypointsAlign:
         
         original_indices = np.linspace(0, num_original - 1, num_original)
         filtered_indices = np.linspace(0, num_original - 1, num_filtered)
-        temporal_aligned = trajectories.copy()
-        temporal_aligned[:, -1] = np.interp(filtered_indices, original_indices, time_vect)
+        temporal_aligned = np.zeros((num_filtered, 7))
+        temporal_aligned[:, :6] = trajectories[:, :6]
+        temporal_aligned[:, 6] = np.interp(filtered_indices, original_indices, time_vect)
         return temporal_aligned
 
     
@@ -987,7 +1089,7 @@ class WaypointsAlign:
         original_time = trajectories[:, 3]
         temporal_aligned = self.temporal_align(spatial_aligned, original_time)
 
-        return spatial_aligned[:, :3], temporal_aligned
+        return spatial_aligned, temporal_aligned
 
 def consecutive_angles(points: np.ndarray, signed: bool = False) -> np.ndarray:
     pts = points[:, :2]

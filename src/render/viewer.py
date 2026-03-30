@@ -52,7 +52,8 @@ from src.messages import (
     AutopilotLog,
     RegulateSpeedLog,
     SteerAngle, 
-    ClearNPCs
+    ClearNPCs,
+    Rotation, GlobalWP
 )
 from src.messages.logger import Logger
 
@@ -165,6 +166,7 @@ class Viewer(ABC):
         self.send_client_runtime = MessageSender(ClientRuntime)
         self.send_server_runtime = MessageSender(ServerRuntime)
         self.send_location = MessageSender(Location)
+        self.send_rotation = MessageSender(Rotation)
         
         # Senders for control logging
         self.send_model_autopilot_logging = MessageSender(ModelAutopilot)
@@ -189,6 +191,7 @@ class Viewer(ABC):
         self.sub_turn_signal = MessageSubscriber(TurnSignal)
         self.sub_server_runtime = MessageSubscriber(ServerRuntime)
         self.sub_polylines = MessageSubscriber(PolylinesCmd)
+        self.sub_global_wp = MessageSubscriber(GlobalWP)
 
     def attach_plugins(self, **plugins):
         for name, value in plugins.items():
@@ -341,7 +344,16 @@ class Viewer(ABC):
         # Velocity fallback
         self.velocity = self.virt_vehicle.get_velocity(False)
 
+        vehicle_transform = self.vehicle.get_transform()
+        vehicle_rotation = vehicle_transform.rotation
+
+        vehicle_rotation = np.array([
+            vehicle_rotation.roll,
+            vehicle_rotation.pitch,
+            vehicle_rotation.yaw
+        ])
         #  Publish to subscribers
+        self.send_rotation.send(vehicle_rotation)
         self.send_server_fps.send(self.server_fps)
         self.send_client_fps.send(self.clock.get_fps())
         self.send_vehicle_name.send(self.vehicle_name)
@@ -545,11 +557,7 @@ class ManualViewer(Viewer):
                 vehicle_location.y + offset_y,
                 vehicle_location.z  # same height as center
             ])
-            vehicle_rotation = np.array(            vehicle_rotation = np.array([
-                vehicle_rotation.roll,
-                vehicle_rotation.pitch,
-                vehicle_rotation.yaw
-            ])[
+            vehicle_rotation = np.array([
                 vehicle_rotation.roll,
                 vehicle_rotation.pitch,
                 vehicle_rotation.yaw
@@ -590,6 +598,10 @@ class ReplayViewer(Viewer):
                 # Replay-specific operations
                 self._handle_trajectory_logging()
                 self._handle_replay_step(unrouted_map, routed_map)
+                
+                global_wp = self.sub_global_wp.receive()
+                view = {"x": global_wp[-1, 0], "y": global_wp[-1, 1], "z": global_wp[-1, 2] + 1.5, "roll": global_wp[-1, 3], "pitch": global_wp[-1, 4], "yaw": global_wp[-1, 5]}
+                self.sensor_manager.get_sensor("rgb_1").change_view(**view)
 
                 # Render (replay mode)
                 self._render_base_hud(frame)

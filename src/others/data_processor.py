@@ -283,16 +283,16 @@ class ReplayHandler:
         
         
         curr_dist, *_, lat_err = self.path_handler.project(position)
-        mid_global_scout = self.path_handler.waypoints(
+        global_scout, _ = self.path_handler.waypoints(
             position, self.scout_points
         )
         
-        mid_global = self.path_handler.waypoints(
+        global_loc, global_rot = self.path_handler.waypoints(
             position, self.offset, use_time = self.use_temporal, merge = True
         )
-        mid_ego = global_2_local(vehicle_location, mid_global, heading)
+        mid_ego = global_2_local(vehicle_location, global_loc, heading)
         
-        path_branches  = self.branching_path.brancher(mid_global, mid_global_scout, persist_dist = 20)
+        path_branches  = self.branching_path.brancher(global_loc, global_scout, persist_dist = 20)
         ego_branches = np.empty_like(path_branches)[..., :2]
         if path_branches.shape[0] > 1:
             self.road_type = "multi"
@@ -303,14 +303,10 @@ class ReplayHandler:
                 
                 
         if self.debug:
-            mid_global[:, -1] += .5
-            self.virt_world.draw_waypoints(mid_global, 2.0 * (1 / server_fps), size = .1, color = (255, 0, 0))
+            global_loc[:, -1] += .5
+            self.virt_world.draw_waypoints(global_loc, 2.0 * (1 / server_fps), size = .1, color = (255, 0, 0))
 
         if self.turn_classify:
-            global_scout = self.path_handler.waypoints(
-                position, self.scout_points
-            )
-            
             is_at_junction , junction = self.virt_world.get_waypoint_junction(global_scout[14])
             switch_junction, other_junction = self.virt_world.get_waypoint_junction(global_scout[19])
             if is_at_junction and switch_junction:
@@ -321,7 +317,7 @@ class ReplayHandler:
         else:
             turn_signal = -1
 
-        self.send_global_wp.send(mid_global)
+        self.send_global_wp.send(np.concatenate([global_loc, global_rot], axis = 1))
         self.send_turn_signal.send(turn_signal)
 
 

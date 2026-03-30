@@ -108,6 +108,13 @@ class Location(Enum):
     msgType = (list, np.ndarray, torch.Tensor)
     default = staticmethod(lambda: np.zeros(3, dtype=float))
 
+class Rotation(Enum):
+    Queue = "General"
+    Owner = "Viewer"
+    msgID = 14
+    msgType = (list, np.ndarray, torch.Tensor)
+    default = staticmethod(lambda: np.zeros(3, dtype=float))
+
 class GlobalWP(Enum):
     Queue = "General"
     Owner = "ReplayHandler"

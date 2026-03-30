@@ -237,7 +237,7 @@ class Map:
         # ================= Draw path on map ====================
         
         if hasattr(self, "path_handler"):
-            global_wp = self.path_handler.waypoints(
+            global_wp, _ = self.path_handler.waypoints(
                 location_bfscale, self.offset_path
             )
 
