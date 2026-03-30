@@ -644,7 +644,7 @@ class ReplayViewer(Viewer):
         if not hasattr(self, 'playback_rate') or not hasattr(self, 'playback_rate_window'):
             self.playback_rate_window = deque(maxlen=30)  # ~2-3 seconds at 10-15 FPS
             self.playback_rate = 0.0
-        if self.replayer is not None and self.duration and self.duration <= self.sub_server_runtime.receive():
+        if self.duration and self.duration <= self.sub_server_runtime.receive():
             self.log.INFO("Reached replay limit. Goodbye.")
             return True
         else:
@@ -687,6 +687,7 @@ class ReplayViewer(Viewer):
     def _handle_trajectory_logging(self):
         """Handle trajectory logging for recording mode"""
         if self.traj_logger:
+            self.log.WARNING("RE RECORDING TRAJECTORY IN PROGRESS!", once = True)
             vehicle_transform = self.vehicle.get_transform()
             vehicle_location = vehicle_transform.location
             vehicle_rotation = vehicle_transform.rotation

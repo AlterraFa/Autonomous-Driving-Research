@@ -112,16 +112,18 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
         map_processor, path_optimizer = make_map_and_optimizer(virt_world)
         game_viewer.attach_plugins(path_optimizer=path_optimizer)
 
-        recorded_traj = np.load(path_2_waypoints)
-        map_processor.register_wp(recorded_traj)
-        replayer = ReplayHandler(
-            virt_world, recorded_traj,
-            dataset_dir, args.temporal,
-            args.draw_waypoints if hasattr(args, "draw_waypoints") else False,
-        )
         if args.redo_traj:
             traj_logger = TrajectoryBuffer(replay_dir, min_dt_s = MIN_SAVING_DIST)
-        else: traj_logger = None
+            replayer = None
+        else: 
+            traj_logger = None
+            recorded_traj = np.load(path_2_waypoints)
+            map_processor.register_wp(recorded_traj)
+            replayer = ReplayHandler(
+                virt_world, recorded_traj,
+                dataset_dir, args.temporal,
+                args.draw_waypoints if hasattr(args, "draw_waypoints") else False,
+            )
 
         progress = Progress(
             TextColumn("[progress.description]{task.description}"),

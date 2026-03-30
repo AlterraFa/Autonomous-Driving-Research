@@ -19,7 +19,7 @@ from src.control.world import World
 from numba import njit
 import pyclothoids
 # --- Global Tuning Configurations ---
-JUNCTION_TURN_ANGLE_THRESHOLD = 50.0
+JUNCTION_TURN_ANGLE_THRESHOLD = 0
 SPLINE_MIN_POINTS = 20
 SPLINE_POINTS_MULTIPLIER = 5
 SMOOTHING_BLEND_HALF_WINDOW = 4
@@ -766,10 +766,10 @@ class WaypointsAlign:
         group_start = 0
 
         if current_jid is not None:
-            current_group.append(np.stack([coordinates[0], heading[0]]))
+            current_group.append(np.concatenate([coordinates[0], heading[0]]))
 
         for ci, (pt, head, jid) in enumerate(zip(coordinates[1:], heading[1:], jids[1:]), start=1):
-            transform = np.stack([pt, head])
+            transform = np.concatenate([pt, head])
             if jid == current_jid:
                 if jid is not None:
                     current_group.append(transform)
@@ -795,35 +795,13 @@ class WaypointsAlign:
                 continue
 
             wp_pairs = junction.get_waypoints(carla.LaneType.Driving)
-            possible_pairs = _find_entry_clusters(wp_pairs, coordinate_group[:1, :3])
-
-            best_fit = float("inf")
-            best_entry_wp = None
-            best_exit_wp = None
-            best_wp_path = []
-
-            for entry_wp_cand, exit_wp_cand in possible_pairs:
-                wp_path = waypoints_between(entry_wp_cand, exit_wp_cand)
-                path_pts = np.array([[wp.transform.location.x, wp.transform.location.y, wp.transform.location.z] for wp in wp_path])
-
-                if len(path_pts) < 2:
-                    continue
-
-                path_tree = cKDTree(path_pts[:, :3])
-                dists, _ = path_tree.query(coordinate_group[:, :3])
-                fit = dists.mean()
-
-                if fit < best_fit:
-                    best_fit = fit
-                    best_entry_wp = entry_wp_cand
-                    best_exit_wp = exit_wp_cand
-                    best_wp_path = wp_path
-
-            if best_entry_wp is None:
-                entry_wp, exit_wp = _find_exit(possible_pairs, coordinate_group[-1:])
+            best_pair, min_score = _unified_entry_exit_finder(wp_pairs, coordinate_group)
+            
+            if best_pair is not None:
+                entry_wp, exit_wp = best_pair
                 wp_in_junctions = waypoints_between(entry_wp, exit_wp)
             else:
-                wp_in_junctions = best_wp_path
+                wp_in_junctions = []
 
             raw_pts = []
             for wp in wp_in_junctions:
@@ -904,7 +882,9 @@ class WaypointsAlign:
                         row_b = group_meta[seg_idx + 1]
                         interp_row = row_a + local_t * (row_b - row_a)
                         
-                        combined_meta.append([float(x), float(y), float(z), 
+                        # combined_meta.append([float(x), float(y), float(z), 
+                        #                       float(interp_row[3]), float(interp_row[4]), float(interp_row[5])])
+                        combined_meta.append([float(interp_row[0]), float(interp_row[1]), float(interp_row[2]), 
                                               float(interp_row[3]), float(interp_row[4]), float(interp_row[5])])
                     else:
                         _, idx = self._tree.query([x, y, z])
