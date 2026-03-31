@@ -31,6 +31,16 @@ class World:
         self._junction_cache = {}
         self._cache_max_size = 5000
         
+    def refresh(self):
+        """Update all internal CARLA handles after a map change."""
+        self.world = self.client.get_world()
+        self.map = self.world.get_map()
+        self.tm = self.client.get_trafficmanager(self.tm_port)
+        self.settings = self.world.get_settings()
+        
+        self._junction_cache.clear()
+        self.log.INFO(f"World Internal handles refreshed for: {self.map.name}")
+        
     def switch_map(self, name: str):
         self.client.load_world(name)
         

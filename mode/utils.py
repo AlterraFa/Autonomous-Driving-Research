@@ -70,17 +70,24 @@ def get_recording_duration(log_path: str) -> float:
 
 
 def refresh_world_references(client, virt_world, spawner=None):
-    """
-    Refresh world references after loading a new map.
-    Updates virt_world.world, reapplies settings, and updates spawner.world if provided.
-    """
-    virt_world.world = client.get_world()
+    # 1. Force a reload of the world object
+    virt_world.refresh()
+    
+    # 2. Wait for the Map to be actually accessible
+    retries = 10
+    while retries > 0:
+        try:
+            m = virt_world.world.get_map()
+            if m.name != "": break
+        except:
+            time.sleep(0.5)
+            retries -= 1
+            
     virt_world.apply_settings()
-
     if spawner is not None:
         spawner.world = virt_world.world
-
-    logger.INFO("World references refreshed")
+    
+    logger.CUSTOM("SUCCESS", f"World references refreshed for map: {virt_world.world.get_map().name}")
 
 
 def _copy_blueprint_attributes(source_bp, target_bp):
@@ -131,11 +138,11 @@ def load_recording(args, client, virt_world, spawner, folder, replay_dir):
     current_map = virt_world.world.get_map().name.split("/")[-1]
     if map_name not in current_map:
         logger.INFO(f"Loading map: {map_name}")
-        client.load_world(map_name)
+        virt_world.switch_map(map_name)
         refresh_world_references(client, virt_world, spawner)
 
     logger.INFO("Stabilizing world after map load...")
-    for _ in range(20):
+    for _ in range(60):
         if virt_world.world.get_settings().synchronous_mode:
             virt_world.world.tick()
         else:

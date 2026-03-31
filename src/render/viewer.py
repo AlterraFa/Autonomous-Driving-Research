@@ -599,9 +599,9 @@ class ReplayViewer(Viewer):
                 self._handle_trajectory_logging()
                 self._handle_replay_step(unrouted_map, routed_map)
                 
-                global_wp = self.sub_global_wp.receive()
-                view = {"x": global_wp[-1, 0], "y": global_wp[-1, 1], "z": global_wp[-1, 2] + 1.5, "roll": global_wp[-1, 3], "pitch": global_wp[-1, 4], "yaw": global_wp[-1, 5]}
-                self.sensor_manager.get_sensor("rgb_1").change_view(**view)
+                # global_wp = self.sub_global_wp.receive()
+                # view = {"x": global_wp[-1, 0], "y": global_wp[-1, 1], "z": global_wp[-1, 2] + 1.5, "roll": global_wp[-1, 3], "pitch": global_wp[-1, 4], "yaw": global_wp[-1, 5]}
+                # self.sensor_manager.get_sensor("rgb_1").change_view(**view)
 
                 # Render (replay mode)
                 self._render_base_hud(frame)
@@ -676,7 +676,7 @@ class ReplayViewer(Viewer):
         if self.replayer:
             if self.replayer.data_collector: 
                 image_kwargs = (
-                    {"I0": self.sensor_manager.get_sensor_data("rgb_0")} 
+                    {"I0": self.sensor_manager.get_sensor_data("rgb_0"), "MR": routed_map} 
                 )
                 self.replayer.step(**image_kwargs)
             else: 

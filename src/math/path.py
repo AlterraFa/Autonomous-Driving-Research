@@ -19,7 +19,7 @@ from src.control.world import World
 from numba import njit
 import pyclothoids
 # --- Global Tuning Configurations ---
-JUNCTION_TURN_ANGLE_THRESHOLD = 0
+ 
 SPLINE_MIN_POINTS = 20
 SPLINE_POINTS_MULTIPLIER = 5
 SMOOTHING_BLEND_HALF_WINDOW = 4
@@ -45,6 +45,10 @@ def compute_distance(path_xyz, position):
     return out
     
 class NodeFinder:
+    """
+    A utility class for tracking the closest position along a predefined list of nodes (e.g. coordinates).
+    It maintains the current positional index to efficiently limit search distances dynamically.
+    """
     def __init__(self, Ld, path, update_dist = .5, **kwargs):
         super().__init__(**kwargs)
         self.Ld = Ld
@@ -108,9 +112,17 @@ class NodeFinder:
 
 class PathHandler(NodeFinder):
     """
-    defined_path: 
+    Core handler for trajectory state abstraction and parameterization along a physical layout.
+    
+    This class builds continuous polynomial interpolations (PchipInterpolator) across spatial distances (`s`) 
+    and temporal deltas (`t`). It supports complex projection queries for location and array offsets,
+    along with returning smoothly interpolated 6-DoF Roll-Pitch-Yaw matrices seamlessly synced with the topology.
+    
+    defined_path configurations: 
       (N,3) -> [x, y, z]
       (N,4) -> [x, y, z, t]   (t = delta time recording)
+      (N,6) -> [x, y, z, r, p, y]
+      (N,7) -> [x, y, z, r, p, y, t]
     """
     def __init__(self, defined_path: np.ndarray, extrapolate: bool = True):
         self.log = Logger()
@@ -133,25 +145,16 @@ class PathHandler(NodeFinder):
         diffs   = np.diff(self.path_xyz, axis=0)
         seg_len = np.linalg.norm(diffs, axis=1)
         s       = np.concatenate(([0.0], np.cumsum(seg_len)))
-        keep    = np.r_[True, seg_len >= 0]
 
-        # Prevent multiple points with the same distance for interpolation
-        eps   = 1e-6
-        count = 0
+        # Ensure strictly increasing for Pchip by pushing identical distances forward slightly
+        eps_dist = 1e-5
         for i in range(1, len(s)):
-            if seg_len[i-1] == 0:
-                count += 1
-                s[i] += eps * count
-            else:
-                count = 0
+            if s[i] <= s[i-1]:
+                s[i] = s[i-1] + eps_dist
 
-        self.path_xyz = self.path_xyz[keep]
-        self.s = s[keep]
-        if self.has_rot:
-            self.path_rpy = self.path_rpy[keep]
-            
-        self.seg_vec = np.diff(self.path_xyz, axis=0)
-        self.seg_len = np.linalg.norm(self.seg_vec, axis=1)
+        self.s = s
+        self.seg_vec = diffs
+        self.seg_len = seg_len
 
         # --- interpolation in s ---
         from scipy.interpolate import PchipInterpolator
@@ -180,8 +183,15 @@ class PathHandler(NodeFinder):
             self.log.INFO("Found time vector. Enabling spatial and temporal mode")
             
             self.timer = 0
-            t_col = defined_path[:, -1].astype(float)[keep]
+            # Calculate absolute time
+            t_col = defined_path[:, -1].astype(float)
             self.t = np.cumsum(t_col)
+            
+            # Ensure strictly increasing for Pchip
+            eps_t = 1e-5
+            for i in range(1, len(self.t)):
+                if self.t[i] <= self.t[i-1]:
+                    self.t[i] = self.t[i-1] + eps_t
             
             if len(self.t) >= 4:
                 self.x_of_t = PchipInterpolator(self.t, self.path_xyz[:, 0], extrapolate=extrapolate)
@@ -441,6 +451,12 @@ class PathHandler(NodeFinder):
         return merged_pts
         
 class BranchingPath:
+    """
+    Provides multi-lane junction evaluation by forecasting alternate entry and exit topology paths.
+    
+    Given a driving trajectory, this class isolates map junctions, groups entry clusters, and artificially 
+    spawns side-lane branching waypoints by interpolating their connectivity parallel to the ego vehicle.
+    """
     def __init__(self, world: World):
         self.virt_world = world
 
@@ -558,6 +574,13 @@ class BranchingPath:
 from src.messages.all_messages import ServerFps
 from src.messages.message_handler import MessageSubscriber
 class TurnClassify:
+    """
+    Analyzes the geometric profiles of intersection trajectories to flag structural characteristics.
+    
+    Uses CARLA's driving layout to project and fit junction sequences, distinguishing 
+    straight-through roads from complex turns (e.g. left/right turn classifications) based 
+    on heading differentials and tangent thresholds.
+    """
     def __init__(self, world: World, threshold_deg: float = 45):
         self.thresh_deg = threshold_deg
         self.signal = None
@@ -762,7 +785,13 @@ class TurnClassify:
 
 from scipy.interpolate import splprep, splev
 class WaypointsAlign:
-    """Handles routing, smoothing, and projection of waypoints separate from map visuals."""
+    """
+    Handles map-level routing, smoothing, and geometric alignment of recorded trace coordinates.
+    
+    Acts as a middleware filter to map unaligned raw GPS or recording sequences firmly against CARLA's 
+    core skeleton structure. It utilizes KD-Trees and spline evaluations (splprep) to fuse and snap
+    coordinates onto logical pathways accurately without erratic positional shifts.
+    """
     def __init__(self, world: World, waypoint_distance):
         self.world = world
 
@@ -810,21 +839,7 @@ class WaypointsAlign:
             else:
                 last_jid = junctions[junction_id].id
 
-        valid_jids = set()
-        for j in junctions:
-            is_turn = False
-            for entry_wp, exit_wp in j.get_waypoints(carla.LaneType.Driving):
-                y1 = entry_wp.transform.rotation.yaw
-                y2 = exit_wp.transform.rotation.yaw
-                diff = abs((y2 - y1 + 180) % 360 - 180)
-                if diff > JUNCTION_TURN_ANGLE_THRESHOLD:
-                    is_turn = True
-                    break
-            if is_turn:
-                valid_jids.add(j.id)
-
         jids = [self.get_jid_for_point(p) for p in coordinates]
-        jids = [jid if jid in valid_jids else None for jid in jids]
         junction_by_id = {j.id: j for j in junctions}
         
         return jids, junction_by_id
@@ -1276,6 +1291,13 @@ def carla_waypoints_to_np(waypoints):
     return arr
 
 class OptimizePath:
+    """
+    Generates an optimized topological spatial hashing grid structure for fast pathway routing.
+    
+    Parses complex CARLA waypoints map into custom NetworkX sub-graphs heavily parameterized for quick
+    spatial lookups. By deploying customized grid discretization, it achieves O(1) node retrievals to 
+    expedite A* routing operations efficiently across continuous topology blocks.
+    """
     def __init__(self, world, step: float, exclude_circle: tuple = None):
         self.log = Logger()
         self.virt_world = world
