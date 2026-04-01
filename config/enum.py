@@ -109,6 +109,17 @@ class CameraView(Enum):
         "x": -6.0, "y": 0.0, "z": 3.0,   # behind & above
         "roll": 0.0, "pitch": -10.0, "yaw": 0.0
     }
+    BEV = {
+        "x": 2.0, "y": 0.0, "z": 20.0,   # behind & above
+        "roll": 0.0, "pitch": -90.0, "yaw": 0.0
+    }
+    
+def extend_view(new_members: dict):
+    assert isinstance(new_members, dict), "New view members must be a dictionary"
+    members = {m.name: m.value for m in CameraView}
+    members.update(new_members)
+    return Enum(CameraView.__name__, members)
+    
 class JoyControl:
 
     class JoyKey(IntEnum):
