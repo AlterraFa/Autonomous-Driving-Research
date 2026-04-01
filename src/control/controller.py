@@ -1,4 +1,5 @@
 import pygame
+from config import CONFIG
 
 from config.enum import JoyControl, JOYBINDS, KEYBINDS, CameraView
 from src.messages.logger import Logger
@@ -32,9 +33,9 @@ class Controller:
         else:
             self.log.WARNING("No joystick detected. Falling back to keyboard input")
 
-        self.deadzone_stick = 0.12
-        self.deadzone_trigger = 0.05
-        self.steer_curve = 3  # 1.0 = linear, >1 smoother center
+        self.deadzone_stick = CONFIG.controller.joystick_deadzone_stick
+        self.deadzone_trigger = CONFIG.controller.joystick_deadzone_trigger
+        self.steer_curve = CONFIG.controller.steer_curve_exponent  # 1.0 = linear, >1 smoother center
         
         pygame.key.set_repeat()  # no auto-repeat by default
         self.running = True
@@ -197,10 +198,10 @@ class Controller:
 
         # Keyboard continuous controls
         keys = pygame.key.get_pressed()
-        steer_inc = 5e-4 * server_time * 1000
+        steer_inc = CONFIG.controller.keyboard_steer_rate * server_time * 1000
         if not self.model_autopilot:
-            self.throt_ctrl = 0.01 if keys[pygame.K_w] else 0
-            self.brake_ctrl = 0.2 if keys[pygame.K_s] else 0
+            self.throt_ctrl = CONFIG.controller.keyboard_throttle_step if keys[pygame.K_w] else 0
+            self.brake_ctrl = CONFIG.controller.keyboard_brake_step if keys[pygame.K_s] else 0
             self.steer_ctrl = (-steer_inc if keys[pygame.K_a] else
                                 steer_inc if keys[pygame.K_d] else 0)
 

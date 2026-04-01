@@ -3,6 +3,7 @@ import time
 import numpy as np
 import line_profiler
 import carla
+from config import CONFIG
 
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 
@@ -62,19 +63,28 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
         actual_duration = temp_stop - start_at
 
         spawner.despawn_vehicles()
-        client.replay_file(path_2_recording, start_at, actual_duration + 10, 0)
+        client.replay_file(
+            path_2_recording,
+            start_at,
+            actual_duration + CONFIG.replay_runtime.duration_padding_s,
+            0,
+        )
         logger.INFO(f"Showing a replay segment of {actual_duration: .2f}s")
 
         # -- Tick for n times to check replay's stability
         logger.INFO("Waiting for replay to stabilize...")
-        for _ in range(50):
+        for _ in range(CONFIG.replay_runtime.stability_wait_iterations):
             if virt_world.world.get_settings().synchronous_mode:
                 virt_world.world.tick()
             else:
-                time.sleep(0.05)
+                time.sleep(CONFIG.replay_runtime.stability_sleep_s)
 
         # Spawn actor which is alive and kicking and add to the Vehicle object for controlling
-        ego_actor = spawner.wait_for_live_actor("ego", timeout_s=30.0, settle_ticks=30)
+        ego_actor = spawner.wait_for_live_actor(
+            "ego",
+            timeout_s=CONFIG.replay_runtime.actor_spawn_timeout_s,
+            settle_ticks=CONFIG.replay_runtime.actor_settle_ticks,
+        )
         if ego_actor is None:
             logger.ERROR(f"Could not find live ego actor for replay: {replay_dir}")
             continue
@@ -92,11 +102,11 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
         # -- Init sensors
         rgb_sensor  = RGB(virt_world.world)
         gnss_sensor = GNSS(virt_world.world, freq_hz=FREQ, mu_ms=MEAN_DELAY, sigma_ms=STDDEV_DELAY)
-        gnss_sensor.set_attribute("noise_lat_stddev", LAT_STDDEV / 111320.0)
-        gnss_sensor.set_attribute("noise_lon_stddev", LON_STDDEV / 111320.0)
+        gnss_sensor.set_attribute("noise_lat_stddev", LAT_STDDEV / CONFIG.gps.meters_per_degree)
+        gnss_sensor.set_attribute("noise_lon_stddev", LON_STDDEV / CONFIG.gps.meters_per_degree)
         imu_sensor  = IMU(virt_world.world)
-        imu_sensor.set_attribute("noise_gyro_bias_x", 0.005)
-        imu_sensor.set_attribute("noise_gyro_bias_y", 0.005)
+        imu_sensor.set_attribute("noise_gyro_bias_x", CONFIG.sensor.imu_gyro_bias_x)
+        imu_sensor.set_attribute("noise_gyro_bias_y", CONFIG.sensor.imu_gyro_bias_y)
 
         sensors_metadata = {
             rgb_sensor: [CameraView.FIRST_PERSON.value, True], 
@@ -122,7 +132,7 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
             replayer = ReplayHandler(
                 virt_world, recorded_traj,
                 dataset_dir, args.temporal,
-                args.draw_waypoints if hasattr(args, "draw_waypoints") else False,
+                debug = args.draw_waypoints if hasattr(args, "draw_waypoints") else False,
             )
 
         progress = Progress(
@@ -164,7 +174,7 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
             lp_wrapper()
         progress.stop()
 
-        time.sleep(1.0)
+        time.sleep(CONFIG.replay_runtime.final_wait_s)
         temp_stop = stop_at
 
     return lp

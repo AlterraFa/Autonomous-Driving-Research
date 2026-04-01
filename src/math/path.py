@@ -1,5 +1,4 @@
 import os, sys
-import toml
 script_path = os.path.abspath(__file__)
 folder = os.path.dirname(script_path)
 parent = os.path.dirname(folder)
@@ -17,16 +16,17 @@ from src.control.world import World
 
 from numba import njit
 import pyclothoids
+from config import CONFIG
 # --- Global Tuning Configurations ---
  
-SPLINE_MIN_POINTS = 20
-SPLINE_POINTS_MULTIPLIER = 5
-SMOOTHING_BLEND_HALF_WINDOW = 4
-SMOOTHING_WINDOW_SIZE = 3
-ALIGN_TOLERANCE = 1e-2
-SPLINE_DEDUPLICATION_TOLERANCE = 1e-3
-B_SMOOTH_S = 2.0
-B_SMOOTH_K = 3
+SPLINE_MIN_POINTS = CONFIG.path_handler.spline_min_points
+SPLINE_POINTS_MULTIPLIER = CONFIG.path_handler.spline_points_multiplier
+SMOOTHING_BLEND_HALF_WINDOW = CONFIG.path_handler.smoothing_blend_half_window
+SMOOTHING_WINDOW_SIZE = CONFIG.path_handler.smoothing_window_size
+ALIGN_TOLERANCE = CONFIG.path_handler.align_tolerance
+SPLINE_DEDUPLICATION_TOLERANCE = CONFIG.path_handler.spline_deduplication_tolerance
+B_SMOOTH_S = CONFIG.path_handler.b_smooth_s
+B_SMOOTH_K = CONFIG.path_handler.b_smooth_k
 
 
 def wrap_to_pi(theta):

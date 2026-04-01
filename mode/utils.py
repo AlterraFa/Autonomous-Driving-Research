@@ -3,9 +3,9 @@ import sys
 import re
 import time
 
-import toml
 import carla
 import numpy as np
+from config import CONFIG
 
 from src.messages.logger import Logger
 from src.spawn.sensor_spawner import GNSS, IMU
@@ -14,39 +14,30 @@ from src.math.path import OptimizePath
 
 logger = Logger("Global")
 
-# ── Root & config ──────────────────────────────────────────────────────────────
-_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-conf  = toml.load(os.path.join(_root, "config/config.toml"))
-
 # Map rendering
-map_conf   = conf.get("MapRender", {})
-RECT_DIM   = tuple(map_conf.get("rect_dim",   [4, 3]))
-MAP_OFFSET = tuple(map_conf.get("map_offset", [100, 100]))
-MAP_RANGE  = tuple(map_conf.get("map_range",  [50, 50]))
-MAP_RESIZE = tuple(map_conf.get("map_resize", [200, 200]))
-MAP_SCALE  = map_conf.get("map_scale", 3)
+RECT_DIM   = CONFIG.map_render.rect_dim
+MAP_OFFSET = CONFIG.map_render.map_offset
+MAP_RANGE  = CONFIG.map_render.map_range
+MAP_RESIZE = CONFIG.map_render.map_resize
+MAP_SCALE  = CONFIG.map_render.map_scale
 
 # Path optimiser
-path_optim_conf = conf.get("PathOptimizer", {})
-PATH_STEP      = path_optim_conf.get("path_step", 2.0)
-EXCLUDE_PARAMS = path_optim_conf.get("exclude_params", [0, 0, 0])
+PATH_STEP      = CONFIG.path_optimizer.path_step
+EXCLUDE_PARAMS = CONFIG.path_optimizer.exclude_params
 
 # GNSS / GPS
-gnss_conf    = conf.get("GPS", {})
-MEAN_DELAY   = gnss_conf.get("mean_delay",   0)
-STDDEV_DELAY = gnss_conf.get("stddev_delay", 0)
-LAT_STDDEV   = gnss_conf.get("lat_stddev",   0)
-LON_STDDEV   = gnss_conf.get("lon_stddev",   0)
-FREQ         = gnss_conf.get("frequency",    50)
+MEAN_DELAY   = CONFIG.gps.mean_delay
+STDDEV_DELAY = CONFIG.gps.stddev_delay
+LAT_STDDEV   = CONFIG.gps.lat_stddev
+LON_STDDEV   = CONFIG.gps.lon_stddev
+FREQ         = CONFIG.gps.frequency
 
 # Replay
-replay_conf = conf.get("Replay", {})
-start_at    = replay_conf.get("start_at",  0)
-stop_at     = replay_conf.get("stop_at",  -1)
+start_at    = CONFIG.replay.start_at
+stop_at     = CONFIG.replay.stop_at
 
 # Spawn
-spawn_conf = conf.get("Spawn", {})
-num_npc    = spawn_conf.get("num_npc", 0)
+num_npc    = CONFIG.spawn.num_npc
 
 # Misc
 MIN_SAVING_DIST = 0.4

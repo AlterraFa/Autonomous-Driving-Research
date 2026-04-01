@@ -1,5 +1,4 @@
 import os, sys
-import toml
 script_path = os.path.abspath(__file__)
 folder = os.path.dirname(script_path)
 parent = os.path.dirname(folder)
@@ -39,9 +38,10 @@ from src.messages import (
     SteerAngle, 
     ClearNPCs,
     Location, Rotation, 
-    GlobalWP, LocalWP
+    GlobalWPSpatial, LocalWPSpatial
 )
 from src.messages.logger import Logger
+from config import CONFIG
 
 from typing import Optional, Any
 from tqdm.auto import tqdm
@@ -52,23 +52,16 @@ from model.inference import AsyncInference
 from src.others.data_processor import TrajectoryBuffer, ReplayHandler
 from src.math import Map, OptimizePath
 
-        
-conf = toml.load(os.path.join(parent, "../config/config.toml"))
+MIN_DISTANT_NODE = CONFIG.rand_path.min_distant_node
+MAX_DISTANT_NODE = CONFIG.rand_path.max_distant_node
+PATH_ITER        = CONFIG.rand_path.path_iter
 
+FONT_SIZE = CONFIG.ui.font_size
+FONT_NAME = CONFIG.ui.font_name
 
-path_conf = conf.get("RandPath", {})
-MIN_DISTANT_NODE = path_conf.get("min_distant_node", 20)
-MAX_DISTANT_NODE = path_conf.get("max_distant_node", 500)
-PATH_ITER        = path_conf.get("path_iter", 5)
+front_vehicle_offset = CONFIG.offsets.front_vehicle_offset
 
-ui_conf = conf.get("UI", {})
-FONT_SIZE = ui_conf.get("font_size", 12)
-FONT_NAME = ui_conf.get("font_name", "arial")
-
-offset_conf = conf.get("Offsets", {})
-front_vehicle_offset = conf.get("front_vehicle_offset", 1.5)
-
-max_steer = conf["Vehicle"]['Physics']['max_steer']
+max_steer = CONFIG.vehicle.physics.max_steer
 
 
 VIEWER_REGISTRY = {}
@@ -93,7 +86,7 @@ class Viewer(ABC):
         self.width = width
         self.height = height
         self.sync = sync
-        self.fps = fps if not self.headless else 100
+        self.fps = fps if not self.headless else CONFIG.rendering.fps_headless
         self.last_platform_time = None; 
         self.server_fps = self.fps; 
         self.client_start = time.time()
@@ -122,7 +115,7 @@ class Viewer(ABC):
         self.sensor_manager = SensorManager(logger=self.log)
         
         self.controller = Controller()
-        self.hud = HUD(display = self.display, fontName = "jetbrainsmononerdfontpropo", fontSize = FONT_SIZE, height = self.height, headless = headless)
+        self.hud = HUD(display = self.display, fontName = FONT_NAME, fontSize = FONT_SIZE, height = self.height, headless = headless)
         
         
         self.traj_logger   : TrajectoryBuffer = None
@@ -176,8 +169,8 @@ class Viewer(ABC):
         self.sub_turn_signal = MessageSubscriber(TurnSignal)
         self.sub_server_runtime = MessageSubscriber(ServerRuntime)
         self.sub_polylines = MessageSubscriber(PolylinesCmd)
-        self.sub_global_wp = MessageSubscriber(GlobalWP)
-        self.sub_local_wp = MessageSubscriber(LocalWP)
+        self.sub_global_wp = MessageSubscriber(GlobalWPSpatial)
+        self.sub_local_wp = MessageSubscriber(LocalWPSpatial)
 
     def attach_plugins(self, **plugins):
         for name, value in plugins.items():
@@ -265,18 +258,6 @@ class Viewer(ABC):
             self.change_view_all(view_name=view_name)
         return success
 
-    @staticmethod
-    def _pose6_to_view_dict(pose6: np.ndarray) -> dict:
-        """Convert [x, y, z, roll, pitch, yaw] into the camera transform dict format."""
-        return {
-            "x": float(pose6[0]),
-            "y": float(pose6[1]),
-            "z": float(pose6[2]),
-            "roll": float(pose6[3]),
-            "pitch": float(pose6[4]),
-            "yaw": float(pose6[5]),
-        }
-
     def register_view_matrix(self, prefix: str, views: Any, activate_first: bool = False):
         """
         Register/update runtime views from an (N, 6) matrix.
@@ -284,31 +265,9 @@ class Viewer(ABC):
         Each row maps to: [x, y, z, roll, pitch, yaw].
         Existing views with the same prefix are overwritten each call.
         """
-        if views is None:
+        updated_names = self.sensor_manager.register_view_matrix(prefix, views)
+        if not updated_names:
             return
-
-        if hasattr(views, "to_numpy"):
-            views = views.to_numpy()
-
-        views_arr = np.asarray(views)
-        if views_arr.ndim == 1 and views_arr.shape[0] == 6:
-            views_arr = views_arr.reshape(1, 6)
-
-        if views_arr.ndim != 2 or views_arr.shape[1] != 6:
-            return
-
-        updated_names = []
-        for idx, pose in enumerate(views_arr):
-            view_name = f"{prefix}_{idx}"
-            transform = self._pose6_to_view_dict(pose)
-            if not self.sensor_manager.update_view(view_name, transform):
-                self.add_view(view_name, transform, overwrite=True)
-            updated_names.append(view_name)
-
-        # Remove stale views if waypoint count shrank.
-        stale_names = [name for name in self.sensor_manager.view_list.keys() if name.startswith(f"{prefix}_") and name not in updated_names]
-        for name in stale_names:
-            self.sensor_manager.view_list.pop(name, None)
 
         if activate_first and updated_names and self.sensor_manager.active_view not in updated_names:
             self.change_view_all(view_name=updated_names[0])

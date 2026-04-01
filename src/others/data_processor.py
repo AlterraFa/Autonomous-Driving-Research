@@ -1,5 +1,4 @@
 import os, sys
-import toml
 script_path = os.path.abspath(__file__)
 folder = os.path.dirname(script_path)
 parent = os.path.dirname(folder)
@@ -21,19 +20,24 @@ from src.math.path import (
     WaypointsAlign
 )
 from src.math.coordinate_transform import global_2_local, global_2_local_rot, global_2_local_full_rot, rpy2ypr
+from config import CONFIG
 
+quality = CONFIG.picture.quality
+position_idx = CONFIG.replay.position_idx
 
-conf = toml.load(os.path.join(parent, "../config/config.toml"))
-quality = conf['Picture']['quality']
-position_idx = conf['Replay']['position_idx']
-
-temporal_offset      = conf['Offsets']['temporal_offset']
-spatial_offset       = conf['Offsets']['spatial_offset']
-scout_offset_params  = conf['Offsets']['scout_offset_params']
-front_vehicle_offset = conf['Offsets']['front_vehicle_offset']
+temporal_offset      = CONFIG.offsets.temporal_offset
+spatial_offset       = CONFIG.offsets.spatial_offset
+scout_offset_params  = CONFIG.offsets.scout_offset_params
+front_vehicle_offset = CONFIG.offsets.front_vehicle_offset
 
 class TrajectoryBuffer:
-    def __init__(self, save_dir: str, init_cap = int(8192 * 8), dist_thresh_m = 0, min_dt_s = 0.05):
+    def __init__(
+        self,
+        save_dir: str,
+        init_cap=CONFIG.data_collection.trajectory_buffer_capacity,
+        dist_thresh_m=CONFIG.data_collection.trajectory_distance_threshold_m,
+        min_dt_s=CONFIG.data_collection.trajectory_min_dt_s,
+    ):
         self.log = Logger()
         self.log.DEBUG("SAVING VEHICLE TRAJECTORY")
         self.arr = np.empty((init_cap, 7), dtype=np.float32)
@@ -210,8 +214,10 @@ from src.messages.all_messages import (
     PolylinesCmd,
     ServerRuntime,
     SteerAngle,
-    GlobalWP,
-    LocalWP,
+    GlobalWPSpatial,
+    LocalWPSpatial,
+    GlobalWPTemporal,
+    LocalWPTemporal,
     Rotation
 )
 class ReplayHandler:
@@ -227,21 +233,24 @@ class ReplayHandler:
         self.path_handler.position_idx = position_idx
         self.debug = debug
         self.virt_world = world
-        self.use_temporal = use_temporal
         self.scout_points = [i for i in range(*scout_offset_params)]
-        if not self.use_temporal:
-            self.offset   = spatial_offset
-        else:
-            self.offset   = temporal_offset
-        self.turn_classifier = TurnClassify(world=world, threshold_deg=20)
+        self.spatial_offset = spatial_offset
+        self.temporal_offset = temporal_offset
+        self.turn_classifier = TurnClassify(
+            world=world,
+            threshold_deg=CONFIG.turn_detection.threshold_deg,
+        )
         self.branching_path  = BranchingPath(self.virt_world)
         self.data_collector = None
         if data_collect_dir:
-            self.data_collector = CarlaDatasetCollector(save_dir=data_collect_dir, fps=20)
+            self.data_collector = CarlaDatasetCollector(
+                save_dir=data_collect_dir,
+                fps=CONFIG.data_collection.save_fps,
+            )
 
         self._init_transmittor()
         self.prev_dist = 0
-        self.additional_max = 20; self.addition_cnt = 0
+        self.additional_max = CONFIG.data_collection.additional_trajectory_max; self.addition_cnt = 0
         self.start_time = self.sub_server_runtime.receive()
 
     def _init_transmittor(self):
@@ -259,8 +268,10 @@ class ReplayHandler:
         self.sub_steer_angle      = MessageSubscriber(SteerAngle)
 
         self.send_turn_signal         = MessageSender(TurnSignal)
-        self.send_global_wp           = MessageSender(GlobalWP)
-        self.send_local_wp            = MessageSender(LocalWP)
+        self.send_global_wp_spatial   = MessageSender(GlobalWPSpatial)
+        self.send_local_wp_spatial    = MessageSender(LocalWPSpatial)
+        self.send_global_wp_temporal  = MessageSender(GlobalWPTemporal)
+        self.send_local_wp_temporal   = MessageSender(LocalWPTemporal)
         
 
     def step(self, **frame: np.ndarray):
@@ -289,29 +300,38 @@ class ReplayHandler:
         )
         
         # -- Query and transform to local
-        global_loc, global_rot = self.path_handler.waypoints(
-            position, self.offset, use_time = self.use_temporal, merge = True, precomputed_s_side = proj_data
+        global_loc_spatial, global_rot_spatial = self.path_handler.waypoints(
+            position, self.spatial_offset, use_time=False, merge=True, precomputed_s_side=proj_data
         )
-        
-        local_loc = global_2_local_full_rot(position, global_loc, vehicle_rotation)
-        local_rot = global_2_local_rot(global_rot, vehicle_rotation)
+        global_loc_temporal, global_rot_temporal = self.path_handler.waypoints(
+            position, self.temporal_offset, use_time=True, merge=True, precomputed_s_side=proj_data
+        )
+
+        local_loc_spatial = global_2_local_full_rot(position, global_loc_spatial, vehicle_rotation)
+        local_rot_spatial = global_2_local_rot(global_rot_spatial, vehicle_rotation)
+        local_loc_temporal = global_2_local_full_rot(position, global_loc_temporal, vehicle_rotation)
+        local_rot_temporal = global_2_local_rot(global_rot_temporal, vehicle_rotation)
+
+        # Backward-compatible aliases: legacy topics keep spatial stream.
+        global_loc, global_rot = global_loc_spatial, global_rot_spatial
+        local_loc, local_rot = local_loc_spatial, local_rot_spatial
         
 
-        path_branches  = self.branching_path.brancher(global_loc, global_scout, persist_dist = 20)
-        ego_branches = np.empty_like(path_branches)[..., :2]
-        if path_branches.shape[0] > 1:
-            self.road_type = "multi"
-        else:
-            self.road_type = "uni"
-        for idx, branch in enumerate(path_branches):
-            ego_branches[idx] = global_2_local_full_rot(position, branch, vehicle_rotation)[:, :2]
+        # path_branches  = self.branching_path.brancher(global_loc, global_scout, persist_dist = 20)
+        # ego_branches = np.empty_like(path_branches)[..., :2]
+        # if path_branches.shape[0] > 1:
+        #     self.road_type = "multi"
+        # else:
+        #     self.road_type = "uni"
+        # for idx, branch in enumerate(path_branches):
+        #     ego_branches[idx] = global_2_local_full_rot(position, branch, vehicle_rotation)[:, :2]
                 
                 
         if self.debug:
             server_fps = self.sub_server_fps.receive()
             if server_fps < 1: server_fps = self.sub_client_fps.receive()    
-            global_loc[:, -1] += .5
-            self.virt_world.draw_waypoints(global_loc, 2.0 * (1 / server_fps), size = .1, color = (255, 0, 0))
+            global_loc_spatial[:, -1] += .5
+            self.virt_world.draw_waypoints(global_loc_spatial, 2.0 * (1 / server_fps), size = .1, color = (255, 0, 0))
 
         if self.turn_classify:
             is_at_junction , junction = self.virt_world.get_waypoint_junction(global_scout[14])
@@ -324,8 +344,16 @@ class ReplayHandler:
         else:
             turn_signal = -1
 
-        self.send_local_wp.send(np.concatenate([local_loc, local_rot], axis = 1))
-        self.send_global_wp.send(np.concatenate([global_loc, global_rot], axis = 1))
+        local_wp_spatial = np.concatenate([local_loc_spatial, local_rot_spatial], axis=1)
+        global_wp_spatial = np.concatenate([global_loc_spatial, global_rot_spatial], axis=1)
+        local_wp_temporal = np.concatenate([local_loc_temporal, local_rot_temporal], axis=1)
+        global_wp_temporal = np.concatenate([global_loc_temporal, global_rot_temporal], axis=1)
+
+        # New split topics
+        self.send_local_wp_spatial.send(local_wp_spatial)
+        self.send_global_wp_spatial.send(global_wp_spatial)
+        self.send_local_wp_temporal.send(local_wp_temporal)
+        self.send_global_wp_temporal.send(global_wp_temporal)
         self.send_turn_signal.send(turn_signal)
 
         self.logger.DEBUG(f"Lat Err: {lat_err:.3f}m", frequency = 5)
@@ -347,8 +375,8 @@ class ReplayHandler:
             saved = self.data_collector.maybe_save(
                 {
                     "gt_data": {
-                        "midlane_wp" : local_loc[:, :2],
-                        "aux_wp"     : ego_branches,
+                        "midlane_wp" : local_loc_spatial[:, :2],
+                        "midlane_wp_temporal": local_loc_temporal[:, :2],
                         "steer"      : steer,
                         "steer_angle": steer_angle,
                         "throttle"   : throttle,

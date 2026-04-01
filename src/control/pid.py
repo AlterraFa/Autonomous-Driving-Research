@@ -1,6 +1,7 @@
 import time
 import numpy as np
 from scipy.interpolate import interp1d
+from config import CONFIG
 
 nowtime = time.time()
 
@@ -19,7 +20,11 @@ def lateral_control(waypoints: np.ndarray, Ld: float, wheelbase: float, max_stee
     normalized_steer = steer / max_steer * 1.2
     return normalized_steer
 
-def longitudinal_speed(waypoints, num_waypoints_to_average=3, time_step=0.2):
+def longitudinal_speed(
+    waypoints,
+    num_waypoints_to_average=CONFIG.control.longitudinal_waypoints_average,
+    time_step=CONFIG.control.longitudinal_time_step,
+):
     """
     Calculates a smoother target speed by averaging over several waypoints.
 
@@ -47,7 +52,7 @@ def longitudinal_speed(waypoints, num_waypoints_to_average=3, time_step=0.2):
 
     target_speed_ms = path_length / total_time
     
-    if target_speed_ms < 10:
-        target_speed_ms = 10
+    if target_speed_ms < CONFIG.control.longitudinal_min_speed_ms:
+        target_speed_ms = CONFIG.control.longitudinal_min_speed_ms
     
     return target_speed_ms

@@ -129,6 +129,38 @@ class LocalWP(Enum):
     msgType = (list, np.ndarray, torch.Tensor)
     default = staticmethod(lambda: np.zeros((6, 2), dtype=float))
 
+
+class GlobalWPSpatial(Enum):
+    Queue = "General"
+    Owner = "ReplayHandler"
+    msgID = 15
+    msgType = (list, np.ndarray, torch.Tensor)
+    default = staticmethod(lambda: np.zeros((6, 6), dtype=float))
+
+
+class LocalWPSpatial(Enum):
+    Queue = "General"
+    Owner = "ReplayHandler"
+    msgID = 16
+    msgType = (list, np.ndarray, torch.Tensor)
+    default = staticmethod(lambda: np.zeros((6, 6), dtype=float))
+
+
+class GlobalWPTemporal(Enum):
+    Queue = "General"
+    Owner = "ReplayHandler"
+    msgID = 17
+    msgType = (list, np.ndarray, torch.Tensor)
+    default = staticmethod(lambda: np.zeros((6, 6), dtype=float))
+
+
+class LocalWPTemporal(Enum):
+    Queue = "General"
+    Owner = "ReplayHandler"
+    msgID = 18
+    msgType = (list, np.ndarray, torch.Tensor)
+    default = staticmethod(lambda: np.zeros((6, 6), dtype=float))
+
 #################################### Control ####################################
 class Throttle(Enum):
     Queue = "General"

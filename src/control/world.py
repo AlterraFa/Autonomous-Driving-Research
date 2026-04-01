@@ -3,18 +3,17 @@ script_path = os.path.abspath(__file__)
 folder = os.path.dirname(script_path)
 parent = os.path.dirname(folder)
 
-import toml
 import carla
 import numpy as np
 from src.messages.logger import Logger
 from typing import Literal
 from functools import lru_cache
+from config import CONFIG
 
-conf = toml.load(parent + "/../config/config.toml")
-excluded_junctions = conf["TrafficManager"]["excluded_junctions"]
+excluded_junctions = CONFIG.traffic_manager.excluded_junctions
 
 class World:
-    def __init__(self, client: carla.Client, tm_port: int, delta = 0.05):
+    def __init__(self, client: carla.Client, tm_port: int, delta=CONFIG.world.fixed_delta_seconds):
         self.client = client
         self.world = client.get_world()
         self.tm = client.get_trafficmanager(tm_port)
@@ -29,7 +28,7 @@ class World:
         
         # Cache for waypoint junction lookups to avoid repeated CARLA queries
         self._junction_cache = {}
-        self._cache_max_size = 5000
+        self._cache_max_size = CONFIG.world.junction_cache_max_size
         
     def refresh(self):
         """Update all internal CARLA handles after a map change."""
@@ -83,7 +82,7 @@ class World:
 
     def get_waypoint_junction(self, location: np.ndarray):
         # Use tuple of location as cache key (rounded to avoid floating point precision issues)
-        cache_key = tuple(np.round(location, decimals=2))
+        cache_key = tuple(np.round(location, decimals=CONFIG.world.waypoint_rounding_decimals))
         
         if cache_key in self._junction_cache:
             return self._junction_cache[cache_key]
@@ -109,7 +108,7 @@ class World:
         junctions_metadata = []; cached_id = []
         for wp in waypoints:
             # Use tuple of location as cache key (rounded to avoid floating point precision issues)
-            cache_key = tuple(np.round(wp, decimals=2))
+            cache_key = tuple(np.round(wp, decimals=CONFIG.world.waypoint_rounding_decimals))
             
             if cache_key in self._junction_cache:
                 is_junction, junction = self._junction_cache[cache_key]

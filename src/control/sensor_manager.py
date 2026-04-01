@@ -3,6 +3,7 @@ Sensor Manager for CARLA - Handles extraction and organization of sensor data.
 """
 
 from typing import Dict, Optional, Any, List
+import numpy as np
 from config.enum import CameraView
 from src.messages.logger import Logger
 
@@ -88,6 +89,60 @@ class SensorManager:
         if view_name in CameraView.__members__:
             return getattr(CameraView, view_name).value
         return self.view_list.get(view_name)
+
+    @staticmethod
+    def _pose6_to_view_dict(pose6: np.ndarray) -> Dict[str, float]:
+        """Convert [x, y, z, roll, pitch, yaw] into camera transform dict."""
+        return {
+            "x": float(pose6[0]),
+            "y": float(pose6[1]),
+            "z": float(pose6[2]),
+            "roll": float(pose6[3]),
+            "pitch": float(pose6[4]),
+            "yaw": float(pose6[5]),
+        }
+
+    def register_view_matrix(self, prefix: str, views: Any) -> List[str]:
+        """
+        Register/update runtime views from an (N, 6) matrix.
+
+        Each row maps to: [x, y, z, roll, pitch, yaw].
+        Existing views with the same prefix are overwritten each call.
+
+        :param prefix: Prefix used to name views (e.g., "LOCAL_WP")
+        :param views: (N, 6) array-like or single (6,) row
+        :return: List of updated view names in order
+        """
+        if views is None:
+            return []
+
+        if hasattr(views, "to_numpy"):
+            views = views.to_numpy()
+
+        views_arr = np.asarray(views)
+        if views_arr.ndim == 1 and views_arr.shape[0] == 6:
+            views_arr = views_arr.reshape(1, 6)
+
+        if views_arr.ndim != 2 or views_arr.shape[1] != 6:
+            return []
+
+        updated_names: List[str] = []
+        for idx, pose in enumerate(views_arr):
+            view_name = f"{prefix}_{idx}"
+            transform = self._pose6_to_view_dict(pose)
+            if not self.update_view(view_name, transform):
+                self.add_view(view_name, transform, overwrite=True)
+            updated_names.append(view_name)
+
+        # Remove stale views if waypoint count shrank.
+        stale_names = [
+            name for name in self.view_list.keys()
+            if name.startswith(f"{prefix}_") and name not in updated_names
+        ]
+        for name in stale_names:
+            self.view_list.pop(name, None)
+
+        return updated_names
 
     def register_sensor(self, sensor_name: str, sensor_object: Any, sensor_type: str) -> None:
         """

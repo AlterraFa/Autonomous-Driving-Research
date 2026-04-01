@@ -1,6 +1,7 @@
 import os
 import datetime
 import line_profiler
+from config import CONFIG
 
 from src.messages.logger import Logger
 from src.control.vehicle_control import Vehicle
@@ -24,11 +25,11 @@ def run_manual(args, client, virt_world, folder, viewer_args):
 
     rgb_sensor  = RGB(virt_world.world)
     gnss_sensor = GNSS(virt_world.world, freq_hz=FREQ, mu_ms=MEAN_DELAY, sigma_ms=STDDEV_DELAY)
-    gnss_sensor.set_attribute("noise_lat_stddev", LAT_STDDEV / 111320.0)
-    gnss_sensor.set_attribute("noise_lon_stddev", LON_STDDEV / 111320.0)
+    gnss_sensor.set_attribute("noise_lat_stddev", LAT_STDDEV / CONFIG.gps.meters_per_degree)
+    gnss_sensor.set_attribute("noise_lon_stddev", LON_STDDEV / CONFIG.gps.meters_per_degree)
     imu_sensor  = IMU(virt_world.world)
-    imu_sensor.set_attribute("noise_gyro_bias_x", 0.005)
-    imu_sensor.set_attribute("noise_gyro_bias_y", 0.005)
+    imu_sensor.set_attribute("noise_gyro_bias_x", CONFIG.sensor.imu_gyro_bias_x)
+    imu_sensor.set_attribute("noise_gyro_bias_y", CONFIG.sensor.imu_gyro_bias_y)
 
     spawner = Spawn(virt_world.world)
     spawner.despawn_vehicles()

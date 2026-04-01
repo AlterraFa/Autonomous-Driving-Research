@@ -2,7 +2,7 @@ import os
 import cv2
 import carla
 import numpy as np
-import toml
+from config import CONFIG
 
 script_path = os.path.abspath(__file__)
 folder = os.path.dirname(script_path)
@@ -22,13 +22,10 @@ from src.messages.all_messages import (
 )
 from src.messages.message_handler import MessageSubscriber, MessageSender
 
-conf = toml.load(os.path.join(parent, "../config/config.toml"))
+MAX_GPS_DELAY = CONFIG.gps.max_gps_delay
+MIN_GPS_DELAY = CONFIG.gps.min_gps_delay
 
-gps_conf = conf.get("GPS", {})
-MAX_GPS_DELAY = gps_conf.get("max_gps_delay", 60)
-MIN_GPS_DELAY = gps_conf.get("min_gps_delay", 10)
-
-position_idx = conf['Replay']['position_idx']
+position_idx = CONFIG.replay.position_idx
 
 class Map:
     def __init__(self, 

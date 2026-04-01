@@ -1,6 +1,7 @@
 import pygame
 import numpy as np
 import cv2
+from config import CONFIG
 
 from src.messages.message_handler import MessageSubscriber
 from src.messages.all_messages import (
@@ -32,12 +33,19 @@ from src.messages.all_messages import (
 )
 
 class HUD:
-    def __init__(self, display, fontName="Arial", fontSize=24, height=720, headless = False):
+    def __init__(
+        self,
+        display,
+        fontName=CONFIG.ui.font_name,
+        fontSize=CONFIG.ui.font_size,
+        height=720,
+        headless=False,
+    ):
         pygame.font.init()
         self.display = display
         self.headless = headless
         self.font = pygame.font.SysFont(fontName, fontSize, bold=True)
-        self.text_height = 20
+        self.text_height = CONFIG.ui.text_height
         self._line_cache = {}
         
         self.overlay = pygame.Surface((310, height), pygame.SRCALPHA)
@@ -201,7 +209,7 @@ class HUD:
 
     def draw_controls(self, x=10, y=330):
         line_h = self.text_height
-        bar_w, bar_h = 150, 10
+        bar_w, bar_h = CONFIG.ui.bar_w, CONFIG.ui.bar_h
         bar_x = x + 100
 
         white = (255, 255, 255)

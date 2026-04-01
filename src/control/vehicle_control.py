@@ -1,5 +1,4 @@
 import os, sys
-import toml
 script_path = os.path.abspath(__file__)
 folder = os.path.dirname(script_path)
 parent = os.path.dirname(folder)
@@ -21,16 +20,16 @@ from src.messages.all_messages import (
     SpeedLimit
 )
 from src.others.others import get_nested_config
+from config import CONFIG
 
-conf = toml.load(os.path.join(parent, "../config/config.toml"))
-decay     = conf["Vehicle"]['decay']
-max_steer = conf["Vehicle"]['Physics']['max_steer']
-wheelbase = conf["Vehicle"]['Physics']['wheelbase']
-fs        = conf["Vehicle"]['ControlFilter']['fs']
-x0        = conf["Vehicle"]['ControlFilter']['x0']
-Kp        = conf["Vehicle"]['VelocityRegulator']['Kp']
-Ki        = conf["Vehicle"]['VelocityRegulator']['Ki']
-Kd        = conf["Vehicle"]['VelocityRegulator']['Kd']
+decay     = CONFIG.vehicle.decay
+max_steer = CONFIG.vehicle.physics.max_steer
+wheelbase = CONFIG.vehicle.physics.wheelbase
+fs        = CONFIG.vehicle.control_filter.fs
+x0        = CONFIG.vehicle.control_filter.x0
+Kp        = CONFIG.vehicle.velocity_regulator.kp
+Ki        = CONFIG.vehicle.velocity_regulator.ki
+Kd        = CONFIG.vehicle.velocity_regulator.kd
 
 class OnlineLowPassFilter:
     def __init__(self, cutoff, fs, order=2, x0=0.0):
