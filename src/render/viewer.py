@@ -25,40 +25,25 @@ from src.messages import (
     MessageSubscriber,
     MessageSender,
     PolylinesCmd,
-    ServerFps,
-    ClientFps,
+    ServerFps, ClientFps,
     VehicleName,
     WorldName,
     Velocity,
-    Heading,
-    Accel,
-    Gyro,
-    Enu,
-    Geo,
-    ClientRuntime,
-    ServerRuntime,
-    Location,
+    Heading, Accel, Gyro,
+    Enu, Geo,
+    ClientRuntime, ServerRuntime,
     TurnSignal,
-    ModelSteer,
-    ModelSpeed,
-    ModelAutopilot,
-    ThrottleLog,
-    SteerLog,
-    BrakeLog,
-    ReverseLog,
-    HandbrakeLog,
-    ManualLog,
-    GearLog,
-    AutopilotLog,
+    ModelSteer, ModelSpeed, ModelAutopilot,
+    ThrottleLog, SteerLog, BrakeLog, ReverseLog, HandbrakeLog, ManualLog, GearLog, AutopilotLog,
     RegulateSpeedLog,
     SteerAngle, 
     ClearNPCs,
-    Rotation, GlobalWP
+    Location, Rotation, 
+    GlobalWP, LocalWP
 )
 from src.messages.logger import Logger
 
-from typing import Optional
-from typing import Union, Dict
+from typing import Optional, Any
 from tqdm.auto import tqdm
 from collections import deque
 from abc import ABC, abstractmethod
@@ -192,6 +177,7 @@ class Viewer(ABC):
         self.sub_server_runtime = MessageSubscriber(ServerRuntime)
         self.sub_polylines = MessageSubscriber(PolylinesCmd)
         self.sub_global_wp = MessageSubscriber(GlobalWP)
+        self.sub_local_wp = MessageSubscriber(LocalWP)
 
     def attach_plugins(self, **plugins):
         for name, value in plugins.items():
@@ -201,7 +187,7 @@ class Viewer(ABC):
             else:
                 self.log.ERROR(f"Not able to use plugin {name}. It is not a predefined attribute")
         
-    def init_sensor(self, sensors_metadata: dict):
+    def init_sensor(self, sensors_metadata: dict[Any, list[Optional[dict], bool]]):
         """Lazy initialize sensors"""
         type_dict = {}
         for sensor, [transform, ego_attach] in sensors_metadata.items():
@@ -246,6 +232,92 @@ class Viewer(ABC):
             if sensor:
                 self.choosen_sensor = sensor
 
+    def change_view_all(self, view_name: Optional[str] = None, step: int = 0):
+        previous_view = getattr(self.sensor_manager, "active_view", None)
+        view_names = list(CameraView.__members__.keys()) + list(self.sensor_manager.view_list.keys())
+        if not view_names:
+            return
+
+        if view_name in view_names:
+            self.sensor_manager.active_view = view_name
+            selected_view = view_name
+        else:
+            selected_view = self.sensor_manager.switch_view(step=step)
+
+        if selected_view is None:
+            return
+
+        transform = self.sensor_manager.get_view_transform(selected_view)
+        if transform is None:
+            return
+
+        for camera_name in self.camera_keys:
+            self.sensors_list[camera_name].change_view(**transform)
+
+        self.controller.view_name = selected_view
+        if selected_view != previous_view:
+            self.log.DEBUG(f"View toggled → [i]{selected_view.replace('_', ' ').title()}[/i]")
+
+    def add_view(self, view_name: str, transform: dict, activate: bool = False, overwrite: bool = False):
+        """Register a runtime camera view and optionally apply it immediately."""
+        success = self.sensor_manager.add_view(view_name, transform, activate=activate, overwrite=overwrite)
+        if success and activate:
+            self.change_view_all(view_name=view_name)
+        return success
+
+    @staticmethod
+    def _pose6_to_view_dict(pose6: np.ndarray) -> dict:
+        """Convert [x, y, z, roll, pitch, yaw] into the camera transform dict format."""
+        return {
+            "x": float(pose6[0]),
+            "y": float(pose6[1]),
+            "z": float(pose6[2]),
+            "roll": float(pose6[3]),
+            "pitch": float(pose6[4]),
+            "yaw": float(pose6[5]),
+        }
+
+    def register_view_matrix(self, prefix: str, views: Any, activate_first: bool = False):
+        """
+        Register/update runtime views from an (N, 6) matrix.
+
+        Each row maps to: [x, y, z, roll, pitch, yaw].
+        Existing views with the same prefix are overwritten each call.
+        """
+        if views is None:
+            return
+
+        if hasattr(views, "to_numpy"):
+            views = views.to_numpy()
+
+        views_arr = np.asarray(views)
+        if views_arr.ndim == 1 and views_arr.shape[0] == 6:
+            views_arr = views_arr.reshape(1, 6)
+
+        if views_arr.ndim != 2 or views_arr.shape[1] != 6:
+            return
+
+        updated_names = []
+        for idx, pose in enumerate(views_arr):
+            view_name = f"{prefix}_{idx}"
+            transform = self._pose6_to_view_dict(pose)
+            if not self.sensor_manager.update_view(view_name, transform):
+                self.add_view(view_name, transform, overwrite=True)
+            updated_names.append(view_name)
+
+        # Remove stale views if waypoint count shrank.
+        stale_names = [name for name in self.sensor_manager.view_list.keys() if name.startswith(f"{prefix}_") and name not in updated_names]
+        for name in stale_names:
+            self.sensor_manager.view_list.pop(name, None)
+
+        if activate_first and updated_names and self.sensor_manager.active_view not in updated_names:
+            self.change_view_all(view_name=updated_names[0])
+
+        active_view = self.sensor_manager.active_view
+        if active_view in updated_names:
+            # Re-apply transform so the active runtime view tracks incoming updates.
+            self.change_view_all(view_name=active_view)
+
     # ============ BACKWARD COMPATIBILITY PROPERTIES ============
     @property
     def sensors_list(self):
@@ -280,9 +352,6 @@ class Viewer(ABC):
         else:
             self.world.wait_for_tick()
             
-    def change_view_all(self, view_name: str):
-        for camera_name in self.camera_keys:
-            self.sensors_list[camera_name].change_view(**getattr(CameraView, view_name).value)
 
     def close(self) -> None:
         
@@ -448,7 +517,7 @@ class Viewer(ABC):
     def _handle_controller_inputs(self):
         """Handle view changes and camera switching"""
         if self.controller.view_changed:
-            self.change_view_all(self.controller.view_name)
+            self.change_view_all(step=self.controller.view_step)
         if self.controller.camera_changed:
             self.switch_camera(self.controller.camera_step)
     
@@ -599,9 +668,9 @@ class ReplayViewer(Viewer):
                 self._handle_trajectory_logging()
                 self._handle_replay_step(unrouted_map, routed_map)
                 
-                # global_wp = self.sub_global_wp.receive()
-                # view = {"x": global_wp[-1, 0], "y": global_wp[-1, 1], "z": global_wp[-1, 2] + 1.5, "roll": global_wp[-1, 3], "pitch": global_wp[-1, 4], "yaw": global_wp[-1, 5]}
-                # self.sensor_manager.get_sensor("rgb_1").change_view(**view)
+                local_wp = self.sub_local_wp.receive()
+                local_wp[:, 2] += 1.7
+                self.register_view_matrix("LOCAL_WP", local_wp, activate_first=False)
 
                 # Render (replay mode)
                 self._render_base_hud(frame)
@@ -676,7 +745,7 @@ class ReplayViewer(Viewer):
         if self.replayer:
             if self.replayer.data_collector: 
                 image_kwargs = (
-                    {"I0": self.sensor_manager.get_sensor_data("rgb_0"), "MR": routed_map} 
+                    {"I0": self.sensor_manager.get_sensor_data("rgb_0")} 
                 )
                 self.replayer.step(**image_kwargs)
             else: 

@@ -10,8 +10,7 @@ import networkx as nx
 import math
 import time
 
-from scipy.optimize import linear_sum_assignment
-from scipy.interpolate import interp1d
+from scipy.interpolate import interp1d, PchipInterpolator
 from scipy.spatial import cKDTree
 from src.messages.logger import Logger
 from src.control.world import World
@@ -61,26 +60,8 @@ class NodeFinder:
     
     # Keeping this just in case
     def update_state(self, p):
-
-        distance = compute_distance(self.path, p)
-        in_range_path_idx = np.where(np.abs(distance - self.Ld) <= self.Ld)[0]
-        
-        split_indices = np.where(np.diff(in_range_path_idx) != 1)[0] + 1
-        consec_groups = np.split(in_range_path_idx, split_indices)
-
-        for group_indices in consec_groups:
-            if self.position_idx in group_indices:
-                min_index_group = np.argmin(np.abs(distance[group_indices]))
-                candidate_idx = group_indices[min_index_group]
-                if candidate_idx > self.position_idx and abs(distance[candidate_idx] - distance[self.position_idx]) > self.update_dist:
-                    self.position_idx = candidate_idx
-                return self.position_idx
-        
-        return self.position_idx
-    
-    def update_state(self, p):
         """Optimized version using KDTree"""
-        dists, idxs = self.kdtree.query(p, k=self.path_length, distance_upper_bound=2*self.Ld)
+        dists, idxs = self.kdtree.query(p, k=10, distance_upper_bound=2*self.Ld)
         mask = np.isfinite(dists)
         idxs, dists = idxs[mask], dists[mask]
 
@@ -110,6 +91,42 @@ class NodeFinder:
                 return self.position_idx
         return self.position_idx
 
+    def update_state(self, p):
+        """Hybrid search: Local window first, KDTree fallback."""
+        search_window = 20
+        start_idx = max(0, self.position_idx - 5)
+        end_idx = min(self.path_length, self.position_idx + search_window)
+        
+        window_coords = self.path[start_idx:end_idx]
+        d_vec = window_coords - p
+        dists_sq = np.sum(d_vec**2, axis=1)
+        min_local_idx = np.argmin(dists_sq)
+        
+        if min_local_idx < (len(dists_sq) - 1):
+            candidate_idx = start_idx + min_local_idx
+            if candidate_idx > self.position_idx:
+                self.position_idx = candidate_idx
+            return self.position_idx
+
+        idxs = self.kdtree.query_ball_point(p, r=2 * self.Ld)
+        if not idxs: return self.position_idx
+        
+        idxs = np.sort(idxs)
+        dists = np.linalg.norm(self.path[idxs] - p, axis=1)
+        
+        split_indices = np.where(np.diff(idxs) != 1)[0] + 1
+        groups_idx = np.split(idxs, split_indices)
+        groups_dist = np.split(dists, split_indices)
+
+        for g_idx, g_dist in zip(groups_idx, groups_dist):
+            if self.position_idx in g_idx:
+                candidate_idx = g_idx[np.argmin(g_dist)]
+                if candidate_idx > self.position_idx:
+                    self.position_idx = candidate_idx
+                return self.position_idx
+                
+        return self.position_idx
+
 class PathHandler(NodeFinder):
     """
     Core handler for trajectory state abstraction and parameterization along a physical layout.
@@ -124,76 +141,95 @@ class PathHandler(NodeFinder):
       (N,6) -> [x, y, z, r, p, y]
       (N,7) -> [x, y, z, r, p, y, t]
     """
-    def __init__(self, defined_path: np.ndarray, extrapolate: bool = True):
+    def __init__(self, defined_path: np.ndarray, extrapolate: bool = True, ratio: int = 2):
         self.log = Logger()
-        super().__init__(15, defined_path[:, :3])
-
-        assert defined_path.ndim == 2 and defined_path.shape[1] in (3, 4, 6, 7), \
-            "defined_path must be (N,3) [x,y,z], (N,4) [x,y,z,t], (N,6) [x,y,z,r,p,y], or (N,7) [x,y,z,r,p,y,t]"
         
-        self.path_xyz = defined_path[:, :3].astype(float)
+        # 1. Validate Input
+        assert defined_path.ndim == 2 and defined_path.shape[1] in (3, 4, 6, 7), \
+            "defined_path must be (N,3), (N,4), (N,6), or (N,7)"
+        
+        num_raw_points = len(defined_path)
         self.has_rot = defined_path.shape[1] in (6, 7)
-        if self.has_rot:
-            self.path_rpy = defined_path[:, 3:6].astype(float)
-            self.path_rpy[:, 0] = np.rad2deg(np.unwrap(np.deg2rad(self.path_rpy[:, 0])))
-            self.path_rpy[:, 1] = np.rad2deg(np.unwrap(np.deg2rad(self.path_rpy[:, 1])))
-            self.path_rpy[:, 2] = np.rad2deg(np.unwrap(np.deg2rad(self.path_rpy[:, 2])))
-            
         self.has_time = defined_path.shape[1] in (4, 7)
 
-        # --- arc-length for projection ---
-        diffs   = np.diff(self.path_xyz, axis=0)
+        # 2. Extract Full-Resolution Data
+        full_xyz = defined_path[:, :3].astype(float)
+
+        # 3. Calculate Full-Resolution Cumulative Arc-Length (s)
+        # This ensures s[-1] is the true physical length of the entire recording
+        diffs = np.diff(full_xyz, axis=0)
         seg_len = np.linalg.norm(diffs, axis=1)
-        s       = np.concatenate(([0.0], np.cumsum(seg_len)))
+        full_s = np.concatenate(([0.0], np.cumsum(seg_len)))
 
-        # Ensure strictly increasing for Pchip by pushing identical distances forward slightly
-        eps_dist = 1e-5
-        for i in range(1, len(s)):
-            if s[i] <= s[i-1]:
-                s[i] = s[i-1] + eps_dist
+        # 4. Calculate Full-Resolution Cumulative Time (t)
+        full_t = None
+        if self.has_time:
+            # Assumes the last column is delta_t recording
+            t_deltas = defined_path[:, -1].astype(float)
+            full_t = np.cumsum(t_deltas)
 
-        self.s = s
-        self.seg_vec = diffs
-        self.seg_len = seg_len
+        # 5. Handle Full-Resolution Rotation Unwrapping
+        # We unwrap before slicing to prevent missing 360-degree transitions (aliasing)
+        full_rpy = None
+        if self.has_rot:
+            full_rpy = defined_path[:, 3:6].astype(float)
+            # Unwrap each axis individually
+            for col in range(3):
+                full_rpy[:, col] = np.rad2deg(np.unwrap(np.deg2rad(full_rpy[:, col])))
 
-        # --- interpolation in s ---
-        from scipy.interpolate import PchipInterpolator
-        if len(self.s) >= 4:
+        # 6. Apply Slicing Ratio
+        # Ensure we always include the very last point to preserve the path endpoint
+        indices = np.arange(0, num_raw_points, ratio)
+        if indices[-1] != num_raw_points - 1:
+            indices = np.append(indices, num_raw_points - 1)
+
+        # 7. Sliced Properties for Logic and Interpolators
+        self.path_xyz = full_xyz[indices]
+        self.s = full_s[indices]
+        self.seg_vec = np.diff(self.path_xyz, axis=0)
+        
+        # Ensure s is strictly increasing (critical for PchipInterpolator)
+        eps = 1e-5
+        for i in range(1, len(self.s)):
+            if self.s[i] <= self.s[i-1]:
+                self.s[i] = self.s[i-1] + eps
+
+        self.path_length = len(self.path_xyz)
+        self.log.INFO(f"PathHandler: Reduced {num_raw_points} -> {self.path_length} points (ratio={ratio})")
+
+        # Initialize parent NodeFinder/KDTree with the REDUCED path
+        super().__init__(15, self.path_xyz)
+
+        # 8. Setup Spatial Interpolators (Parameterized by s)
+        if self.path_length >= 4:
             self.x_of_s = PchipInterpolator(self.s, self.path_xyz[:, 0], extrapolate=extrapolate)
             self.y_of_s = PchipInterpolator(self.s, self.path_xyz[:, 1], extrapolate=extrapolate)
             self.z_of_s = PchipInterpolator(self.s, self.path_xyz[:, 2], extrapolate=extrapolate)
             if self.has_rot:
+                self.path_rpy = full_rpy[indices]
                 self.roll_of_s = PchipInterpolator(self.s, self.path_rpy[:, 0], extrapolate=extrapolate)
                 self.pitch_of_s = PchipInterpolator(self.s, self.path_rpy[:, 1], extrapolate=extrapolate)
                 self.yaw_of_s = PchipInterpolator(self.s, self.path_rpy[:, 2], extrapolate=extrapolate)
         else:
-            self.x_of_s = interp1d(self.s, self.path_xyz[:, 0], kind="linear",
-                                   bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 0], self.path_xyz[-1, 0]))
-            self.y_of_s = interp1d(self.s, self.path_xyz[:, 1], kind="linear",
-                                   bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 1], self.path_xyz[-1, 1]))
-            self.z_of_s = interp1d(self.s, self.path_xyz[:, 2], kind="linear",
-                                   bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 2], self.path_xyz[-1, 2]))
+            kind = "linear"
+            self.x_of_s = interp1d(self.s, self.path_xyz[:, 0], kind=kind, bounds_error=False, fill_value="extrapolate")
+            self.y_of_s = interp1d(self.s, self.path_xyz[:, 1], kind=kind, bounds_error=False, fill_value="extrapolate")
+            self.z_of_s = interp1d(self.s, self.path_xyz[:, 2], kind=kind, bounds_error=False, fill_value="extrapolate")
             if self.has_rot:
-                self.roll_of_s = interp1d(self.s, self.path_rpy[:, 0], kind="linear", bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_rpy[0, 0], self.path_rpy[-1, 0]))
-                self.pitch_of_s = interp1d(self.s, self.path_rpy[:, 1], kind="linear", bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_rpy[0, 1], self.path_rpy[-1, 1]))
-                self.yaw_of_s = interp1d(self.s, self.path_rpy[:, 2], kind="linear", bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_rpy[0, 2], self.path_rpy[-1, 2]))
+                self.path_rpy = full_rpy[indices]
+                self.roll_of_s = interp1d(self.s, self.path_rpy[:, 0], kind=kind, bounds_error=False, fill_value="extrapolate")
+                self.pitch_of_s = interp1d(self.s, self.path_rpy[:, 1], kind=kind, bounds_error=False, fill_value="extrapolate")
+                self.yaw_of_s = interp1d(self.s, self.path_rpy[:, 2], kind=kind, bounds_error=False, fill_value="extrapolate")
 
-        # --- interpolation in t if available ---
+        # 9. Setup Temporal Interpolators (Parameterized by t)
         if self.has_time:
-            self.log.INFO("Found time vector. Enabling spatial and temporal mode")
-            
-            self.timer = 0
-            # Calculate absolute time
-            t_col = defined_path[:, -1].astype(float)
-            self.t = np.cumsum(t_col)
-            
-            # Ensure strictly increasing for Pchip
-            eps_t = 1e-5
+            self.t = full_t[indices]
+            # Ensure t is strictly increasing
             for i in range(1, len(self.t)):
                 if self.t[i] <= self.t[i-1]:
-                    self.t[i] = self.t[i-1] + eps_t
+                    self.t[i] = self.t[i-1] + eps
             
-            if len(self.t) >= 4:
+            if self.path_length >= 4:
                 self.x_of_t = PchipInterpolator(self.t, self.path_xyz[:, 0], extrapolate=extrapolate)
                 self.y_of_t = PchipInterpolator(self.t, self.path_xyz[:, 1], extrapolate=extrapolate)
                 self.z_of_t = PchipInterpolator(self.t, self.path_xyz[:, 2], extrapolate=extrapolate)
@@ -202,26 +238,26 @@ class PathHandler(NodeFinder):
                     self.pitch_of_t = PchipInterpolator(self.t, self.path_rpy[:, 1], extrapolate=extrapolate)
                     self.yaw_of_t = PchipInterpolator(self.t, self.path_rpy[:, 2], extrapolate=extrapolate)
             else:
-                self.x_of_t = interp1d(self.t, self.path_xyz[:, 0], kind="linear",
-                                       bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 0], self.path_xyz[-1, 0]))
-                self.y_of_t = interp1d(self.t, self.path_xyz[:, 1], kind="linear",
-                                       bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 1], self.path_xyz[-1, 1]))
-                self.z_of_t = interp1d(self.t, self.path_xyz[:, 2], kind="linear",
-                                       bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_xyz[0, 2], self.path_xyz[-1, 2]))
+                kind = "linear"
+                self.x_of_t = interp1d(self.t, self.path_xyz[:, 0], kind=kind, bounds_error=False, fill_value="extrapolate")
+                self.y_of_t = interp1d(self.t, self.path_xyz[:, 1], kind=kind, bounds_error=False, fill_value="extrapolate")
+                self.z_of_t = interp1d(self.t, self.path_xyz[:, 2], kind=kind, bounds_error=False, fill_value="extrapolate")
                 if self.has_rot:
-                    self.roll_of_t = interp1d(self.t, self.path_rpy[:, 0], kind="linear", bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_rpy[0, 0], self.path_rpy[-1, 0]))
-                    self.pitch_of_t = interp1d(self.t, self.path_rpy[:, 1], kind="linear", bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_rpy[0, 1], self.path_rpy[-1, 1]))
-                    self.yaw_of_t = interp1d(self.t, self.path_rpy[:, 2], kind="linear", bounds_error=False, fill_value="extrapolate" if extrapolate else (self.path_rpy[0, 2], self.path_rpy[-1, 2]))
+                    self.roll_of_t = interp1d(self.t, self.path_rpy[:, 0], kind=kind, bounds_error=False, fill_value="extrapolate")
+                    self.pitch_of_t = interp1d(self.t, self.path_rpy[:, 1], kind=kind, bounds_error=False, fill_value="extrapolate")
+                    self.yaw_of_t = interp1d(self.t, self.path_rpy[:, 2], kind=kind, bounds_error=False, fill_value="extrapolate")
             
-            # keep time interpolation linear to prevent non-monotonic mappings
+            # Map distance (s) to time (t)
             self.t_of_s = interp1d(self.s, self.t, kind="linear",
-                                   bounds_error=False, fill_value="extrapolate" if extrapolate else (t_col[0], t_col[-1]))
-
+                                   bounds_error=False, fill_value="extrapolate" if extrapolate else (self.t[0], self.t[-1]))
         else:
-            self.log.WARNING("Didn't find time vector. Disabling temporal mode")
-
+            self.log.WARNING("Time vector not found, disabling temporal mode")
             self.t = None
             
+        up = np.array([0, 0, 1])
+        self.right_vecs = np.cross(self.seg_vec, up)
+        norms = np.linalg.norm(self.right_vecs, axis=1, keepdims=True)
+        self.right_vecs /= (norms + 1e-12)
     
     def pose(self, query: float, use_time: bool = False):
         """
@@ -314,7 +350,7 @@ class PathHandler(NodeFinder):
                         proj = a + np.clip(t_raw, 0.0, 1.0) * ab
                     best_i = i + 1
 
-        side_val = self.get_side(p, proj, a, b)
+        side_val = self.get_side(p, proj, best_i)
 
         d2 = np.dot(p - proj, p - proj)
         seg_len = np.linalg.norm(b - a)
@@ -347,25 +383,20 @@ class PathHandler(NodeFinder):
         Q = A + t * AB
         return Q
 
-    def get_side(self, p, proj, a, b):
-        forward = b - a
-        
-        up = np.array([0, 0, 1]) 
-        right_vec = np.cross(forward, up)
-        
-        norm = np.linalg.norm(right_vec)
-        if norm < 1e-9:
-            return 0.0
-        right_vec /= norm
-
+    def get_side(self, p, proj, best_i):
+        """
+        Calculates lateral error using precomputed Right vectors.
+        best_i: The index of the segment the vehicle is on.
+        """
         error_vec = p - proj
+        # Dot product of (Vector to Car) and (Precomputed Right Vector)
+        return np.dot(error_vec, self.right_vecs[best_i])
 
-        side_dist = np.dot(error_vec, right_vec)
-        
-        return side_dist
-
-    def waypoints(self, position: np.ndarray, offsets: list[float], use_time: bool = False, merge = False):
-        dist_travelled, *_, side_val = self.project(position)
+    def waypoints(self, position: np.ndarray, offsets: list[float], use_time: bool = False, merge = False, precomputed_s_side = None):
+        if precomputed_s_side is not None:
+            dist_travelled, side_val = precomputed_s_side
+        else:
+            dist_travelled, *_, side_val = self.project(position)
         if not use_time:
             dist_offset = dist_travelled + np.array(offsets)
             wp, wp_rpy = self.pose(dist_offset)
@@ -848,7 +879,6 @@ class WaypointsAlign:
         groups: list[tuple] = []
         current_group: list = []
         current_jid = jids[0]
-        group_start = 0
 
         if current_jid is not None:
             current_group.append(np.concatenate([coordinates[0], heading[0]]))
@@ -1055,26 +1085,6 @@ class WaypointsAlign:
         
         filtered_meta = np.array(filtered_meta)
         
-        N = SMOOTHING_BLEND_HALF_WINDOW
-        boundaries = [b for b in range(1, len(jids)) if (jids[b] is None) != (jids[b-1] is None)]
-        
-        for b in boundaries:
-            start = max(0, b - N)
-            end = min(len(filtered_meta), b + N)
-            if end - start < 3: 
-                continue
-            
-            window_size = SMOOTHING_WINDOW_SIZE
-            pad = window_size // 2
-            
-            for _ in range(2):
-                window = filtered_meta[start:end, :3]
-                new_window = np.copy(window)
-                for dim in range(3):
-                    padded = np.pad(window[:, dim], (pad, pad), mode='edge')
-                    new_window[:, dim] = np.convolve(padded, np.ones(window_size)/window_size, mode='valid')
-                filtered_meta[start:end, :3] = new_window
-
         return filtered_meta
 
     def spatial_align(self, coordinates: np.ndarray, headings: np.ndarray):

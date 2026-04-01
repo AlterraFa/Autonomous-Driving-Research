@@ -194,18 +194,18 @@ class Map:
             cos_t, sin_t = np.cos(heading_rad), np.sin(heading_rad)
             M = np.float32([[cos_t, sin_t, (1 - cos_t) * cx - sin_t * cy],[-sin_t, cos_t, sin_t * cx + (1 - cos_t) * cy]])
                             
-            try:
-                gpu_img = cv2.cuda_GpuMat()
-                gpu_img.upload(cutout)
-                gpu_rotated = cv2.cuda.warpAffine(gpu_img, M, (cutout.shape[1], cutout.shape[0]))
-                rotated = gpu_rotated.download()
+            # try:
+            #     gpu_img = cv2.cuda_GpuMat()
+            #     gpu_img.upload(cutout)
+            #     gpu_rotated = cv2.cuda.warpAffine(gpu_img, M, (cutout.shape[1], cutout.shape[0]))
+            #     rotated = gpu_rotated.download()
                 
-                gpu_img.release()
-                gpu_rotated.release()
-                self.logger.INFO("Using GPU to rotate map", once = True)
-            except:
-                rotated = cv2.warpAffine(cutout, M, (cutout.shape[1], cutout.shape[0]))
-                self.logger.INFO("Falling back to CPU map rotation", once = True)
+            #     gpu_img.release()
+            #     gpu_rotated.release()
+            #     self.logger.INFO("Using GPU to rotate map", once = True)
+            # except:
+            rotated = cv2.warpAffine(cutout, M, (cutout.shape[1], cutout.shape[0]), flags=cv2.INTER_LINEAR)
+            self.logger.INFO("Falling back to CPU map rotation", once = True)
 
             if self.relative_pos == "center":
                 x1f = max(0, int(cx - w // 2))
@@ -243,7 +243,7 @@ class Map:
 
             self.logger.DEBUG(f"Current waypoint index: {self.path_handler.position_idx}", frequency = 5)
             
-            local_wp = global_2_local(location, global_wp, heading_rad)
+            local_wp = global_2_local(location, global_wp, heading_rad)[:, :2]
             self.poly_pub.send(local_wp)
             
             if display:

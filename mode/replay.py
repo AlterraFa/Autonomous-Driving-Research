@@ -6,6 +6,7 @@ import carla
 
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 
+from config.enum import CameraView
 from src.messages.logger import Logger
 from src.messages.message_handler import MessageSender
 from src.messages.all_messages import ClearNPCs
@@ -97,17 +98,16 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
         imu_sensor.set_attribute("noise_gyro_bias_x", 0.005)
         imu_sensor.set_attribute("noise_gyro_bias_y", 0.005)
 
-        sensors_metadata = {rgb_sensor: [None, True], gnss_sensor: [None, True], imu_sensor: [None, True]}
+        sensors_metadata = {
+            rgb_sensor: [CameraView.FIRST_PERSON.value, True], 
+            gnss_sensor: [None, True], 
+            imu_sensor: [None, True]
+        }
         if args.clear_npcs:
             sensors_metadata = sensors_metadata | {RGB(virt_world.world): [None, False]}
         if not SensorSpawn.test_sensor(game_viewer, sensors_metadata):
             logger.ERROR(f"Skipping replay due to sensor initialization failure: {replay_dir}")
             continue
-
-        lp = line_profiler.LineProfiler()
-        lp.add_function(game_viewer.run)
-        lp.add_function(game_viewer.step_world)
-        lp_wrapper = lp(game_viewer.run)
 
         map_processor, path_optimizer = make_map_and_optimizer(virt_world)
         game_viewer.attach_plugins(path_optimizer=path_optimizer)
@@ -145,7 +145,18 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
             map_processor = map_processor,
             traj_logger   = traj_logger
         )
+
+
+        lp = line_profiler.LineProfiler()
+        lp.add_function(game_viewer.run)
+        lp.add_function(game_viewer.step_world)
         lp.add_function(game_viewer.map_processor.retrieve_map)
+        if args.redo_traj == False:
+            lp.add_function(game_viewer.map_processor.path_handler.waypoints)
+            lp.add_function(game_viewer.replayer.step)
+            lp.add_function(game_viewer.replayer.path_handler.project)
+            lp.add_function(game_viewer.replayer.path_handler.update_state)
+        lp_wrapper = lp(game_viewer.run)
 
         with progress:
             send_clear_npcs = MessageSender(ClearNPCs)

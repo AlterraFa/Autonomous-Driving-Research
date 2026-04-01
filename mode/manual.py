@@ -6,7 +6,7 @@ from src.messages.logger import Logger
 from src.control.vehicle_control import Vehicle
 from src.others.data_processor import TrajectoryBuffer
 from src.render.viewer import VIEWER_REGISTRY
-from config.enum import VehicleClass as VClass
+from config.enum import VehicleClass as VClass, CameraView
 
 from .utils import (
     logger,
@@ -42,7 +42,11 @@ def run_manual(args, client, virt_world, folder, viewer_args):
     controlling_vehicle = Vehicle(spawner.single_vehicle, virt_world.world)
 
     game_viewer = VIEWER_REGISTRY["manual"](**{**viewer_args, "vehicle": controlling_vehicle})
-    game_viewer.init_sensor({rgb_sensor: [None, True], gnss_sensor: [None, True], imu_sensor: [None, True]})
+    game_viewer.init_sensor({
+        rgb_sensor: [CameraView.FIRST_PERSON.value, True], 
+        gnss_sensor: [None, True], 
+        imu_sensor: [None, True]}
+    )
 
     lp = line_profiler.LineProfiler()
     lp.add_function(game_viewer.run)

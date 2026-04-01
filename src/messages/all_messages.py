@@ -120,7 +120,14 @@ class GlobalWP(Enum):
     Owner = "ReplayHandler"
     msgID = 13
     msgType = (list, np.ndarray, torch.Tensor)
-    default = staticmethod(lambda: np.zeros((3, 2), dtype=float))
+    default = staticmethod(lambda: np.zeros((6, 2), dtype=float))
+
+class LocalWP(Enum):
+    Queue = "General"
+    Owner = "ReplayHandler"
+    msgID = 14
+    msgType = (list, np.ndarray, torch.Tensor)
+    default = staticmethod(lambda: np.zeros((6, 2), dtype=float))
 
 #################################### Control ####################################
 class Throttle(Enum):

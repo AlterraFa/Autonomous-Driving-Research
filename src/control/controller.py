@@ -1,6 +1,6 @@
 import pygame
 
-from config.enum import JoyControl, JOYBINDS, KEYBINDS
+from config.enum import JoyControl, JOYBINDS, KEYBINDS, CameraView
 from src.messages.logger import Logger
 from src.messages.message_handler import MessageSender
 from src.messages.all_messages import (
@@ -41,6 +41,7 @@ class Controller:
         
         
         self.view_name = "FIRST_PERSON"; self.view_changed = False
+        self.view_step = 1
         self.camera_step = 1; self.camera_changed = False
         self.prev_keys_view = pygame.key.get_pressed()
         self.toggle_map = True
@@ -94,14 +95,14 @@ class Controller:
         for event in events:
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_UP:
-                    self.view_name = "FIRST_PERSON"
+                    self.view_step = 1
                     self.view_changed = True
-                    self.log.DEBUG(f"View toggled → [i]{'First Person'}[/i]")
+                    self.log.DEBUG("View step requested → [i]Next[/i]")
 
                 elif event.key == pygame.K_DOWN:
-                    self.view_name = "THIRD_PERSON"
+                    self.view_step = -1
                     self.view_changed = True
-                    self.log.DEBUG(f"View toggled → [i]{'Third Person'}[/i]")
+                    self.log.DEBUG("View step requested → [i]Previous[/i]")
 
                 elif event.key == pygame.K_RIGHT:
                     self.camera_changed = True
@@ -119,14 +120,29 @@ class Controller:
             if self.has_joystick and event.type == pygame.JOYHATMOTION:
                 hx, hy = event.value
                 if hy == 1:
-                    self.view_name = "FIRST_PERSON"; self.view_changed = True
-                    self.log.DEBUG(f"View toggled → [i]{'First Person'}[/i]")
+                    self.view_step = 1
+                    self.view_changed = True
+                    self.log.DEBUG("View step requested → [i]Next[/i]")
                 elif hy == -1:
-                    self.view_name = "THIRD_PERSON"; self.view_changed = True
-                    self.log.DEBUG(f"View toggled → [i]{'Third Person'}[/i]")
+                    self.view_step = -1
+                    self.view_changed = True
+                    self.log.DEBUG("View step requested → [i]Previous[/i]")
                 if hx != 0:
                     self.camera_changed = True
                     self.camera_step = 1 if hx > 0 else -1
+
+    def _step_view(self, step: int):
+        view_names = list(CameraView.__members__.keys())
+        if not view_names:
+            return
+
+        if self.view_name not in view_names:
+            self.view_name = view_names[0]
+
+        current_idx = view_names.index(self.view_name)
+        next_idx = (current_idx + step) % len(view_names)
+        self.view_name = view_names[next_idx]
+        self.log.DEBUG(f"View toggled → [i]{self.view_name.replace('_', ' ').title()}[/i]")
     
     def toggle_autopilot(self):
         self.autopilot = not self.autopilot

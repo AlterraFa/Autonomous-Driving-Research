@@ -3,6 +3,7 @@ Sensor Manager for CARLA - Handles extraction and organization of sensor data.
 """
 
 from typing import Dict, Optional, Any, List
+from config.enum import CameraView
 from src.messages.logger import Logger
 
 
@@ -24,9 +25,69 @@ class SensorManager:
         """
         self.logger = logger or Logger()
         self.sensors_list: Dict[str, Any] = {}  # All sensors by name
+        self.view_list: Dict[str, Any] = {}
         self.sensors_by_type: Dict[str, Dict[str, Any]] = {}  # Organized by type
         self.active_camera: Optional[str] = None
         self.camera_keys: List[str] = []
+        self.camera_views: List[str] = []
+        self.active_view: Optional[str] = None
+
+    def add_view(self, view_name: str, transform: Dict[str, float], activate: bool = False, overwrite: bool = False) -> bool:
+        """
+        Register a custom runtime camera view.
+
+        :param view_name: Unique name for this view
+        :param transform: Camera transform keys (x, y, z, roll, pitch, yaw)
+        :param activate: If True, set this view as active immediately
+        :param overwrite: If True, allow replacing an existing custom view
+        :return: True if view was added/updated successfully
+        """
+        if not isinstance(transform, dict):
+            self.logger.WARNING("View transform must be a dictionary")
+            return False
+
+        required_keys = {"x", "y", "z", "roll", "pitch", "yaw"}
+        if not required_keys.issubset(transform.keys()):
+            self.logger.WARNING(f"View '{view_name}' missing required keys: {required_keys}")
+            return False
+
+        if view_name in self.view_list and not overwrite:
+            self.logger.WARNING(f"View '{view_name}' already exists. Use overwrite=True to replace it")
+            return False
+
+        self.view_list[view_name] = {k: float(transform[k]) for k in required_keys}
+        if activate:
+            self.active_view = view_name
+        return True
+
+    def update_view(self, view_name: str, transform: Dict[str, float]) -> bool:
+        """
+        Update transform attributes for an existing runtime view.
+
+        :param view_name: Existing runtime view name
+        :param transform: Camera transform keys (x, y, z, roll, pitch, yaw)
+        :return: True if updated successfully
+        """
+        if view_name not in self.view_list:
+            return False
+
+        required_keys = {"x", "y", "z", "roll", "pitch", "yaw"}
+        if not isinstance(transform, dict) or not required_keys.issubset(transform.keys()):
+            return False
+
+        self.view_list[view_name] = {k: float(transform[k]) for k in required_keys}
+        return True
+
+    def get_view_transform(self, view_name: str) -> Optional[Dict[str, float]]:
+        """
+        Get transform for a view from enum or runtime custom views.
+
+        :param view_name: View name to resolve
+        :return: Transform dict or None
+        """
+        if view_name in CameraView.__members__:
+            return getattr(CameraView, view_name).value
+        return self.view_list.get(view_name)
 
     def register_sensor(self, sensor_name: str, sensor_object: Any, sensor_type: str) -> None:
         """
@@ -150,6 +211,29 @@ class SensorManager:
         self.active_camera = self.camera_keys[new_idx]
         
         return self.active_camera
+
+    def switch_view(self, step: int = 1) -> Optional[str]:
+        """
+        Cycle to next/previous camera view from CameraView enum.
+
+        :param step: Direction and amount (+1 for next, -1 for previous, 0 keeps current)
+        :return: Name of active view or None
+        """
+        self.camera_views = list(CameraView.__members__.keys()) + list(self.view_list.keys())
+        if not self.camera_views:
+            return None
+
+        if self.active_view not in self.camera_views:
+            self.active_view = "FIRST_PERSON" if "FIRST_PERSON" in self.camera_views else self.camera_views[0]
+
+        if step == 0:
+            return self.active_view
+
+        current_idx = self.camera_views.index(self.active_view)
+        new_idx = (current_idx + step) % len(self.camera_views)
+        self.active_view = self.camera_views[new_idx]
+
+        return self.active_view
 
     def get_available_sensor_types(self) -> List[str]:
         """

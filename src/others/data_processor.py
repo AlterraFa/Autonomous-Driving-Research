@@ -20,7 +20,7 @@ from src.math.path import (
     TurnClassify, 
     WaypointsAlign
 )
-from src.math.coordinate_transform import global_2_local
+from src.math.coordinate_transform import global_2_local, global_2_local_rot, global_2_local_full_rot, rpy2ypr
 
 
 conf = toml.load(os.path.join(parent, "../config/config.toml"))
@@ -210,7 +210,9 @@ from src.messages.all_messages import (
     PolylinesCmd,
     ServerRuntime,
     SteerAngle,
-    GlobalWP
+    GlobalWP,
+    LocalWP,
+    Rotation
 )
 class ReplayHandler:
 
@@ -244,6 +246,7 @@ class ReplayHandler:
 
     def _init_transmittor(self):
         self.sub_location         = MessageSubscriber(Location)
+        self.sub_rotation         = MessageSubscriber(Rotation)
         self.sub_heading          = MessageSubscriber(Heading)
         self.sub_server_fps       = MessageSubscriber(ServerFps)
         self.sub_client_fps       = MessageSubscriber(ClientFps)
@@ -254,44 +257,46 @@ class ReplayHandler:
         self.sub_polylines        = MessageSubscriber(PolylinesCmd)
         self.sub_server_runtime   = MessageSubscriber(ServerRuntime)
         self.sub_steer_angle      = MessageSubscriber(SteerAngle)
+
         self.send_turn_signal         = MessageSender(TurnSignal)
         self.send_global_wp           = MessageSender(GlobalWP)
+        self.send_local_wp            = MessageSender(LocalWP)
         
 
     def step(self, **frame: np.ndarray):
         vehicle_location = self.sub_location.receive()
+        vehicle_rotation = self.sub_rotation.receive()
 
         # Convert yaw from degrees to radians for math functions
-        heading  = np.radians(self.sub_heading.receive())
+        heading = np.radians(self.sub_heading.receive())
 
-        # Distance from the center to the front of the car (adjust as per your vehicle)
-        front_offset = front_vehicle_offset  # meters
+        # Distance from vehicle origin to front reference point.
+        front_offset = front_vehicle_offset
 
-        # Calculate offset in x and y directions
-        offset_x = front_offset * np.cos(heading - np.pi / 2)
-        offset_y = front_offset * np.sin(heading - np.pi / 2)
+        # Build front anchor in 3D using full roll/pitch/yaw.
+        # Vehicle-forward is local +X in CARLA/Unreal coordinates.
+        r_ego = rpy2ypr(vehicle_rotation)
+        front_vec = r_ego.apply(np.array([front_offset, 0.0, 0.0]))
+        position = vehicle_location + front_vec
 
-        # Calculate front location coordinates
-        position = np.array([
-            vehicle_location[0] + offset_x,
-            vehicle_location[1] + offset_y,
-            vehicle_location[2]  # same height as center
-        ])
-        server_fps = self.sub_server_fps.receive()
-        if server_fps < 1: server_fps = self.sub_client_fps.receive()
         
         
         
         curr_dist, *_, lat_err = self.path_handler.project(position)
+        proj_data = (curr_dist, lat_err)
         global_scout, _ = self.path_handler.waypoints(
-            position, self.scout_points
+            position, self.scout_points, precomputed_s_side = proj_data
         )
         
+        # -- Query and transform to local
         global_loc, global_rot = self.path_handler.waypoints(
-            position, self.offset, use_time = self.use_temporal, merge = True
+            position, self.offset, use_time = self.use_temporal, merge = True, precomputed_s_side = proj_data
         )
-        mid_ego = global_2_local(vehicle_location, global_loc, heading)
         
+        local_loc = global_2_local_full_rot(position, global_loc, vehicle_rotation)
+        local_rot = global_2_local_rot(global_rot, vehicle_rotation)
+        
+
         path_branches  = self.branching_path.brancher(global_loc, global_scout, persist_dist = 20)
         ego_branches = np.empty_like(path_branches)[..., :2]
         if path_branches.shape[0] > 1:
@@ -299,10 +304,12 @@ class ReplayHandler:
         else:
             self.road_type = "uni"
         for idx, branch in enumerate(path_branches):
-            ego_branches[idx] = global_2_local(vehicle_location, branch, heading)
+            ego_branches[idx] = global_2_local_full_rot(position, branch, vehicle_rotation)[:, :2]
                 
                 
         if self.debug:
+            server_fps = self.sub_server_fps.receive()
+            if server_fps < 1: server_fps = self.sub_client_fps.receive()    
             global_loc[:, -1] += .5
             self.virt_world.draw_waypoints(global_loc, 2.0 * (1 / server_fps), size = .1, color = (255, 0, 0))
 
@@ -317,9 +324,11 @@ class ReplayHandler:
         else:
             turn_signal = -1
 
+        self.send_local_wp.send(np.concatenate([local_loc, local_rot], axis = 1))
         self.send_global_wp.send(np.concatenate([global_loc, global_rot], axis = 1))
         self.send_turn_signal.send(turn_signal)
 
+        self.logger.DEBUG(f"Lat Err: {lat_err:.3f}m", frequency = 5)
 
         # Only save when it moves (Prevent saving all the time when stopping at red light or stop sign)
         if self.data_collector:
@@ -334,12 +343,11 @@ class ReplayHandler:
             #             self.addition_cnt += 1
             # if curr_dist - self.prev_dist > 1e-2:
             #     self.addition_cnt = 0
-            self.logger.DEBUG(f"Lat Err: {lat_err:.3f}m", frequency = 5)
 
             saved = self.data_collector.maybe_save(
                 {
                     "gt_data": {
-                        "midlane_wp" : mid_ego,
+                        "midlane_wp" : local_loc[:, :2],
                         "aux_wp"     : ego_branches,
                         "steer"      : steer,
                         "steer_angle": steer_angle,
@@ -362,4 +370,4 @@ class ReplayHandler:
                 **frame
             )
             # self.prev_dist = curr_dist
-        return mid_ego
+        return local_loc
