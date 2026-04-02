@@ -27,7 +27,7 @@ class MapRenderConfig:
     map_offset: tuple[int, int] = (100, 100)
     map_range: tuple[int, int] = (50, 50)
     map_resize: tuple[int, int] = (200, 200)
-    map_scale: int = 3
+    map_scale: int = 2
 
 
 @dataclass(frozen=True)
@@ -68,9 +68,9 @@ class UIConfig:
 
 @dataclass(frozen=True)
 class OffsetsConfig:
-    front_vehicle_offset: float = 2.2
+    front_offset: float = 1.5
     temporal_offset: tuple[float, ...] = (0.0, 0.15, 0.3, 0.45, 0.6, 0.75)
-    spatial_offset: tuple[int, ...] = (0, 1, 3, 5, 7, 9)
+    spatial_offset: tuple[int, ...] = (0, 2, 4, 6, 8, 10, 12)
     scout_offset_params: tuple[int, int, int] = (-18, 33, 2)
 
 
@@ -174,7 +174,7 @@ class DataCollectionConfig:
     trajectory_buffer_capacity: int = 8192 * 8
     trajectory_distance_threshold_m: float = 0.0
     trajectory_min_dt_s: float = 0.05
-    save_fps: int = 20
+    save_fps: int = 10
     additional_trajectory_max: int = 20
 
 
@@ -186,6 +186,18 @@ class ReplayRuntimeConfig:
     actor_spawn_timeout_s: float = 30.0
     actor_settle_ticks: int = 30
     final_wait_s: float = 1.0
+
+
+@dataclass(frozen=True)
+class ContractingWPConfig:
+    enabled: bool = True
+    containment_mode: str = "circle"
+    k_nearest: int = 5
+    ref_point_idx: int = 0
+    containment_eps: float = 1e-3
+    local_wp_inside_bbox_z_offset: float = 1.0
+    local_wp_camera_z_offset: float = 0.7
+    min_remaining_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -214,6 +226,7 @@ class SimulationConfig:
     world: WorldConfig = field(default_factory=WorldConfig)
     data_collection: DataCollectionConfig = field(default_factory=DataCollectionConfig)
     replay_runtime: ReplayRuntimeConfig = field(default_factory=ReplayRuntimeConfig)
+    contracting_wp: ContractingWPConfig = field(default_factory=ContractingWPConfig)
     turn_detection: TurnDetectionConfig = field(default_factory=TurnDetectionConfig)
 
     def __post_init__(self) -> None:
@@ -225,6 +238,10 @@ class SimulationConfig:
             raise ValueError("rendering.fps_headless must be > 0")
         if len(self.offsets.spatial_offset) == 0 or len(self.offsets.temporal_offset) == 0:
             raise ValueError("offsets.spatial_offset and offsets.temporal_offset must be non-empty")
+        if self.contracting_wp.k_nearest <= 0:
+            raise ValueError("contracting_wp.k_nearest must be > 0")
+        if self.contracting_wp.containment_mode not in ("obb", "circle"):
+            raise ValueError("contracting_wp.containment_mode must be 'obb' or 'circle'")
 
 
 CONFIG = SimulationConfig()

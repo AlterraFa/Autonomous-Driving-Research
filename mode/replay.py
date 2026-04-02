@@ -16,6 +16,7 @@ from src.spawn.sensor_spawner import SensorSpawn
 from src.control.vehicle_control import Vehicle
 from src.others.data_processor import ReplayHandler
 from src.render.viewer import VIEWER_REGISTRY
+from src.math import ContractingWP
 
 from .utils import (
     logger,
@@ -52,7 +53,7 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
             continue
         
 
-        full_duration = get_recording_duration(path_2_recording)
+        full_duration = get_recording_duration(client, path_2_recording)
         client.show_recorder_file_info(path_2_recording, False)
 
         if temp_stop < 0:
@@ -134,6 +135,11 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
                 dataset_dir, args.temporal,
                 debug = args.draw_waypoints if hasattr(args, "draw_waypoints") else False,
             )
+            contracting_wp = ContractingWP(
+                world=virt_world.world,
+                ego_vehicle=ego_actor,
+                containment_mode="circle",
+            )
 
         progress = Progress(
             TextColumn("[progress.description]{task.description}"),
@@ -150,10 +156,11 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
             total=round(actual_duration, 2),
         )
         game_viewer.attach_plugins(
-            replayer      = replayer,
-            pbar          = (progress, pbar),
-            map_processor = map_processor,
-            traj_logger   = traj_logger
+            replayer       = replayer,
+            pbar           = (progress, pbar),
+            map_processor  = map_processor,
+            traj_logger    = traj_logger,
+            contracting_wp = contracting_wp
         )
 
 

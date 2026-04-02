@@ -45,12 +45,9 @@ MIN_SAVING_DIST = 0.4
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
 
-def get_recording_duration(log_path: str) -> float:
+def get_recording_duration(client, log_path: str) -> float:
     """Returns the recording duration in seconds for a CARLA .log file."""
-    client = carla.Client("localhost", 2000)
-    client.set_timeout(60.0)
-
-    report = client.show_recorder_file_info(log_path, True)
+    report = client.show_recorder_file_info(log_path, False)
     m = re.search(r"Duration:\s*([0-9.]+)\s*seconds", report)
     if m:
         duration = float(m.group(1))

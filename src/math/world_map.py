@@ -238,7 +238,7 @@ class Map:
                 location_bfscale, self.offset_path
             )
 
-            self.logger.DEBUG(f"Current waypoint index: {self.path_handler.position_idx}", frequency = 5)
+            self.logger.DEBUG("Current waypoint index: {}", self.path_handler.position_idx, frequency = 5)
             
             local_wp = global_2_local(location, global_wp, heading_rad)[:, :2]
             self.poly_pub.send(local_wp)

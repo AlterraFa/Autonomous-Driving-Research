@@ -1,7 +1,8 @@
 import pygame
 from config import CONFIG
 
-from config.enum import JoyControl, JOYBINDS, KEYBINDS, CameraView
+import config.enum as enum_defs
+from config.enum import JoyControl, JOYBINDS, KEYBINDS
 from src.messages.logger import Logger
 from src.messages.message_handler import MessageSender
 from src.messages.all_messages import (
@@ -133,7 +134,10 @@ class Controller:
                     self.camera_step = 1 if hx > 0 else -1
 
     def _step_view(self, step: int):
-        view_names = list(CameraView.__members__.keys())
+        view_names = [
+            name for name in enum_defs.CameraView.__members__.keys()
+            if name == "FIRST_PERSON" or name.startswith("LOCAL_WP_")
+        ]
         if not view_names:
             return
 

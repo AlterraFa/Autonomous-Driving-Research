@@ -268,6 +268,7 @@ class PathHandler(NodeFinder):
         if use_time:
             if self.t is None:
                 raise RuntimeError("This path has no time column.")
+            query = np.clip(query, self.t[0], self.t[-1])
             xyz = np.stack([
                 self.x_of_t(query),
                 self.y_of_t(query),
@@ -405,35 +406,44 @@ class PathHandler(NodeFinder):
                 self.log.ERROR(f"Temporal mode was disabled but you enabled `use_time` argument. Exiting...", exit_code = -1)
                 
             current_time = self.t_of_s(dist_travelled)
-            time_offset = current_time + offsets
+            time_offset = np.clip(current_time + np.asarray(offsets, dtype=float), self.t[0], self.t[-1])
             wp, wp_rpy = self.pose(time_offset, True)
 
         if merge:
             wp = self._loc_merging(wp, side_val, offsets)
             if self.has_rot:
-                wp_rpy = self._rot_merging(wp, wp_rpy)
+                wp_rpy = self._rot_merging(wp, wp_rpy, use_time=use_time)
                 
         wp = np.asarray(wp)
         return wp, wp_rpy
 
-    def _rot_merging(self, merged_wps: list, centerline_rpy: np.ndarray):
+    def _rot_merging(self, merged_wps: list, centerline_rpy: np.ndarray, use_time: bool = False):
         """
-        Updates the yaw in centerline_rpy to match the new trajectory tangent defined by merged_wps.
+        Updates yaw to point towards the final waypoint.
+
+        In temporal mode we keep the original/interpolated yaw whenever the
+        merged geometry barely moves, which avoids camera flips while the
+        vehicle is stopped. Only blend when there is substantial lateral motion (> 0.5m)
+        to handle genuine lane transitions.
         """
         if centerline_rpy is None: 
             return None
             
         merged_rpy = np.copy(centerline_rpy)
+        blend_distance = 1.5 if use_time else 0.0
         for i in range(len(merged_wps)):
-            if i < len(merged_wps) - 1:
-                tangent = merged_wps[i+1][:3] - merged_wps[i][:3]
-            else:
-                tangent = merged_wps[i][:3] - merged_wps[i-1][:3]
+            tangent = merged_wps[-1][:3] - merged_wps[i][:3]
                 
             norm = np.linalg.norm(tangent)
             if norm > 1e-6:
                 yaw = np.degrees(np.arctan2(tangent[1], tangent[0]))
-                merged_rpy[i, 2] = yaw
+                if use_time:
+                    weight = float(np.clip(norm / blend_distance, 0.0, 1.0))
+                    base_yaw = merged_rpy[i, 2]
+                    delta = (yaw - base_yaw + 180.0) % 360.0 - 180.0
+                    merged_rpy[i, 2] = base_yaw + weight * delta
+                else:
+                    merged_rpy[i, 2] = yaw
                 
         return merged_rpy
 
@@ -443,43 +453,31 @@ class PathHandler(NodeFinder):
         merge_fraction: 0.0 to 1.0. Determines how far into the offsets the path 
                         should return to the centerline.
         """
-        offsets_np = np.array(offsets)
-        horizon = offsets_np[-1] + 1e-6 
+        wps = np.asarray(centerline_wps)
+        n_points = len(wps)
+        if n_points < 2:
+            return wps
+
+        offsets_np = np.asarray(offsets)
+        merge_target_dist = (offsets_np[-1] + 1e-6) * merge_fraction
         
-        # This is the distance at which we want to be perfectly at 0 offset
-        merge_target_dist = horizon * merge_fraction
+        tangents = np.empty((n_points, 3), dtype=float)
+        tangents[:-1] = wps[1:, :3] - wps[:-1, :3]
+        tangents[-1] = wps[-1, :3] - wps[-2, :3]
+
+        right_vecs = np.stack([tangents[:, 1], -tangents[:, 0], np.zeros(n_points)], axis=1)
         
-        merged_pts = []
-        for i, p_center in enumerate(centerline_wps):
-            # 1. Calculate ratio relative to the merge_target_dist instead of full horizon
-            # We clip it at 1.0 so that points beyond the merge fraction stay at 0 offset
-            ratio = min(1.0, offsets_np[i] / (merge_target_dist + 1e-6))
-            
-            # 2. Quadratic decay
-            # If ratio is 1.0 (at or beyond merge point), decay is 0.0
-            decay = (1.0 - ratio) ** 2
-            active_offset = current_side_val * decay
+        norms = np.linalg.norm(right_vecs, axis=1, keepdims=True)
+        np.divide(right_vecs, norms, out=right_vecs, where=norms > 1e-6)
 
-            # 3. Find the 'Right' vector
-            if i < len(centerline_wps) - 1:
-                tangent = centerline_wps[i+1][:3] - p_center[:3]
-            else:
-                tangent = p_center[:3] - centerline_wps[i-1][:3]
+        ratios = np.clip(offsets_np / (merge_target_dist + 1e-6), 0, 1)
+        decays = (1.0 - ratios) ** 2
+        active_offsets = (current_side_val * decays)[:, np.newaxis]
 
-            up = np.array([0, 0, 1]) 
-            right_vec = np.cross(tangent, up)
-            
-            norm = np.linalg.norm(right_vec)
-            if norm > 1e-6:
-                right_vec /= norm
-                p_merged = np.copy(p_center)
-                p_merged[:3] = p_merged[:3] + (right_vec * active_offset)
-            else:
-                p_merged = p_center
-                
-            merged_pts.append(p_merged)
+        merged_wps = wps.copy()
+        merged_wps[:, :3] += right_vecs * active_offsets
 
-        return merged_pts
+        return merged_wps
         
 class BranchingPath:
     """

@@ -4,7 +4,7 @@ Sensor Manager for CARLA - Handles extraction and organization of sensor data.
 
 from typing import Dict, Optional, Any, List
 import numpy as np
-from config.enum import CameraView
+import config.enum as enum_defs
 from src.messages.logger import Logger
 
 
@@ -33,6 +33,10 @@ class SensorManager:
         self.camera_views: List[str] = []
         self.active_view: Optional[str] = None
 
+    def _refresh_camera_views(self) -> None:
+        """Rebuild cached camera view names from the live enum."""
+        self.camera_views = list(enum_defs.CameraView.__members__.keys())
+
     def add_view(self, view_name: str, transform: Dict[str, float], activate: bool = False, overwrite: bool = False) -> bool:
         """
         Register a custom runtime camera view.
@@ -59,6 +63,7 @@ class SensorManager:
         self.view_list[view_name] = {k: float(transform[k]) for k in required_keys}
         if activate:
             self.active_view = view_name
+        self._refresh_camera_views()
         return True
 
     def update_view(self, view_name: str, transform: Dict[str, float]) -> bool:
@@ -77,6 +82,7 @@ class SensorManager:
             return False
 
         self.view_list[view_name] = {k: float(transform[k]) for k in required_keys}
+        self._refresh_camera_views()
         return True
 
     def get_view_transform(self, view_name: str) -> Optional[Dict[str, float]]:
@@ -86,8 +92,8 @@ class SensorManager:
         :param view_name: View name to resolve
         :return: Transform dict or None
         """
-        if view_name in CameraView.__members__:
-            return getattr(CameraView, view_name).value
+        if view_name in enum_defs.CameraView.__members__:
+            return getattr(enum_defs.CameraView, view_name).value
         return self.view_list.get(view_name)
 
     @staticmethod
@@ -127,12 +133,17 @@ class SensorManager:
             return []
 
         updated_names: List[str] = []
+        new_members: Dict[str, Dict[str, float]] = {}
         for idx, pose in enumerate(views_arr):
             view_name = f"{prefix}_{idx}"
             transform = self._pose6_to_view_dict(pose)
             if not self.update_view(view_name, transform):
                 self.add_view(view_name, transform, overwrite=True)
             updated_names.append(view_name)
+            new_members[view_name] = transform
+
+        if new_members:
+            enum_defs.extend_view(new_members)
 
         # Remove stale views if waypoint count shrank.
         stale_names = [
@@ -141,6 +152,9 @@ class SensorManager:
         ]
         for name in stale_names:
             self.view_list.pop(name, None)
+
+        # Keep cached names in sync even if user doesn't press view-change controls.
+        self._refresh_camera_views()
 
         return updated_names
 
@@ -274,7 +288,7 @@ class SensorManager:
         :param step: Direction and amount (+1 for next, -1 for previous, 0 keeps current)
         :return: Name of active view or None
         """
-        self.camera_views = list(CameraView.__members__.keys()) + list(self.view_list.keys())
+        self._refresh_camera_views()
         if not self.camera_views:
             return None
 

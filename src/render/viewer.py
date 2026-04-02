@@ -38,7 +38,7 @@ from src.messages import (
     SteerAngle, 
     ClearNPCs,
     Location, Rotation, 
-    GlobalWPSpatial, LocalWPSpatial
+    LocalWPTemporal, LocalWPSpatial
 )
 from src.messages.logger import Logger
 from config import CONFIG
@@ -50,7 +50,7 @@ from abc import ABC, abstractmethod
 
 from model.inference import AsyncInference
 from src.others.data_processor import TrajectoryBuffer, ReplayHandler
-from src.math import Map, OptimizePath
+from src.math import Map, OptimizePath, rpy2ypr, ContractingWP
 
 MIN_DISTANT_NODE = CONFIG.rand_path.min_distant_node
 MAX_DISTANT_NODE = CONFIG.rand_path.max_distant_node
@@ -59,7 +59,7 @@ PATH_ITER        = CONFIG.rand_path.path_iter
 FONT_SIZE = CONFIG.ui.font_size
 FONT_NAME = CONFIG.ui.font_name
 
-front_vehicle_offset = CONFIG.offsets.front_vehicle_offset
+front_offset = CONFIG.offsets.front_offset
 
 max_steer = CONFIG.vehicle.physics.max_steer
 
@@ -73,7 +73,7 @@ def register_mode(name):
 
 
 class Viewer(ABC):
-    override_render_map = True
+    overriderender_map = True
 
     def __init__(self, world: World, vehicle: Vehicle, width: int, height: int, headless = False, sync: bool = False, fps: int = 70, duration: tuple = None):
         self.log = Logger() 
@@ -124,6 +124,7 @@ class Viewer(ABC):
         self.pbar          : tqdm             = None
         self.map_processor : Map              = None
         self.path_optimizer: OptimizePath     = None 
+        self.contracting_wp: ContractingWP    = None
         
         # Initialize all message senders and subscribers
         self._init_transmittor()
@@ -131,46 +132,46 @@ class Viewer(ABC):
     def _init_transmittor(self):
         """Initialize all message senders and subscribers eagerly"""
         # Senders for telemetry data
-        self.send_server_fps = MessageSender(ServerFps)
-        self.send_client_fps = MessageSender(ClientFps)
-        self.send_vehicle_name = MessageSender(VehicleName)
-        self.send_world_name = MessageSender(WorldName)
-        self.send_velocity = MessageSender(Velocity)
-        self.send_heading = MessageSender(Heading)
-        self.send_accel = MessageSender(Accel)
-        self.send_gyro = MessageSender(Gyro)
-        self.send_enu = MessageSender(Enu)
-        self.send_geo = MessageSender(Geo)
+        self.send_server_fps     = MessageSender(ServerFps)
+        self.send_client_fps     = MessageSender(ClientFps)
+        self.send_vehicle_name   = MessageSender(VehicleName)
+        self.send_world_name     = MessageSender(WorldName)
+        self.send_velocity       = MessageSender(Velocity)
+        self.send_heading        = MessageSender(Heading)
+        self.send_accel          = MessageSender(Accel)
+        self.send_gyro           = MessageSender(Gyro)
+        self.send_enu            = MessageSender(Enu)
+        self.send_geo            = MessageSender(Geo)
         self.send_client_runtime = MessageSender(ClientRuntime)
         self.send_server_runtime = MessageSender(ServerRuntime)
-        self.send_location = MessageSender(Location)
-        self.send_rotation = MessageSender(Rotation)
+        self.send_location       = MessageSender(Location)
+        self.send_rotation       = MessageSender(Rotation)
         
         # Senders for control logging
         self.send_model_autopilot_logging = MessageSender(ModelAutopilot)
-        self.send_autopilot_logging = MessageSender(AutopilotLog)
-        self.send_regulate_speed_logging = MessageSender(RegulateSpeedLog)
-        self.send_throttle_logging = MessageSender(ThrottleLog)
-        self.send_steer_logging = MessageSender(SteerLog)
-        self.send_brake_logging = MessageSender(BrakeLog)
-        self.send_reverse_logging = MessageSender(ReverseLog)
-        self.send_handbrake_logging = MessageSender(HandbrakeLog)
-        self.send_manual_logging = MessageSender(ManualLog)
-        self.send_gear_logging = MessageSender(GearLog)
-        self.send_steer_angle = MessageSender(SteerAngle)
+        self.send_autopilot_logging       = MessageSender(AutopilotLog)
+        self.send_regulate_speed_logging  = MessageSender(RegulateSpeedLog)
+        self.send_throttle_logging        = MessageSender(ThrottleLog)
+        self.send_steer_logging           = MessageSender(SteerLog)
+        self.send_brake_logging           = MessageSender(BrakeLog)
+        self.send_reverse_logging         = MessageSender(ReverseLog)
+        self.send_handbrake_logging       = MessageSender(HandbrakeLog)
+        self.send_manual_logging          = MessageSender(ManualLog)
+        self.send_gear_logging            = MessageSender(GearLog)
+        self.send_steer_angle             = MessageSender(SteerAngle)
         
         # Senders for model predictions
         self.send_model_steer = MessageSender(ModelSteer)
         self.send_model_speed = MessageSender(ModelSpeed)
         
         # Subscribers
-        self.sub_location = MessageSubscriber(Location)
-        self.sub_heading = MessageSubscriber(Heading)
-        self.sub_turn_signal = MessageSubscriber(TurnSignal)
+        self.sub_location       = MessageSubscriber(Location)
+        self.sub_heading        = MessageSubscriber(Heading)
+        self.sub_turn_signal    = MessageSubscriber(TurnSignal)
         self.sub_server_runtime = MessageSubscriber(ServerRuntime)
-        self.sub_polylines = MessageSubscriber(PolylinesCmd)
-        self.sub_global_wp = MessageSubscriber(GlobalWPSpatial)
-        self.sub_local_wp = MessageSubscriber(LocalWPSpatial)
+        self.sub_polylines      = MessageSubscriber(PolylinesCmd)
+        self.sub_local_spatial  = MessageSubscriber(LocalWPSpatial)
+        self.sub_local_temporal = MessageSubscriber(LocalWPTemporal)
 
     def attach_plugins(self, **plugins):
         for name, value in plugins.items():
@@ -225,7 +226,7 @@ class Viewer(ABC):
             if sensor:
                 self.choosen_sensor = sensor
 
-    def change_view_all(self, view_name: Optional[str] = None, step: int = 0):
+    def change_view_all(self, view_name: Optional[str] = None, step: int = 0, show_info = True):
         previous_view = getattr(self.sensor_manager, "active_view", None)
         view_names = list(CameraView.__members__.keys()) + list(self.sensor_manager.view_list.keys())
         if not view_names:
@@ -248,7 +249,7 @@ class Viewer(ABC):
             self.sensors_list[camera_name].change_view(**transform)
 
         self.controller.view_name = selected_view
-        if selected_view != previous_view:
+        if selected_view != previous_view and show_info:
             self.log.DEBUG(f"View toggled → [i]{selected_view.replace('_', ' ').title()}[/i]")
 
     def add_view(self, view_name: str, transform: dict, activate: bool = False, overwrite: bool = False):
@@ -310,7 +311,6 @@ class Viewer(ABC):
             self.world.tick()
         else:
             self.world.wait_for_tick()
-            
 
     def close(self) -> None:
         
@@ -328,7 +328,6 @@ class Viewer(ABC):
                 self.log.INFO("Headless mode: keeping pygame alive for next run")
         except Exception as e:
             self.log.ERROR("Pygame quit failed", full_traceback = e)
-            
 
     def data_bus(self, filter_ctrl=False):
         snapshot = self.world.get_snapshot()
@@ -447,7 +446,7 @@ class Viewer(ABC):
     def _get_map_data(self, frame_id, replay_mode=False):
         """Retrieve and process map data"""
         unrouted_map, old_map = self.map_processor.retrieve_map(
-            display = self.controller.toggle_map or replay_mode or self.override_render_map
+            display = self.controller.toggle_map or replay_mode or self.overriderender_map
         )
         
         # Assign routed_map based on old_map availability
@@ -504,14 +503,14 @@ class Viewer(ABC):
             multi_h, multi_w, _ = multi_images.shape
             self.hud.draw_frame(multi_images, (self.width - multi_w - 10, self.height - multi_h - 10))
     
-    def _render_map(self, routed_map):
+    def render_map(self, routed_map):
         """Render map overlay if toggled"""
         if not self.headless and self.controller.toggle_map and routed_map is not None:
             submap_h, submap_w, _ = routed_map.shape
             routed_map = draw_border(routed_map, border_thicc = 3, border_color = (255, 255, 200, 100))
             self.hud.draw_frame(routed_map, (self.width - submap_w - 10, 0 + 10))
     
-    def _finalize_frame(self):
+    def finalize_frame(self):
         """Finalize frame rendering"""
         if not self.headless:
             pygame.display.flip()
@@ -551,8 +550,8 @@ class ManualViewer(Viewer):
                 self._handle_trajectory_logging()
                 self._render_base_hud(frame)
                 self._render_multi_camera(multi_images_list)
-                self._render_map(routed_map)
-                self._finalize_frame()
+                self.render_map(routed_map)
+                self.finalize_frame()
 
                 frame_id += 1
 
@@ -576,7 +575,7 @@ class ManualViewer(Viewer):
 
             yaw_rad = np.radians(vehicle_rotation.yaw)
 
-            front_offset = front_vehicle_offset  # meters
+            front_offset = front_offset  # meters
             offset_x = front_offset * np.cos(yaw_rad)
             offset_y = front_offset * np.sin(yaw_rad)
 
@@ -591,32 +590,38 @@ class ManualViewer(Viewer):
                 vehicle_rotation.yaw
             ])
             self.traj_logger.update(front_location, vehicle_location)
-    
+
+
 @register_mode("replay")
 class ReplayViewer(Viewer):
+    containment_mode = "circle"
     def run(self):
         """Run replay mode for CARLA recordings, data collection, and headless operations"""
         try:
             self.virt_vehicle.set_autopilot(self.controller.autopilot)
-            sub_npc_clear = MessageSubscriber(ClearNPCs)
-            clear_npcs = sub_npc_clear.receive()
 
-            commands = []
-            if clear_npcs:
-                commands = self._init_clear_cmds()
-            frame_id = 0
+            # Cache ego vehicle ID regardless of clear_npcs
+            ego_name = self.virt_vehicle.vehicle.attributes.get('role_name')
+            current_vehicles = self.world.get_actors().filter("vehicle.*")
+            for actor in current_vehicles:
+                if actor.attributes.get("role_name") == ego_name:
+                    self.ego_id = actor.id
+                    self.log.INFO(f"Found ego vehicle with id={self.ego_id}")
+                    break
+
+            
+            self.frame_id = 0; self.i = 0
             while True if self.headless else self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
                 self.step_world()
                 self.data_bus(True)  # Filter control for replay mode
-                
-                self.virt_world.client.apply_batch_sync(commands)
+                self.contracting_wp.build_vehicle_tree(self.ego_id)
                 
                 frame = None
                 if not self.headless:
                     frame = self.choosen_sensor.extract_data()
 
                 # Get map data (always display in replay mode)
-                unrouted_map, routed_map = self._get_map_data(frame_id, replay_mode=True)
+                unrouted_map, routed_map = self._get_map_data(self.frame_id, replay_mode=True)
 
                 # Handle common operations
                 multi_images_list = self._handle_multi_camera()
@@ -625,23 +630,27 @@ class ReplayViewer(Viewer):
 
                 # Replay-specific operations
                 self._handle_trajectory_logging()
-                self._handle_replay_step(unrouted_map, routed_map)
                 
-                local_wp = self.sub_local_wp.receive()
-                local_wp[:, 2] += 1.7
-                self.register_view_matrix("LOCAL_WP", local_wp, activate_first=False)
-
+                spatial_wp  = self.sub_local_spatial.receive()
+                local_wp = np.r_[spatial_wp[:]]
+                local_wp[:, 2] += 1.0 # -- Ensure waypoints are inside vehicle bbox
+                local_wp, match = self.contracting_wp.contract_local_wp(local_wp)
+                local_wp[:, 2] += 0.7 #-- Ensure camera's position is on the same level
+                self.register_view_matrix("LOCAL_WP", local_wp[...], activate_first=False)
+                
+                self.choosen_view = [view for view in self.sensor_manager.camera_views if view.startswith("FIRST") or view.startswith("LOCAL")]
                 # Render (replay mode)
+                self._handle_replay_step()
                 self._render_base_hud(frame)
                 self._render_multi_camera(multi_images_list)
-                self._render_map(routed_map)
-                self._finalize_frame()
+                self.render_map(routed_map)
+                self.finalize_frame()
 
                 # Check replay duration and update progress
                 if self._check_replay_duration():
                     break
 
-                frame_id += 1
+                self.frame_id += 1
 
         except KeyboardInterrupt:
             self.log.WARNING("ReplayViewer interrupted by user")
@@ -699,30 +708,27 @@ class ReplayViewer(Viewer):
                               description=f"Play duration ({elapsed:.1f}/{self.duration:.1f}s @ {self.playback_rate:.2f}x)")
             return False
 
-    def _handle_replay_step(self, unrouted_map, routed_map):
+    def _handle_replay_step(self):
         """Handle replay functionality step"""
         if self.replayer:
             if self.replayer.data_collector: 
-                image_kwargs = (
-                    {"I0": self.sensor_manager.get_sensor_data("rgb_0")} 
-                )
-                self.replayer.step(**image_kwargs)
+                if self.frame_id % 7 == 0:
+                    self.index = self.i % len(self.choosen_view)
+                    self.view_name = self.choosen_view[self.index]
+                    self.change_view_all(self.view_name, show_info = False)
+                    self.i += 1
+                
+                if getattr(self, "index", 0) == 0 and getattr(self, "saved", True):
+                    self.image_kwargs = dict()
+                
+                if len(self.image_kwargs) < len(self.choosen_view):
+                    authorize = False
+                    self.image_kwargs.update({getattr(self, "view_name"): self.choosen_sensor.extract_data().copy()})
+                else:
+                    authorize = True
+                self.saved = self.replayer.step(**self.image_kwargs, authorized_saving = authorize)
             else: 
                 self.replayer.step()
-
-    def _init_clear_cmds(self, ):
-        ego_name = self.virt_vehicle.vehicle.attributes.get('role_name')
-        current_vehicles = self.world.get_actors().filter("vehicle.*")
-        for actor in current_vehicles:
-            if actor.attributes.get("role_name") == ego_name:
-                ego_id = actor.id
-                self.log.INFO(f"Found ego vehicle with id={ego_id}")
-                break
-        commands = []
-        for actor in current_vehicles:
-            if actor.id != ego_id:
-                commands.append(carla.command.DestroyActor(actor.id))
-        return commands
 
     def _handle_trajectory_logging(self):
         """Handle trajectory logging for recording mode"""
@@ -732,15 +738,9 @@ class ReplayViewer(Viewer):
             vehicle_location = vehicle_transform.location
             vehicle_rotation = vehicle_transform.rotation
 
-            yaw_rad = np.radians(vehicle_rotation.yaw)
-
-            front_offset = front_vehicle_offset  # meters
-            offset_x = front_offset * np.cos(yaw_rad)
-            offset_y = front_offset * np.sin(yaw_rad)
-
-            front_location = np.array([
-                vehicle_location.x + offset_x,
-                vehicle_location.y + offset_y,
+            vehicle_location = np.array([
+                vehicle_location.x,
+                vehicle_location.y,
                 vehicle_location.z  # same height as center
             ])
             vehicle_rotation = np.array([
@@ -748,6 +748,11 @@ class ReplayViewer(Viewer):
                 vehicle_rotation.pitch,
                 vehicle_rotation.yaw
             ])
+            
+            r_ego = rpy2ypr(vehicle_rotation)
+            front_vec = r_ego.apply(np.array([front_offset, 0.0, 0.0]))
+            front_location = vehicle_location + front_vec
+            self.world.debug.draw_point(carla.Location(*front_location), 0.5, life_time = 2.0 * (1 / self.server_fps))
             self.traj_logger.update(front_location, vehicle_rotation)
 
 @register_mode("inference")
@@ -824,8 +829,8 @@ class InferenceViewer(Viewer):
                 origin = "center"
             )
         
-        self._render_map(routed_map)
-        self._finalize_frame()
+        self.render_map(routed_map)
+        self.finalize_frame()
 
     def _handle_model_inference(self, frame, multi_images_list, frame_id):
         """Handle model inference logic and return output and extra data"""

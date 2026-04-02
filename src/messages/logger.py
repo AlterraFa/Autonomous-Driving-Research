@@ -1,168 +1,132 @@
-import inspect
-import traceback
+import sys
 import time
-
-from datetime import datetime
-from typing import Literal, Union
+import traceback
+from typing import Literal, Union, Optional
 from rich.console import Console
 
-class Logger(Console):
+class Logger:
+    # Static shared state across all Logger instances
     _seen_once_calls = set()
-    
-    _call_freq = dict()
-    
-    _enabled_levels = {"INFO", "ERROR", "WARNING", "DEBUG", "CUSTOM"}  # default all on
-    _shared_console = None  # Shared console for tqdm and other tools
+    _call_freq = {}
+    _enabled_levels = {"INFO", "ERROR", "WARNING", "DEBUG", "CUSTOM"}
+    _shared_console = None
+
+    # Timestamp caching to avoid strftime overhead every single call
+    _last_ts_time = 0.0
+    _last_ts_str = ""
 
     @classmethod
-    def set_levels(cls, 
-                   *levels: Literal["INFO", "ERROR", "WARNING", "DEBUG", "CUSTOM"]
-        ):
-        """Enable only the given levels (others disabled)."""
+    def set_levels(cls, *levels: Literal["INFO", "ERROR", "WARNING", "DEBUG", "CUSTOM"]):
+        """Enable only the specified log levels globally."""
         cls._enabled_levels = set(levels)
-    
+
     @classmethod
     def get_console(cls):
-        """Get the shared console instance for use with tqdm and other tools."""
+        """Returns the shared console instance."""
         if cls._shared_console is None:
             cls._shared_console = Console()
         return cls._shared_console
-    
+
     @classmethod
     def set_progress_console(cls, progress_console):
-        """Set the Progress object's console for coordinated output."""
+        """Set a specific console (e.g., from rich.progress) to be shared."""
         cls._shared_console = progress_console
-    
-    def __get_console(self):
-        """Get the console to use - shared if set, otherwise self."""
-        if Logger._shared_console is not None:
-            return Logger._shared_console
-        return self
-    
-    def __init__(self, name = None):
-        super().__init__()
-        if name is None:
-            frame = inspect.currentframe()
-            outer_frame = frame.f_back
-            while outer_frame:
-                if "self" in outer_frame.f_locals:
-                    obj = outer_frame.f_locals["self"]
-                    module = obj.__class__.__module__
-                    class_name = obj.__class__.__name__
-                    self.class_name = f"{module}.{class_name}"
-                    break
-                elif "cls" in outer_frame.f_locals:
-                    cls = outer_frame.f_locals["cls"]
-                    module = cls.__module__
-                    class_name = cls.__name__
-                    self.class_name = f"{module}.{class_name}"
-                    break
-                outer_frame = outer_frame.f_back
-            else:
-                self.class_name = "Global"
-        else:
-            self.class_name = name
-            
-    def __get_call_site__(self):
-        frame = inspect.currentframe()
-        outer_frame = frame.f_back.f_back
-        return (
-            outer_frame.f_code.co_filename,
-            outer_frame.f_code.co_name,
-            outer_frame.f_lineno
-        )
-        
-    @property
-    def current_timestamp(self):
-        now = datetime.now()
-        return f"[{now.strftime('%d/%m/%Y-%H:%M:%S')}.{now.microsecond // 1000:03d}]"
-    
-    def __print_once(self, message_func, *args, **kwargs):
-        """Print the log only once per unique call site."""
-        call_site = self.__get_call_site__()
-        if call_site not in Logger._seen_once_calls:
-            Logger._seen_once_calls.add(call_site)
-            message_func(*args, **kwargs)
-    
-    def __print_freq(self, message_func, frequency, *args, **kwargs):
-        call_site = self.__get_call_site__()
+
+    def __init__(self, name: Optional[str] = None):
+        self.class_name = name or self._infer_class_name()
+        # Pre-calculate the rich-formatted class tag to save time during logging
+        self._class_tag = f"[[purple]{self.class_name}[/][color(249)]]:[/]"
+
+    def _infer_class_name(self) -> str:
+        """Fast inference of class name using stack frames."""
         try:
-            time_stamp = Logger._call_freq[call_site]
-            if time.time() - time_stamp >= (1 / frequency):
-                message_func(*args, **kwargs)
-                Logger._call_freq[call_site] = time.time()
-        except:
-            Logger._call_freq[call_site] = time.time()
-            message_func(*args, **kwargs)
+            frame = sys._getframe(2)
+            if "self" in frame.f_locals:
+                obj = frame.f_locals["self"]
+                return f"{obj.__class__.__module__}.{obj.__class__.__name__}"
+            elif "cls" in frame.f_locals:
+                cls_obj = frame.f_locals["cls"]
+                return f"{cls_obj.__module__}.{cls_obj.__name__}"
+        except (AttributeError, ValueError):
+            pass
+        return "Global"
+
+    def _get_timestamp(self) -> str:
+        """Returns a cached timestamp string (valid for 1ms)."""
+        now = time.time()
+        if now - self._last_ts_time < 0.001:
+            return self._last_ts_str
         
-    def INFO(self, *message, frequency: float = None, once = False):
-        if "INFO" not in Logger._enabled_levels:
-            return
-        console = self.__get_console()
-        concat_message = " ".join([str(mess) for mess in message])
-        information = f"{self.current_timestamp} [color(249)][[/][color(118)]INFO[/]]    [[purple]{self.class_name}[/][color(249)]]:[/] {concat_message}"
+        ts = time.strftime('%d/%m/%Y-%H:%M:%S', time.localtime(now))
+        self._last_ts_str = f"[{ts}.{int((now % 1) * 1000):03d}]"
+        self._last_ts_time = now
+        return self._last_ts_str
+
+    def _should_log(self, level: str, once: bool, frequency: Optional[float]) -> bool:
+        """Fast gatekeeper. Returns False immediately if level is disabled or frequency gate is closed."""
+        if level not in self._enabled_levels:
+            return False
+        
+        # Get unique call site (filename, lineno) - much faster than inspect.currentframe
+        f = sys._getframe(2)
+        call_site = (f.f_code.co_filename, f.f_lineno)
+        
         if once:
-            self.__print_once(lambda: console.print(information))    
-        elif frequency:
-            self.__print_freq(lambda: console.print(information), frequency)
-        else: 
-            console.print(information)
-    
-    def ERROR(self, *message, frequency: float = None, exit_code: int = None, full_traceback: Exception = None, once: bool = False):
-        if "ERROR" not in Logger._enabled_levels:
-            return
-        console = self.__get_console()
-        concat_message = " ".join([str(mess) for mess in message])
-        def log_func(concat_message, full_traceback):
-            console.print(f"{self.current_timestamp} [color(249)][[/][b][color(196)]ERROR[/][/]]   [[purple]{self.class_name}[/][color(249)]]:[/] {concat_message}")
+            if call_site in self._seen_once_calls:
+                return False
+            self._seen_once_calls.add(call_site)
+            
+        if frequency:
+            now = time.time()
+            last_time = self._call_freq.get(call_site, 0.0)
+            if now - last_time < (1.0 / frequency):
+                return False
+            self._call_freq[call_site] = now
+            
+        return True
+
+    def _print_log(self, level_tag: str, message: tuple, color_bracket: str = "color(249)"):
+        """Assembles the final string and prints to console."""
+        console = self._shared_console or Logger.get_console()
+        
+        # Handle formatting: if msg[0] is "Val: {}" and args follow, use .format()
+        if len(message) > 1 and isinstance(message[0], str) and "{}" in message[0]:
+            try:
+                content = message[0].format(*message[1:])
+            except (IndexError, KeyError):
+                content = " ".join(map(str, message))
+        else:
+            content = " ".join(map(str, message))
+
+        full_msg = f"{self._get_timestamp()} [{color_bracket}][[/]{level_tag}[{color_bracket}]][/]   {self._class_tag} {content}"
+        console.print(full_msg)
+
+    def INFO(self, *message, frequency: float = None, once=False):
+        if self._should_log("INFO", once, frequency):
+            self._print_log("[color(118)]INFO[/]", message)
+
+    def DEBUG(self, *message, frequency: float = None, once=False):
+        if self._should_log("DEBUG", once, frequency):
+            self._print_log("[color(21)]DEBUG[/]", message)
+
+    def WARNING(self, *message, frequency: float = None, once=False):
+        if self._should_log("WARNING", once, frequency):
+            self._print_log("[color(220)]WARNING[/]", message)
+
+    def ERROR(self, *message, frequency: float = None, exit_code: int = None, full_traceback: Exception = None, once=False):
+        if self._should_log("ERROR", once, frequency):
+            console = Logger.get_console()
+            content = " ".join(map(str, message))
+            console.print(f"{self._get_timestamp()} [color(249)][[/][b][color(196)]ERROR[/][/]]   {self._class_tag} {content}")
+            
             if full_traceback:
                 console.print(f"[red]Exception:[/] {full_traceback}")
                 console.print("".join(traceback.format_exception(type(full_traceback), full_traceback, full_traceback.__traceback__)))
-        if once:
-            self.__print_once(log_func, concat_message, full_traceback)
-        elif frequency:
-            self.__print_freq(log_func, frequency)
-        else:
-            log_func(concat_message, full_traceback)
-        if exit_code is not None:
-            exit(exit_code)
-
-    def WARNING(self, *message, frequency: float = None, once: bool = False):
-        if "WARNING" not in Logger._enabled_levels:
-            return
-        console = self.__get_console()
-        concat_message = " ".join([str(mess) for mess in message])
-        warning_msg = f"{self.current_timestamp} [color(249)][[/][color(220)]WARNING[/]] [[purple]{self.class_name}[/][color(249)]]:[/] {concat_message}"
-        if once:
-            self.__print_once(lambda: console.print(warning_msg))
-        elif frequency:
-            self.__print_freq(lambda: console.print(warning_msg), frequency)
-        else:
-            console.print(warning_msg)
-
-    def DEBUG(self, *message, frequency: float = None, once: bool = False):
-        if "DEBUG" not in Logger._enabled_levels:
-            return
-        console = self.__get_console()
-        concat_message = " ".join([str(mess) for mess in message])
-        debug_msg = f"{self.current_timestamp} [color(249)][[/][color(21)]DEBUG[/]]   [[purple]{self.class_name}[/][color(249)]]:[/] {concat_message}"
-        if once:
-            self.__print_once(lambda: console.print(debug_msg))
-        elif frequency:
-            self.__print_freq(lambda: console.print(debug_msg), frequency)
-        else:
-            console.print(debug_msg)
+            
+            if exit_code is not None:
+                sys.exit(exit_code)
 
     def CUSTOM(self, mode: str, *message, color: Union[str, int] = 209, frequency: float = None, once: bool = False):
-        if "CUSTOM" not in Logger._enabled_levels:
-            return
-        console = self.__get_console()
-        concat_message = " ".join([str(mess) for mess in message])
-        color_code = f"color({color})" if isinstance(color, int) else color
-        debug_msg = f"{self.current_timestamp} [{color_code}][[/][{color_code}]{mode}[/]] [[purple]{self.class_name}[/][color(249)]]:[/] {concat_message}"
-        if once:
-            self.__print_once(lambda: console.print(debug_msg))
-        elif frequency:
-            self.__print_freq(lambda: console.print(debug_msg), frequency)
-        else:
-            console.print(debug_msg)
+        if self._should_log("CUSTOM", once, frequency):
+            color_code = f"color({color})" if isinstance(color, int) else color
+            self._print_log(f"[{color_code}]{mode}[/]", message, color_bracket=color_code)

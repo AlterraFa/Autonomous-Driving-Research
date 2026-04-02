@@ -100,7 +100,7 @@ class CarlaLabel(IntEnum):
     Bridge        = 26
     RailTrack     = 27
     GuardRail     = 28
-class CameraView(Enum):
+class _BaseCameraView(Enum):
     FIRST_PERSON = {
         "x": 0.0, "y": 0.0, "z": 2,    # position
         "roll": 0.0, "pitch": 0.0, "yaw": 0.0
@@ -113,12 +113,17 @@ class CameraView(Enum):
         "x": 2.0, "y": 0.0, "z": 20.0,   # behind & above
         "roll": 0.0, "pitch": -90.0, "yaw": 0.0
     }
+
+
+CameraView = _BaseCameraView
     
 def extend_view(new_members: dict):
     assert isinstance(new_members, dict), "New view members must be a dictionary"
-    members = {m.name: m.value for m in CameraView}
+    members = {m.name: m.value for m in _BaseCameraView}
     members.update(new_members)
-    return Enum(CameraView.__name__, members)
+    global CameraView
+    CameraView = Enum("CameraView", members)
+    return CameraView
     
 class JoyControl:
 

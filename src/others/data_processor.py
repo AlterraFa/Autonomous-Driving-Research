@@ -28,7 +28,7 @@ position_idx = CONFIG.replay.position_idx
 temporal_offset      = CONFIG.offsets.temporal_offset
 spatial_offset       = CONFIG.offsets.spatial_offset
 scout_offset_params  = CONFIG.offsets.scout_offset_params
-front_vehicle_offset = CONFIG.offsets.front_vehicle_offset
+front_offset = CONFIG.offsets.front_offset
 
 class TrajectoryBuffer:
     def __init__(
@@ -222,7 +222,7 @@ from src.messages.all_messages import (
 )
 class ReplayHandler:
 
-    turn_classify = True
+    turn_classify = False
     __slot__ = ["road_type"]
     
     def __init__(self, world: World, true_trajectories: np.ndarray, data_collect_dir: str = None, use_temporal: bool = False, debug: bool = False):
@@ -252,6 +252,7 @@ class ReplayHandler:
         self.prev_dist = 0
         self.additional_max = CONFIG.data_collection.additional_trajectory_max; self.addition_cnt = 0
         self.start_time = self.sub_server_runtime.receive()
+        self.temporal = use_temporal
 
     def _init_transmittor(self):
         self.sub_location         = MessageSubscriber(Location)
@@ -274,15 +275,12 @@ class ReplayHandler:
         self.send_local_wp_temporal   = MessageSender(LocalWPTemporal)
         
 
-    def step(self, **frame: np.ndarray):
+    def step(self, authorized_saving = False, **frame: np.ndarray):
         vehicle_location = self.sub_location.receive()
         vehicle_rotation = self.sub_rotation.receive()
 
         # Convert yaw from degrees to radians for math functions
         heading = np.radians(self.sub_heading.receive())
-
-        # Distance from vehicle origin to front reference point.
-        front_offset = front_vehicle_offset
 
         # Build front anchor in 3D using full roll/pitch/yaw.
         # Vehicle-forward is local +X in CARLA/Unreal coordinates.
@@ -307,22 +305,17 @@ class ReplayHandler:
             position, self.temporal_offset, use_time=True, merge=True, precomputed_s_side=proj_data
         )
 
-        local_loc_spatial = global_2_local_full_rot(position, global_loc_spatial, vehicle_rotation)
+        local_loc_spatial = global_2_local_full_rot(vehicle_location, global_loc_spatial, vehicle_rotation)
         local_rot_spatial = global_2_local_rot(global_rot_spatial, vehicle_rotation)
-        local_loc_temporal = global_2_local_full_rot(position, global_loc_temporal, vehicle_rotation)
+        local_loc_temporal = global_2_local_full_rot(vehicle_location, global_loc_temporal, vehicle_rotation)
         local_rot_temporal = global_2_local_rot(global_rot_temporal, vehicle_rotation)
 
-        # Backward-compatible aliases: legacy topics keep spatial stream.
-        global_loc, global_rot = global_loc_spatial, global_rot_spatial
-        local_loc, local_rot = local_loc_spatial, local_rot_spatial
-        
-
-        # path_branches  = self.branching_path.brancher(global_loc, global_scout, persist_dist = 20)
-        # ego_branches = np.empty_like(path_branches)[..., :2]
-        # if path_branches.shape[0] > 1:
-        #     self.road_type = "multi"
-        # else:
-        #     self.road_type = "uni"
+        path_branches  = self.branching_path.brancher(global_loc_spatial, global_scout, persist_dist = 20)
+        ego_branches = np.empty_like(path_branches)[..., :2]
+        if path_branches.shape[0] > 1:
+            self.road_type = "multi"
+        else:
+            self.road_type = "uni"
         # for idx, branch in enumerate(path_branches):
         #     ego_branches[idx] = global_2_local_full_rot(position, branch, vehicle_rotation)[:, :2]
                 
@@ -330,8 +323,9 @@ class ReplayHandler:
         if self.debug:
             server_fps = self.sub_server_fps.receive()
             if server_fps < 1: server_fps = self.sub_client_fps.receive()    
-            global_loc_spatial[:, -1] += .5
-            self.virt_world.draw_waypoints(global_loc_spatial, 2.0 * (1 / server_fps), size = .1, color = (255, 0, 0))
+            wp = global_loc_temporal if self.temporal else global_loc_spatial
+            wp[:, -1] += .5
+            self.virt_world.draw_waypoints(wp, 2.0 * (1 / server_fps), size = .1, color = (255, 0, 0))
 
         if self.turn_classify:
             is_at_junction , junction = self.virt_world.get_waypoint_junction(global_scout[14])
@@ -356,10 +350,10 @@ class ReplayHandler:
         self.send_global_wp_temporal.send(global_wp_temporal)
         self.send_turn_signal.send(turn_signal)
 
-        self.logger.DEBUG(f"Lat Err: {lat_err:.3f}m", frequency = 5)
+        self.logger.DEBUG(f"Lat Err: {lat_err:.3f}m", frequency = 0.1)
 
         # Only save when it moves (Prevent saving all the time when stopping at red light or stop sign)
-        if self.data_collector:
+        if self.data_collector and authorized_saving:
             steer    = self.sub_steer_logging.receive()
             throttle = self.sub_throttle_logging.receive()
             brake    = self.sub_brake_logging.receive()
@@ -398,4 +392,5 @@ class ReplayHandler:
                 **frame
             )
             # self.prev_dist = curr_dist
-        return local_loc
+            return saved
+        return None
