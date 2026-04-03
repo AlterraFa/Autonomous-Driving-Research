@@ -28,13 +28,13 @@ EXCLUDE_PARAMS = CONFIG.path_optimizer.exclude_params
 # GNSS / GPS
 MEAN_DELAY   = CONFIG.gps.mean_delay
 STDDEV_DELAY = CONFIG.gps.stddev_delay
-LAT_STDDEV   = CONFIG.gps.lat_stddev
-LON_STDDEV   = CONFIG.gps.lon_stddev
+LAT_STDDEV = CONFIG.gps.lat_stddev
+LON_STDDEV = CONFIG.gps.lon_stddev
 FREQ         = CONFIG.gps.frequency
 
 # Replay
-start_at    = CONFIG.replay.start_at
-stop_at     = CONFIG.replay.stop_at
+start_at    = CONFIG.replay_runtime.start_at
+stop_at     = CONFIG.replay_runtime.stop_at
 
 # Spawn
 num_npc    = CONFIG.spawn.num_npc

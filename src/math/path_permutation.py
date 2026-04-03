@@ -183,7 +183,7 @@ class ContractingWP:
             return local_wp, None
 
         _, _, cache = match
-        remaining_s = float(cache['center_s']) - float(np.linalg.norm(cache['extent']))
+        remaining_s = float(cache['center_s']) - float(np.linalg.norm(cache['extent'])) * 1.2
         if remaining_s > 0.0:
             local_wp = self._contract_polyline_even(local_wp, remaining_s)
         return local_wp, match

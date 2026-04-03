@@ -103,11 +103,11 @@ class Logger:
 
     def INFO(self, *message, frequency: float = None, once=False):
         if self._should_log("INFO", once, frequency):
-            self._print_log("[color(118)]INFO[/]", message)
+            self._print_log(" [color(118)]INFO[/]  ", message)
 
     def DEBUG(self, *message, frequency: float = None, once=False):
         if self._should_log("DEBUG", once, frequency):
-            self._print_log("[color(21)]DEBUG[/]", message)
+            self._print_log(" [color(21)]DEBUG[/] ", message)
 
     def WARNING(self, *message, frequency: float = None, once=False):
         if self._should_log("WARNING", once, frequency):

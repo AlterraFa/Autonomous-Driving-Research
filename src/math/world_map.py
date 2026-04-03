@@ -25,7 +25,7 @@ from src.messages.message_handler import MessageSubscriber, MessageSender
 MAX_GPS_DELAY = CONFIG.gps.max_gps_delay
 MIN_GPS_DELAY = CONFIG.gps.min_gps_delay
 
-position_idx = CONFIG.replay.position_idx
+position_idx = CONFIG.replay_runtime.position_idx
 
 class Map:
     def __init__(self, 
@@ -191,18 +191,26 @@ class Map:
             cos_t, sin_t = np.cos(heading_rad), np.sin(heading_rad)
             M = np.float32([[cos_t, sin_t, (1 - cos_t) * cx - sin_t * cy],[-sin_t, cos_t, sin_t * cx + (1 - cos_t) * cy]])
                             
-            # try:
-            #     gpu_img = cv2.cuda_GpuMat()
-            #     gpu_img.upload(cutout)
-            #     gpu_rotated = cv2.cuda.warpAffine(gpu_img, M, (cutout.shape[1], cutout.shape[0]))
-            #     rotated = gpu_rotated.download()
-                
-            #     gpu_img.release()
-            #     gpu_rotated.release()
-            #     self.logger.INFO("Using GPU to rotate map", once = True)
-            # except:
-            rotated = cv2.warpAffine(cutout, M, (cutout.shape[1], cutout.shape[0]), flags=cv2.INTER_LINEAR)
-            self.logger.INFO("Falling back to CPU map rotation", once = True)
+            try:
+                rot_h, rot_w = cutout.shape[:2]
+                if not hasattr(self, "src_img") or self.src_img.size() != (rot_w, rot_h):
+                    self.src_img = cv2.cuda_GpuMat(rot_h, rot_w, cv2.CV_8UC3)
+                    self.dst_img = cv2.cuda_GpuMat(rot_h, rot_w, cv2.CV_8UC3)
+                self.src_img.upload(cutout)
+                cv2.cuda.warpAffine(
+                    src         = self.src_img, M = M, 
+                    dsize       = (cutout.shape[1], cutout.shape[0]), 
+                    dst         = self.dst_img,
+                    flags       = cv2.INTER_LINEAR,
+                    borderMode  = cv2.BORDER_CONSTANT,
+                    borderValue = (255, 255, 255),
+                    stream      = cv2.cuda_Stream.Null()
+                )
+                rotated = self.dst_img.download()
+                self.logger.INFO("Using GPU to rotate map", once = True)
+            except:
+                rotated = cv2.warpAffine(cutout, M, (cutout.shape[1], cutout.shape[0]), flags=cv2.INTER_LINEAR)
+                self.logger.INFO("Falling back to CPU map rotation", once = True)
 
             if self.relative_pos == "center":
                 x1f = max(0, int(cx - w // 2))
@@ -238,7 +246,7 @@ class Map:
                 location_bfscale, self.offset_path
             )
 
-            self.logger.DEBUG("Current waypoint index: {}", self.path_handler.position_idx, frequency = 5)
+            self.logger.DEBUG("Current waypoint index: {}", self.path_handler.position_idx, frequency = 1)
             
             local_wp = global_2_local(location, global_wp, heading_rad)[:, :2]
             self.poly_pub.send(local_wp)
@@ -265,74 +273,3 @@ class Map:
                 return None, cv2.resize(cutout, self.resize_to) 
         else:
             return None, None
-
-if __name__ == "__main__":
-    client = carla.Client("localhost", 2000)
-    
-    world = World(client, 10000)
-    map_processor = Map(world, rect_dim = (3, 4), map_offset = (5, 5))
-
-    dx, dy = 0, 0
-    dragging = False
-    prev_x, prev_y = -1, -1
-
-    def mouse_event(event, x, y, flags, param):
-        global dx, dy, dragging, prev_x, prev_y, scale
-
-        if event == cv2.EVENT_LBUTTONDOWN:
-            dragging = True
-            prev_x, prev_y = x, y
-
-        elif event == cv2.EVENT_LBUTTONUP:
-            dragging = False
-
-        elif event == cv2.EVENT_MOUSEMOVE and dragging:
-            dx += x - prev_x
-            dy += y - prev_y
-            prev_x, prev_y = x, y
-
-        elif event == cv2.EVENT_MOUSEWHEEL:
-            if flags > 0:   # scroll up = zoom in
-                scale *= 1.1
-            else:           # scroll down = zoom out
-                scale /= 1.1
-            scale = max(0.1, min(scale, 10))  # clamp zoom
-
-
-    cv2.namedWindow("map_image")
-    cv2.setMouseCallback("map_image", mouse_event)
-
-    while True:
-        H, W, _ = map_processor.map_image.shape
-        # apply scale
-        scaled = cv2.resize(map_processor.map_image, (int(W) // 5, int(H) // 5))
-
-        # create black background of original size
-        view = np.zeros((H, W, 3), dtype=np.uint8)
-
-        # compute top-left corner with dx, dy applied
-        x1 = int(dx)
-        y1 = int(dy)
-        x2 = x1 + scaled.shape[1]
-        y2 = y1 + scaled.shape[0]
-
-        # clip coordinates so we don’t go out of bounds
-        x1_clip = max(x1, 0)
-        y1_clip = max(y1, 0)
-        x2_clip = min(x2, W)
-        y2_clip = min(y2, H)
-
-        sx1 = x1_clip - x1
-        sy1 = y1_clip - y1
-        sx2 = sx1 + (x2_clip - x1_clip)
-        sy2 = sy1 + (y2_clip - y1_clip)
-
-        # paste scaled image into view
-        view[y1_clip:y2_clip, x1_clip:x2_clip] = scaled[sy1:sy2, sx1:sx2]
-
-        cv2.imshow("map_image", view)
-        key = cv2.waitKey(1)
-        if key == ord("q"):
-            break
-
-    cv2.destroyAllWindows()

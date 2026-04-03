@@ -70,7 +70,7 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
             actual_duration + CONFIG.replay_runtime.duration_padding_s,
             0,
         )
-        logger.INFO(f"Showing a replay segment of {actual_duration: .2f}s")
+        logger.INFO(f"Showing a replay segment of {actual_duration: .2f}s for log: {replay_dir}")
 
         # -- Tick for n times to check replay's stability
         logger.INFO("Waiting for replay to stabilize...")
@@ -180,6 +180,7 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
             send_clear_npcs.send(args.clear_npcs)
             lp_wrapper()
         progress.stop()
+        logger.CUSTOM("SUCCESS", "Stopped playing for log: {}", replay_dir)
 
         time.sleep(CONFIG.replay_runtime.final_wait_s)
         temp_stop = stop_at

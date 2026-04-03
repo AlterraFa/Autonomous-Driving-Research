@@ -23,7 +23,7 @@ from src.math.coordinate_transform import global_2_local, global_2_local_rot, gl
 from config import CONFIG
 
 quality = CONFIG.picture.quality
-position_idx = CONFIG.replay.position_idx
+position_idx = CONFIG.replay_runtime.position_idx
 
 temporal_offset      = CONFIG.offsets.temporal_offset
 spatial_offset       = CONFIG.offsets.spatial_offset
@@ -350,7 +350,7 @@ class ReplayHandler:
         self.send_global_wp_temporal.send(global_wp_temporal)
         self.send_turn_signal.send(turn_signal)
 
-        self.logger.DEBUG(f"Lat Err: {lat_err:.3f}m", frequency = 0.1)
+        self.logger.DEBUG(f"Lat Err: {lat_err:.3f}m", frequency = 0.5)
 
         # Only save when it moves (Prevent saving all the time when stopping at red light or stop sign)
         if self.data_collector and authorized_saving:

@@ -412,39 +412,118 @@ class PathHandler(NodeFinder):
         if merge:
             wp = self._loc_merging(wp, side_val, offsets)
             if self.has_rot:
-                wp_rpy = self._rot_merging(wp, wp_rpy, use_time=use_time)
+                wp_rpy = self._rot_merging(wp, wp_rpy, offsets=offsets, use_time=use_time)
                 
         wp = np.asarray(wp)
         return wp, wp_rpy
 
-    def _rot_merging(self, merged_wps: list, centerline_rpy: np.ndarray, use_time: bool = False):
-        """
-        Updates yaw to point towards the final waypoint.
+    # def _rot_merging(self, merged_wps: list, centerline_rpy: np.ndarray, offsets: list[float] = None, use_time: bool = False):
+    #     """
+    #     Updates yaw using local merged geometry with a decay profile similar
+    #     to location merging.
 
-        In temporal mode we keep the original/interpolated yaw whenever the
-        merged geometry barely moves, which avoids camera flips while the
-        vehicle is stopped. Only blend when there is substantial lateral motion (> 0.5m)
-        to handle genuine lane transitions.
+    #     The heading target is derived from local tangents, not the final
+    #     endpoint. We then blend from centerline yaw toward tangent yaw using
+    #     the same quadratic decay used by `_loc_merging`.
+    #     """
+    #     if centerline_rpy is None:
+    #         return None
+
+    #     merged_rpy = np.copy(centerline_rpy)
+    #     wps = np.asarray(merged_wps)
+    #     n_points = len(wps)
+    #     if n_points < 2:
+    #         return merged_rpy
+
+    #     tangents = np.empty((n_points, 3), dtype=float)
+    #     tangents[:-1] = wps[1:, :3] - wps[:-1, :3]
+    #     tangents[-1] = wps[-1, :3] - wps[-2, :3]
+
+    #     if offsets is not None and len(offsets) == n_points:
+    #         offsets_np = np.asarray(offsets, dtype=float)
+    #         merge_target_dist = offsets_np[-1] + 1e-6
+    #         ratios = np.clip(offsets_np / merge_target_dist, 0.0, 1.0)
+    #         weights = (1.0 - ratios) ** 2
+    #     else:
+    #         # Fallback: full rotation blend when no offsets are provided.
+    #         weights = np.ones(n_points, dtype=float)
+
+    #     for i in range(n_points):
+    #         tangent = tangents[i]
+    #         norm = np.linalg.norm(tangent)
+    #         if norm > 1e-6:
+    #             yaw = np.degrees(np.arctan2(tangent[1], tangent[0]))
+    #             base_yaw = merged_rpy[i, 2]
+    #             delta = (yaw - base_yaw + 180.0) % 360.0 - 180.0
+    #             merged_rpy[i, 2] = base_yaw + float(weights[i]) * delta
+
+    #     # Temporal queries can clip several future timestamps to the same
+    #     # endpoint, so force the furthest point to use the last valid segment
+    #     # heading rather than a zero-decay centerline yaw.
+    #     if use_time and n_points >= 2:
+    #         tail_yaw = None
+    #         for j in range(n_points - 1, -1, -1):
+    #             tangent = tangents[j]
+    #             if np.linalg.norm(tangent) > 1e-6:
+    #                 tail_yaw = np.degrees(np.arctan2(tangent[1], tangent[0]))
+    #                 break
+    #         if tail_yaw is not None:
+    #             merged_rpy[-1, 2] = tail_yaw
+    #     elif n_points >= 2 and float(weights[-1]) < 1e-6:
+    #         # Spatial mode: keep endpoint orientation continuous with the
+    #         # previously merged yaw when decay reaches zero.
+    #         merged_rpy[-1, 2] = merged_rpy[-2, 2]
+
+    #     merged_rpy[:, 2] = (merged_rpy[:, 2] + 180.0) % 360.0 - 180.0
+    #     return merged_rpy
+
+    def _rot_merging(self, merged_wps: list, centerline_rpy: np.ndarray, use_time: bool = False, **_):
         """
-        if centerline_rpy is None: 
+        Updates yaw to follow the merged trajectory tangent.
+
+        In temporal mode, nearby/clumped points can produce unstable heading
+        estimates. To avoid camera snaps, we freeze/blend yaw when local
+        displacement is very small.
+        """
+        if centerline_rpy is None:
             return None
-            
+
         merged_rpy = np.copy(centerline_rpy)
-        blend_distance = 1.5 if use_time else 0.0
-        for i in range(len(merged_wps)):
-            tangent = merged_wps[-1][:3] - merged_wps[i][:3]
-                
+        wps = np.asarray(merged_wps)
+        n_points = len(wps)
+        if n_points < 2:
+            return merged_rpy
+
+        freeze_distance = 0.35 if use_time else 0.0
+        full_blend_distance = 1.5 if use_time else 0.0
+
+        for i in range(n_points):
+            if i < len(merged_wps) - 1:
+                tangent = wps[i + 1][:3] - wps[i][:3]
+            else:
+                tangent = wps[i][:3] - wps[i - 1][:3]
+
             norm = np.linalg.norm(tangent)
             if norm > 1e-6:
                 yaw = np.degrees(np.arctan2(tangent[1], tangent[0]))
                 if use_time:
-                    weight = float(np.clip(norm / blend_distance, 0.0, 1.0))
                     base_yaw = merged_rpy[i, 2]
+                    if norm <= freeze_distance:
+                        if i > 0:
+                            merged_rpy[i, 2] = merged_rpy[i - 1, 2]
+                        continue
+
+                    weight = float(np.clip(
+                        (norm - freeze_distance) / (full_blend_distance - freeze_distance + 1e-6),
+                        0.0,
+                        1.0,
+                    ))
                     delta = (yaw - base_yaw + 180.0) % 360.0 - 180.0
                     merged_rpy[i, 2] = base_yaw + weight * delta
                 else:
                     merged_rpy[i, 2] = yaw
-                
+
+        merged_rpy[:, 2] = (merged_rpy[:, 2] + 180.0) % 360.0 - 180.0
         return merged_rpy
 
     def _loc_merging(self, centerline_wps: np.ndarray, current_side_val: float, offsets: list[float], merge_fraction: float = 1.0):
@@ -888,20 +967,19 @@ class WaypointsAlign:
                     current_group.append(transform)
             else:
                 if current_jid is not None and current_group:
-                    groups.append((current_jid, np.array(current_group), ci))
+                    groups.append((current_jid, np.array(current_group)))
                 current_group = [transform] if jid is not None else []
                 current_jid = jid
-                group_start = ci
 
         if current_jid is not None and current_group:
-            groups.append((current_jid, np.array(current_group), len(coordinates)))
+            groups.append((current_jid, np.array(current_group)))
 
         return groups
 
     def _precompute_junction_paths(self, groups: list, junction_by_id: dict):
         junctions_metadata_groups = []
 
-        for idx, (group_jid, coordinate_group, group_end) in enumerate(groups):
+        for (group_jid, coordinate_group) in groups:
             junction = junction_by_id.get(group_jid)
             if junction is None:
                 junctions_metadata_groups.append(np.array([]))
