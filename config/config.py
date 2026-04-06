@@ -27,7 +27,7 @@ class MapRenderConfig:
     map_offset: tuple[int, int] = (100, 100)
     map_range: tuple[int, int] = (50, 50)
     map_resize: tuple[int, int] = (200, 200)
-    map_scale: int = 2
+    map_scale: int = 3
 
 
 @dataclass(frozen=True)
@@ -70,7 +70,7 @@ class UIConfig:
 class OffsetsConfig:
     front_offset: float = 1.5
     temporal_offset: tuple[float, ...] = (0.0, 0.15, 0.3, 0.45, 0.6, 0.75)
-    spatial_offset: tuple[int, ...] = (0, 2, 4, 6, 8, 10, 12)
+    spatial_offset: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
     scout_offset_params: tuple[int, int, int] = (-18, 33, 2)
 
 
@@ -110,14 +110,6 @@ class VehicleConfig:
 @dataclass(frozen=True)
 class PictureConfig:
     quality: int = 90
-
-
-@dataclass(frozen=True)
-class ReplayConfig:
-    start_at: float = 0.0
-    stop_at: float = -1.0
-    position_idx: int = 0
-
 
 @dataclass(frozen=True)
 class SensorConfig:
@@ -186,6 +178,9 @@ class ReplayRuntimeConfig:
     actor_spawn_timeout_s: float = 30.0
     actor_settle_ticks: int = 30
     final_wait_s: float = 1.0
+    start_at: float = 0.0
+    stop_at: float = -1.0
+    position_idx: int = 0
 
 
 @dataclass(frozen=True)
@@ -217,7 +212,6 @@ class SimulationConfig:
     spawn: SpawnConfig = field(default_factory=SpawnConfig)
     vehicle: VehicleConfig = field(default_factory=VehicleConfig)
     picture: PictureConfig = field(default_factory=PictureConfig)
-    replay: ReplayConfig = field(default_factory=ReplayConfig)
     sensor: SensorConfig = field(default_factory=SensorConfig)
     controller: ControllerConfig = field(default_factory=ControllerConfig)
     rendering: RenderingConfig = field(default_factory=RenderingConfig)

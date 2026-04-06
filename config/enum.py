@@ -101,6 +101,10 @@ class CarlaLabel(IntEnum):
     RailTrack     = 27
     GuardRail     = 28
 class _BaseCameraView(Enum):
+    FIRST_PERSON_1 = {
+        "x": 0.0, "y": 0.0, "z": 1.9,    # position
+        "roll": 0.0, "pitch": 0.0, "yaw": 0.0
+    }
     FIRST_PERSON = {
         "x": 0.0, "y": 0.0, "z": 2,    # position
         "roll": 0.0, "pitch": 0.0, "yaw": 0.0

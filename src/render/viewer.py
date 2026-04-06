@@ -614,7 +614,6 @@ class ReplayViewer(Viewer):
             while True if self.headless else self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
                 self.step_world()
                 self.data_bus(True)  # Filter control for replay mode
-                self.contracting_wp.build_vehicle_tree(self.ego_id)
                 
                 frame = None
                 if not self.headless:
@@ -631,14 +630,8 @@ class ReplayViewer(Viewer):
                 # Replay-specific operations
                 self._handle_trajectory_logging()
                 
-                spatial_wp  = self.sub_local_spatial.receive()
-                local_wp = np.r_[spatial_wp[:]]
-                local_wp[:, 2] += 1.0 # -- Ensure waypoints are inside vehicle bbox
-                local_wp, match = self.contracting_wp.contract_local_wp(local_wp)
-                local_wp[:, 2] += 0.7 #-- Ensure camera's position is on the same level
-                self.register_view_matrix("LOCAL_WP", local_wp[...], activate_first=False)
-                
-                self.choosen_view = [view for view in self.sensor_manager.camera_views if view.startswith("FIRST") or view.startswith("LOCAL")]
+
+
                 # Render (replay mode)
                 self._handle_replay_step()
                 self._render_base_hud(frame)
@@ -710,23 +703,40 @@ class ReplayViewer(Viewer):
 
     def _handle_replay_step(self):
         """Handle replay functionality step"""
-        if self.replayer:
+        if self.replayer:   
+            self.contracting_wp.build_vehicle_tree(self.ego_id)
+            spatial_wp  = self.sub_local_spatial.receive()
+            local_wp = np.r_[spatial_wp[:]]
+            local_wp[:, 2] += 1.0 # -- Ensure waypoints are inside vehicle bbox
+            local_wp, match = self.contracting_wp.contract_local_wp(local_wp)
+            local_wp[:, 2] += 0.7 #-- Ensure camera's position is on the same level
+            self.register_view_matrix("LOCAL_WP", local_wp[...], activate_first=False)
+            self.choosen_view = [view for view in self.sensor_manager.camera_views if view.startswith("FIRST") or view.startswith("LOCAL")]
+
             if self.replayer.data_collector: 
-                if self.frame_id % 7 == 0:
-                    self.index = self.i % len(self.choosen_view)
-                    self.view_name = self.choosen_view[self.index]
+                if self.frame_id % 3 == 0:
+                    self.view_index = self.i % len(self.choosen_view)
+                    self.view_name = self.choosen_view[self.view_index]
                     self.change_view_all(self.view_name, show_info = False)
                     self.i += 1
                 
-                if getattr(self, "index", 0) == 0 and getattr(self, "saved", True):
+                if getattr(self, "view_index", 0) == 0 or getattr(self, "saved", True):
                     self.image_kwargs = dict()
                 
-                if len(self.image_kwargs) < len(self.choosen_view):
+                authorize = False
+                view_name = getattr(self, "view_name", None)
+                if view_name and len(self.image_kwargs) < len(self.choosen_view):
                     authorize = False
-                    self.image_kwargs.update({getattr(self, "view_name"): self.choosen_sensor.extract_data().copy()})
-                else:
+                    self.image_kwargs[view_name] = self.choosen_sensor.extract_data().copy()
+                elif len(self.image_kwargs) >= len(self.choosen_view):
                     authorize = True
-                self.saved = self.replayer.step(**self.image_kwargs, authorized_saving = authorize)
+                
+                image_kwargs = {
+                    key: value
+                    for key, value in self.image_kwargs.items()
+                    if key != "FIRST_PERSON_1" and key != self.choosen_view[-1]
+                }
+                self.saved = self.replayer.step(**image_kwargs, authorized_saving = authorize)
             else: 
                 self.replayer.step()
 

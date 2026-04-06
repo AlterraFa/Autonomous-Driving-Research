@@ -393,4 +393,4 @@ class ReplayHandler:
             )
             # self.prev_dist = curr_dist
             return saved
-        return None
+        return False

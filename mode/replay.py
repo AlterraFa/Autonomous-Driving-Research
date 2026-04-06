@@ -126,6 +126,7 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
         if args.redo_traj:
             traj_logger = TrajectoryBuffer(replay_dir, min_dt_s = MIN_SAVING_DIST)
             replayer = None
+            contracting_wp = None
         else: 
             traj_logger = None
             recorded_traj = np.load(path_2_waypoints)
