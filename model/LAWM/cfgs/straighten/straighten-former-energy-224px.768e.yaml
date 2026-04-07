@@ -133,6 +133,7 @@ loss:
   lm: 0.1
 
 meta:
+  save_root_dir: ./Experiment
   dtype: bfloat16
   save_every_freq: 5
   seed: 239
