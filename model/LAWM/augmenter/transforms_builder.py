@@ -24,7 +24,7 @@ class VideoTransform(object):
         auto_augment=False,
         motion_shift=False,
         crop_size=224,
-        normalize=((0.2809, 0.2959, 0.2946), (0.2469, 0.2675, 0.2795)),
+        normalize=((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         pad_frame_count: Optional[int] = None,
         pad_frame_method: str = "circulant",
     ):
@@ -89,7 +89,9 @@ class VideoTransform(object):
         if self.random_horizontal_flip:
             buffer, _ = video_transforms.horizontal_flip(0.5, buffer)
 
-        buffer = _tensor_normalize_inplace(buffer, self.mean, self.std)
+        mean = self.mean.to(buffer.device)
+        std = self.std.to(buffer.device)
+        buffer = _tensor_normalize_inplace(buffer, mean, std)
         if self.reprob > 0:
             buffer = buffer.permute(1, 0, 2, 3)
             buffer = self.erase_transform(buffer)
