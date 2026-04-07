@@ -121,7 +121,7 @@ def _decode(path):
         return None
  
  
-_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.cpu_count() // 2))
+_EXECUTOR = ThreadPoolExecutor(max_workers=int(2 * os.cpu_count() // 3))
 def decode_batch(paths):
     frames = np.asarray(list(_EXECUTOR.map(_decode, paths)), dtype=np.uint8)
     return frames

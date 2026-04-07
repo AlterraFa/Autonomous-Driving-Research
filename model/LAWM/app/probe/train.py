@@ -2,6 +2,7 @@ import os, sys
 import resource
 import time
 import gc
+from ruamel.yaml import YAML
 from functools import partial
 from pathlib import Path
 
@@ -41,6 +42,61 @@ logger = Logger(__name__)
 def _unwrap_module(module):
     return module.module if hasattr(module, "module") else module
 
+
+def _task_metric_name(task_name: str) -> str:
+    return task_name.replace("_", " ").title()
+
+
+def _collect_affine_metrics(module, enabled_tasks=None, max_dims: int = 4, affine_modality: str = None):
+    core = _unwrap_module(module)
+    metrics = {}
+    task_names = list(enabled_tasks) if enabled_tasks is not None else []
+
+    scale_param = getattr(core, "scale", None)
+    shift_param = getattr(core, "shift", None)
+    if affine_modality is not None and affine_modality in task_names:
+        idx = task_names.index(affine_modality)
+        label = _task_metric_name(affine_modality)
+        if scale_param is not None:
+            raw_scale = scale_param.detach().float().flatten().cpu().tolist()
+            eff_scale = F.softplus(scale_param.detach()).float().flatten().cpu().tolist()
+            metrics[f"Raw Scale {label}"] = float(raw_scale[idx])
+            metrics[f"Scale {label}"] = float(eff_scale[idx])
+        if shift_param is not None:
+            shift_vals = shift_param.detach().float().flatten().cpu().tolist()
+            metrics[f"Shift {label}"] = float(shift_vals[idx])
+        return metrics
+
+    # Default: log all modalities
+    if scale_param is not None:
+        raw_scale = scale_param.detach().float().flatten().cpu()
+        eff_scale = F.softplus(scale_param.detach()).float().flatten().cpu()
+        metrics["Scale Mean"] = float(eff_scale.mean().item())
+        for i, value in enumerate(raw_scale[:max_dims]):
+            if i < len(task_names):
+                task_label = _task_metric_name(task_names[i])
+                metrics[f"Raw Scale {task_label}"] = float(value.item())
+            else:
+                metrics[f"Raw Scale[{i}]"] = float(value.item())
+        for i, value in enumerate(eff_scale[:max_dims]):
+            if i < len(task_names):
+                task_label = _task_metric_name(task_names[i])
+                metrics[f"Scale {task_label}"] = float(value.item())
+            else:
+                metrics[f"Scale[{i}]"] = float(value.item())
+
+    if shift_param is not None:
+        shift_vals = shift_param.detach().float().flatten().cpu()
+        metrics["Shift Mean"] = float(shift_vals.mean().item())
+        for i, value in enumerate(shift_vals[:max_dims]):
+            if i < len(task_names):
+                task_label = _task_metric_name(task_names[i])
+                metrics[f"Shift {task_label}"] = float(value.item())
+            else:
+                metrics[f"Shift[{i}]"] = float(value.item())
+
+    return metrics
+
 def gpu_timer(funct, log_timming = True):
     log_timming = log_timming and torch.cuda.is_available()
     
@@ -58,6 +114,35 @@ def gpu_timer(funct, log_timming = True):
     
     return result, elapsed_time
 
+def save_config_pretty(config_dict, save_path):
+    yaml = YAML()
+    # Basic formatting
+    yaml.indent(mapping=2, sequence=4, offset=2)
+    yaml.preserve_quotes = True
+    yaml.default_flow_style = False
+    
+    # This turns the dict into a 'ruamel' internal dict that supports comments/spacing
+    from ruamel.yaml.comments import CommentedMap
+    
+    def dict_to_commented(d):
+        if isinstance(d, dict):
+            cm = CommentedMap()
+            for k, v in d.items():
+                cm[k] = dict_to_commented(v)
+            return cm
+        return d
+
+    pretty_data = dict_to_commented(config_dict)
+
+    # Add a blank line before every top-level key for readability
+    first = True
+    for key in pretty_data.keys():
+        if not first:
+            pretty_data.yaml_set_comment_before_after_key(key, before='\n')
+        first = False
+
+    with open(save_path, 'w') as f:
+        yaml.dump(pretty_data, f)
 
 
     
@@ -67,7 +152,9 @@ np.random.seed(GLOBAL_SEED)
 torch.manual_seed(GLOBAL_SEED)
 torch.backends.cudnn.benchmark = True
 
-def main(args: dict, yaml_path: str):
+def main(args: dict, *noargs, **nokwargs):
+    meta_cfg: dict = args.get('meta', {})
+    affine_modality = meta_cfg.get('affine_modality', None)
     
     train_cfg: dict = args.get("train", {})
     crop_size    = train_cfg.get('crop_size', 224)
@@ -120,6 +207,10 @@ def main(args: dict, yaml_path: str):
     continue_train                 = bool(continue_from_path)
     resume_prefer_best             = bool(meta_cfg.get('resume_prefer_best', True))
 
+    checkpoint_cfg: dict = args.get('checkpoint', {})
+    patience = checkpoint_cfg.get('patience', epochs)
+    min_delta = checkpoint_cfg.get('min_delta', 0.0)
+
     logging_cfg: dict = args.get('logging', {})
     progress_type  = logging_cfg.get('progress_type', 'table')
     save_csv       = logging_cfg.get('save_csv', True)
@@ -144,10 +235,50 @@ def main(args: dict, yaml_path: str):
         dtype = torch.float32
         mixed_precision = False
     
-    
     torch.cuda.set_device(rank)
     device_type = f'cuda:{rank}'
     device = torch.device(device_type)
+    
+    criterion = compile_loss(loss_cfg = loss_cfg, device = device)
+    if dist.is_initialized() and world_size > 1:
+        criterion = DDP(criterion, device_ids=[rank], output_device=rank, find_unused_parameters=False)
+    criterion_core = _unwrap_module(criterion)
+    enabled_tasks = list(getattr(criterion_core, "enabled_tasks", []))
+    
+    transform = compile_transform(
+        random_horizontal_flip = horizontal_flip,
+        random_resize_aspect_ratio = random_aspect_ratio,
+        random_resize_scale = random_resize_scale,
+        reprob = reprob,
+        auto_augment = auto_augment,
+        motion_shift = motion_shift,
+        crop_size    = crop_size,
+    )
+    
+    video_loader, val_loader, video_sampler, val_sampler, stats = compile_dataloader(
+        train_cfg, 
+        nclips = nclips,
+        transform = transform,
+        collate_fn = torch.utils.data.default_collate,
+        num_workers  = num_workers,
+        persistance_workers = persistent_workers,
+        pin_memory = pin_mem,
+        world_sz = world_size,
+        rank = rank,
+        normalize_targets = normalize_targets,
+    )
+    
+    
+    inv_softplus = lambda x: np.where(x > 20, x, np.log(np.exp(np.clip(x, 1e-9, 20)) - 1.0))
+    probe_cfg['init_scales'] = [] if probe_cfg['init_scales'] == "auto" else None
+    probe_cfg['init_shifts'] = [] if probe_cfg['init_shifts'] == "auto" else None
+    for task in enabled_tasks:
+        mod_stats = stats[task]
+        if probe_cfg['init_scales'] is not None:
+            probe_cfg['init_scales'] += [float(inv_softplus(mod_stats['std']))]
+        if probe_cfg['init_shifts'] is not None:
+            probe_cfg['init_shifts'] += [mod_stats['mean']]
+    
     encoder, probe= compile_model(
         enc_cfg = enc_cfg,
         probe_cfg = probe_cfg,
@@ -163,31 +294,9 @@ def main(args: dict, yaml_path: str):
     if dist.is_initialized() and world_size > 1:
         encoder = DDP(encoder, static_graph = True)
         probe   = DDP(probe, static_graph = False, find_unused_parameters = False)
+    encoder.eval()
     for p in encoder.parameters():
         p.requires_grad = False
-    
-    transform = compile_transform(
-        random_horizontal_flip = horizontal_flip,
-        random_resize_aspect_ratio = random_aspect_ratio,
-        random_resize_scale = random_resize_scale,
-        reprob = reprob,
-        auto_augment = auto_augment,
-        motion_shift = motion_shift,
-        crop_size    = crop_size,
-    )
-    
-    video_loader, val_loader, video_sampler, val_sampler = compile_dataloader(
-        train_cfg, 
-        nclips = nclips,
-        transform = transform,
-        collate_fn = torch.utils.data.default_collate,
-        num_workers  = num_workers,
-        persistance_workers = persistent_workers,
-        pin_memory = pin_mem,
-        world_sz = world_size,
-        rank = rank,
-        normalize_targets = normalize_targets,
-    )
     
     optim, scaler, lr_scheduler, wd_scheduler = compile_opt(
         encoder              = encoder,
@@ -206,10 +315,6 @@ def main(args: dict, yaml_path: str):
         final_wd             = final_wd
     )
 
-    criterion = compile_loss(loss_cfg = loss_cfg, device = device)
-    if dist.is_initialized() and world_size > 1:
-        criterion = DDP(criterion, device_ids=[rank], output_device=rank, find_unused_parameters=False)
-    criterion_core = _unwrap_module(criterion)
 
     n_tasks = len(criterion_core.enabled_tasks) if hasattr(criterion_core, 'enabled_tasks') else 1
     optim.add_param_group({
@@ -305,16 +410,17 @@ def main(args: dict, yaml_path: str):
             save_epoch_csv = save_epoch_csv,
         )
         probe_save = EarlyStopping(
-            patience = epochs,
+            patience = patience,
             freq = save_freq,
-            min_delta = 0,
+            min_delta = min_delta,
             path = os.path.join(run_dir, "weights/probe.pt"),
             weights_only = True,
         )
         if resume_score is not None:
             probe_save.best_loss = resume_score
         if not continue_train:
-            os.system(f"cp {yaml_path} {run_dir}")
+            yaml_name = f"{args['app']}-{probe_cfg['name']}-{args['common']['crop_size']}.px.yaml"
+            save_config_pretty(args, os.path.join(run_dir, yaml_name))
     else:
         log_stats = NoOpLogger()
    
@@ -402,7 +508,7 @@ def main(args: dict, yaml_path: str):
             "Total Loss": float(detail["total_loss"].item()),
         }
         for task_name, task_detail in detail["per_task"].items():
-            task_title = task_name.replace("_", " ").title().replace(" ", "")
+            task_title = task_name.replace("_", " ").title()
             loss_details[f"{task_title}"] = float(task_detail["base_loss"].item())
 
         return float(loss.item()), loss_details
@@ -468,6 +574,7 @@ def main(args: dict, yaml_path: str):
             #               VALUATING
             # ==================================== #
             if val_loader is not None and len(val_loader) > 0:
+                probe.eval()
                 val_sampler.set_epoch(epoch)
                 log_stats.start_phase(len(val_loader), desc="Validation")
 
@@ -482,6 +589,8 @@ def main(args: dict, yaml_path: str):
                         **val_details,
                     }
                     log_stats.log_batch(val_metrics, phase="val")
+
+                probe.train()
 
             log_stats.log_epoch()
 
@@ -503,4 +612,15 @@ def main(args: dict, yaml_path: str):
                     lr=curr_lr,
                     criterion=_unwrap_module(criterion).state_dict()
                 )
-    
+
+            should_stop = False
+            if rank == 0:
+                should_stop = bool(probe_save.early_stop)
+
+            if dist.is_initialized() and world_size > 1:
+                stop_tensor = torch.tensor([int(should_stop)], device=device)
+                dist.broadcast(stop_tensor, src=0)
+                should_stop = bool(stop_tensor.item())
+
+            if should_stop:
+                break

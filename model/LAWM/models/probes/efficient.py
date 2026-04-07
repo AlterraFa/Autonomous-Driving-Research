@@ -111,12 +111,12 @@ class EfficientPooler(nn.Module):
         target_timestep = num_tokens // patches_per_frame
 
         x = self.pos_encode(x, target_timestep)
+        if self.dropout_layer is not None:
+            x = self.dropout_layer(x)
         query_tokens = self.interp_q(self.query_tokens, target_timestep)
         query_tokens = query_tokens.repeat(batch_size, 1, 1, 1)
 
         out = self.efficient_probe(x, cls_token=query_tokens)
-        if self.dropout_layer is not None:
-            out = self.dropout_layer(out)
         return out
 
     def interp_q(self, queries: torch.Tensor, tgt_size: int) -> torch.Tensor:
@@ -170,7 +170,6 @@ class EfficientProbe(Prober):
             nn.Sequential(
                 nn.Linear(embed_dim, embed_dim // 2, bias = True),
                 nn.LeakyReLU(),
-                nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
                 nn.Linear(embed_dim // 2, 1)
             ) for _ in range(output_dim)
         ])

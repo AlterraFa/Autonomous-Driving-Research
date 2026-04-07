@@ -106,10 +106,10 @@ class CrossPooler(nn.Module):
         q = q.repeat(B, 1, 1) # -- B, T, Q, D 
         
         x = self.pos_encode(x, tgt_timestep)
+        if self.dropout_layer is not None:
+            x = self.dropout_layer(x)
         
         q = self.cross_attn(q, x)
-        if self.dropout_layer is not None:
-            q = self.dropout_layer(q)
         return q
 
     def interp_q(self, queries: torch.Tensor, tgt_size: int):
@@ -161,7 +161,6 @@ class CrossProbe(Prober):
             nn.Sequential(
                 nn.Linear(embed_dim, embed_dim // 2, bias = True),
                 nn.LeakyReLU(),
-                nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
                 nn.Linear(embed_dim // 2, 1)
             ) for _ in range(output_dim)
         ])

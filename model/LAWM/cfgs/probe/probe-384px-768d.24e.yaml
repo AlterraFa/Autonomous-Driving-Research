@@ -120,6 +120,10 @@ optimization:
     params: 
       reduction: mean
 
+checkpoint:
+  patience: 10
+  min_delta: 0.0
+
 loss:
   enable_velocity: true
   enable_steer: false

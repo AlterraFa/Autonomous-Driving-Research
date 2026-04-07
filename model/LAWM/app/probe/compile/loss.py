@@ -24,11 +24,11 @@ class UncertaintyWeightedProbeLoss(nn.Module):
 	where s_i is a learnable log-variance parameter.
 	"""
 
-	DEFAULT_TASK_ORDER = ("velocity", "steer", "lat err")
+	DEFAULT_TASK_ORDER = ("velocity", "steer", "lat_err")
 	DEFAULT_TASK_INDEX = {
 		"velocity": 0,
 		"steer": 1,
-		"lat err": 2,
+		"lat_err": 2,
 	}
 	SUPPORTED_LOSSES = {"log_cosh", "mae", "mse", "smooth_l1"}
 
@@ -48,13 +48,13 @@ class UncertaintyWeightedProbeLoss(nn.Module):
 		enabled = enabled or {
 			"velocity": True,
 			"steer": True,
-			"lat err": True,
+			"lat_err": True,
 		}
 
 		task_to_loss = task_to_loss or {
 			"velocity": "log_cosh",
 			"steer": "mae",
-			"lat err": "mae",
+			"lat_err": "mae",
 		}
 
 		task_to_index = task_to_index or dict(self.DEFAULT_TASK_INDEX)
@@ -192,25 +192,25 @@ def compile_loss(loss_cfg: dict | None = None, device: torch.device | None = Non
 	enabled = {
 		"velocity": bool(loss_cfg.get("enable_velocity", True)),
 		"steer": bool(loss_cfg.get("enable_steer", True)),
-		"lat err": bool(loss_cfg.get("enable_lateral_error", True)),
+		"lat_err": bool(loss_cfg.get("enable_lateral_error", True)),
 	}
 
 	task_to_loss = {
 		"velocity": loss_cfg.get("velocity_loss", "log_cosh"),
 		"steer": loss_cfg.get("steer_loss", "mae"),
-		"lat err": loss_cfg.get("lateral_error_loss", "mae"),
+		"lat_err": loss_cfg.get("lateral_error_loss", "mae"),
 	}
 
 	task_to_index = {
 		"velocity": int(loss_cfg.get("velocity_idx", 0)),
 		"steer": int(loss_cfg.get("steer_idx", 1)),
-		"lat err": int(loss_cfg.get("lateral_error_idx", 2)),
+		"lat_err": int(loss_cfg.get("lateral_error_idx", 2)),
 	}
 
 	initial_log_vars = {
 		"velocity": float(loss_cfg.get("velocity_log_var", 0.0)),
 		"steer": float(loss_cfg.get("steer_log_var", 0.0)),
-		"lat err": float(loss_cfg.get("lateral_error_log_var", 0.0)),
+		"lat_err": float(loss_cfg.get("lateral_error_log_var", 0.0)),
 	}
 
 	criterion = UncertaintyWeightedProbeLoss(
@@ -231,7 +231,7 @@ def _resolve_action_key(action_map: dict, task_name: str) -> str:
     aliases = {
         "velocity": ["velocity", "vel", "speed"],
         "steer": ["steer", "steering", "steering_angle"],
-        "lat err": ["lateral_error", "lat_err", "cte", "cross_track_error", "lateral"],
+        "lat_err": ["lateral_error", "lat_err", "cte", "cross_track_error", "lateral"],
     }
     for key in aliases.get(task_name, [task_name]):
         if key in action_map:

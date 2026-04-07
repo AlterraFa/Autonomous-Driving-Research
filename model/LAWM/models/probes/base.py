@@ -35,4 +35,5 @@ class Prober(nn.Module):
                 raise ValueError("Received empty output sequence from probe heads")
             output = torch.cat(output, dim=-1)
 
-        return (output * F.softplus(self.scale)) + self.shift
+        scaled_output = (output * F.softplus(self.scale)) + self.shift
+        return scaled_output

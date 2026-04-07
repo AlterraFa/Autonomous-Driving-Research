@@ -25,18 +25,21 @@ def compile_dataloader(
         nclips = nclips,
         individual_transform = transform,
         allow_clip_overlap = train_cfg['allow_clip_overlap'],
-        random_jiggle_part = train_cfg['random_jiggle']
+        random_jiggle_part = train_cfg['random_jiggle'],
+        agg_method = train_cfg['agg_method']
     )
 
     train_fraction = float(train_cfg.get('train_fraction', 0.9))
     val_fraction = float(train_cfg.get('val_fraction', 0.1))
     train_set, val_set, test_set = dataset.split(train=train_fraction, val=val_fraction)
 
+    logger.INFO("Checking Statistics")
+    gt_stats = dataset.statistics(indices=train_set.indices)
+    if rank == 0:
+        logger.INFO("Train ground-truth statistics (used for affine target normalization):")
+        logger.INFO(gt_stats)
     if normalize_targets:
-        gt_stats = dataset.statistics(indices=train_set.indices)
-        if rank == 0:
-            logger.INFO("Train ground-truth statistics (used for affine target normalization):")
-            logger.INFO(gt_stats)
+        dataset.stats_cache = gt_stats
 
     train_sampler = torch.utils.data.DistributedSampler(
         train_set, num_replicas = world_sz, rank = rank, shuffle = True
@@ -76,6 +79,7 @@ def compile_dataloader(
             "nclips": nclips,
             "allow_clip_overlap": train_cfg['allow_clip_overlap'],
             "random_jiggle_part": train_cfg['random_jiggle'],
+            "agg_method": train_cfg['agg_method'],
             "normalize_targets": bool(normalize_targets),
             "train_fraction": train_fraction,
             "val_fraction": val_fraction,
@@ -109,4 +113,4 @@ def compile_dataloader(
         },
     })
 
-    return train_loader, val_loader, train_sampler, val_sampler
+    return train_loader, val_loader, train_sampler, val_sampler, gt_stats

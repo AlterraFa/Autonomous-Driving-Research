@@ -10,8 +10,10 @@ import importlib
 import torch
 import glob
 import re
+from pathlib import Path
 
 from utils.distributed import init_distributed
+from app.probe_notebook import extract_nb_params
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--fname", type=str, help="name of config file to load", default="configs.yaml")
@@ -29,6 +31,13 @@ parser.add_argument(
     default=None,
     help="path to a previous run directory (e.g. ./Experiment/probe/run1 or ./Experiment/run1)",
 )
+parser.add_argument(
+    "--probe-notebook",
+    dest="probe_notebook",
+    type=str,
+    default=None,
+    help="path to latent-probe.ipynb; when set, extract PARAMS",
+)
 
 
 def _resolve_continue_run_dir(continue_path: str) -> str:
@@ -45,7 +54,7 @@ def _resolve_continue_run_dir(continue_path: str) -> str:
         base_dir = os.path.dirname(raw_path)
         candidates = [
             os.path.join(base_dir, mode, run_name)
-            for mode in ("action", "probe", "pretraining")
+            for mode in ("action", "probe", "pretraining", "straightening")
             if os.path.isdir(os.path.join(base_dir, mode, run_name))
         ]
         if len(candidates) == 1:
@@ -71,7 +80,7 @@ def _find_run_yaml(run_dir: str) -> str:
     return yaml_candidates[0]
 
 
-def process(rank, fname, world_size, devices, continue_path=None): 
+def process(rank, fname, world_size, devices, continue_path=None, probe_notebook=None): 
     import os, sys
 
     os.environ['CUDA_VISIBLE_DEVICES'] = str(devices[rank].split(":")[-1])
@@ -82,15 +91,29 @@ def process(rank, fname, world_size, devices, continue_path=None):
 
     config_path = fname
     resolved_continue_dir = None
-    if continue_path:
+    nb_probed = bool(probe_notebook)
+
+    if nb_probed:
+        extracted = extract_nb_params(probe_notebook)
+        params = extracted["PARAMS"]
+        config_path = str(Path(probe_notebook).resolve())
+        logger.INFO(f"Loaded PARAMS from probe notebook: {config_path}")
+
+        notebook_continue_path = extracted.get("CONTINUE_PATH")
+        effective_continue_path = continue_path or notebook_continue_path
+        if effective_continue_path:
+            resolved_continue_dir = _resolve_continue_run_dir(str(effective_continue_path))
+            logger.INFO(f"Continuing from run directory: {resolved_continue_dir}")
+    elif continue_path:
         resolved_continue_dir = _resolve_continue_run_dir(continue_path)
         config_path = _find_run_yaml(resolved_continue_dir)
         logger.INFO(f"Continuing from run directory: {resolved_continue_dir}")
         logger.INFO(f"Loading run config from: {config_path}")
 
-    with open(config_path, "r") as f:
-        params = yaml.load(f, Loader = yaml.FullLoader)
-        logger.INFO(f"Rank {rank} Loaded parameters")
+    if not nb_probed:
+        with open(config_path, "r") as f:
+            params = yaml.load(f, Loader = yaml.FullLoader)
+            logger.INFO(f"Rank {rank} Loaded parameters")
 
     if resolved_continue_dir is not None:
         meta_cfg = params.setdefault("meta", {})
@@ -105,9 +128,9 @@ def process(rank, fname, world_size, devices, continue_path=None):
     else:
         Logger.set_levels("ERROR", "DEBUG", "CUSTOM")
 
-        
     try:
-            importlib.import_module(f"app.{params['app']}.train").main(params, config_path)
+        task_module = "train"
+        importlib.import_module(f"app.{params['app']}.{task_module}").main(params, config_path)
     except KeyboardInterrupt:
         logger.ERROR(f"Keyboard Interrupt detected on {rank=}")
     except Exception as e:
@@ -129,5 +152,12 @@ if __name__ == "__main__":
     for rank in range(num_gps):
         mp.Process(
             target=process,
-            args=(rank, args_parser.fname, num_gps, devices, args_parser.continue_path),
+            args=(
+                rank,
+                args_parser.fname,
+                num_gps,
+                devices,
+                args_parser.continue_path,
+                args_parser.probe_notebook,
+            ),
         ).start()

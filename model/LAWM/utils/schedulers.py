@@ -4,7 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-
+import numpy as np
 
 class WSDSchedule(object):
 
@@ -131,4 +131,33 @@ class LinearDecaySchedule(object):
         for group in self.optimizer.param_groups:
             group["lr"] = new_lr
 
+        return new_lr
+
+
+class CosineWSDSchedule:
+    def __init__(self, optimizer, warmup_steps, anneal_steps, T_max, start_lr, ref_lr, final_lr=0.0):
+        self.optimizer = optimizer
+        self.start_lr = start_lr
+        self.ref_lr = ref_lr
+        self.final_lr = final_lr
+        self.anneal_steps = anneal_steps
+        self.warmup_steps = warmup_steps
+        self.T_max = T_max - warmup_steps - anneal_steps
+        self._step = 0.0
+
+    def step(self):
+        self._step += 1
+        if self._step < self.warmup_steps:
+            progress = float(self._step) / float(max(1, self.warmup_steps))
+            new_lr = self.start_lr + progress * (self.ref_lr - self.start_lr)
+        elif self._step < self.T_max + self.warmup_steps:
+            new_lr = self.ref_lr
+        else:
+            _step = self._step - (self.T_max + self.warmup_steps)
+            progress = float(_step) / float(max(1, self.anneal_steps))
+            cosine = 0.5 * (1.0 + np.cos(np.pi * progress))
+            new_lr = self.final_lr + (self.ref_lr - self.final_lr) * cosine
+        for group in self.optimizer.param_groups:
+            group['lr'] = new_lr
+        
         return new_lr

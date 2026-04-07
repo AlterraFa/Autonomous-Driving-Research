@@ -501,7 +501,7 @@ class GCRoPEAttention(nn.Module):
     def forward(self, x: torch.Tensor, mask=None, attn_mask=None, T=None, H=None, W=None, apstep = 0):
         B, N_tokens, D = x.shape
         
-        tokens_pstep = self.grid_size ** 2
+        tokens_pstep = H * W if H and W else self.grid_size ** 2
         if T is None:
             steps = N_tokens // tokens_pstep
         else:

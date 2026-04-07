@@ -355,36 +355,3 @@ class ActionTransformerPredictorGC(nn.Module):
         a = self.norm(a)
                 
         return a
-            
-if __name__ == "__main__":
-    device = torch.device('cuda')
-
-    img_size = 224
-    patch_size = 16
-    max_frames = 16
-    tubelet_size = 2
-    action_per_step = 3
-    
-    tokens_pframe = (img_size // patch_size) ** 2
-    
-    
-    model = ActionTransformerPredictorGC(
-        img_size = (img_size, ) * 2,
-        patch_size = patch_size,
-        max_frames = max_frames,
-        tubelet_size = tubelet_size, 
-        embed_dim = 512,
-        action_per_step = action_per_step,
-        action_embed_dim = 512,
-        depth = 4,
-        num_heads = 8, 
-        use_activation_checkpointing = True
-    ).to(device)
-    
-    context = torch.rand((6, tokens_pframe * (max_frames // tubelet_size - 1), 512)).to(device)
-    goal = torch.rand((6, tokens_pframe, 512)).to(device)
-
-    with torch.no_grad():
-        with torch.autocast('cuda', torch.bfloat16):
-            output = model(context, goal)
-            print(output.shape)

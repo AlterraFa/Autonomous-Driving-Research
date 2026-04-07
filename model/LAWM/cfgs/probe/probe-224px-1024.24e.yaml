@@ -114,6 +114,10 @@ optimization:
     type: normal
     params: {}
 
+checkpoint:
+  patience: 20
+  min_delta: 0.0
+
 loss:
   enable_velocity: true
   enable_steer: true

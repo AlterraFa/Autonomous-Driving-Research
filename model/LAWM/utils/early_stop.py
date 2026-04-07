@@ -89,3 +89,70 @@ class EarlyStopping:
         
         torch.save(checkpoint, os.path.join(self.parent_folder, "checkpoint.pt"))
         torch.save(raw_model.state_dict() if self.weights_only else raw_model, path)
+
+class MultiModuleEarlyStopping:
+    def __init__(self, patience=5, min_delta=0.0, freq=0, path_root="weights", mode="min", weights_only=True):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.path_root = path_root # Directory where all weights go
+        self.best_loss = None
+        self.counter = 0
+        self.early_stop = False
+        self.weights_only = weights_only
+        self.save_freq = freq
+        self.iter_count = 0
+        self.mode = mode
+        self.rank = dist.get_rank() if dist.is_initialized() else 0
+        
+        if not os.path.exists(self.path_root):
+            os.makedirs(self.path_root, exist_ok=True)
+
+    def __call__(self, score, models_dict, optimizer, scaler, epoch):
+        if dist.is_initialized():
+            score_t = torch.tensor(score, device=torch.cuda.current_device())
+            dist.all_reduce(score_t, op=dist.ReduceOp.SUM)
+            score = score_t.item() / dist.get_world_size()
+
+        is_best = False
+        if self.best_loss is None:
+            self.best_loss = score
+            is_best = True
+        elif (score < self.best_loss - self.min_delta if self.mode == 'min' else score > self.best_loss + self.min_delta):
+            self.best_loss = score
+            self.counter = 0
+            is_best = True
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+
+        # Save Logic
+        if self.rank == 0:
+            # 1. Always save metadata
+            meta = {
+                'epoch': epoch,
+                'score': score,
+                'best_loss': self.best_loss,
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scaler_state_dict': scaler.state_dict() if scaler else None
+            }
+            torch.save(meta, os.path.join(self.path_root, "checkpoint.pt"))
+
+            # 2. Save models
+            for name, model in models_dict.items():
+                raw_model = model.module if hasattr(model, 'module') else model
+                state = raw_model.state_dict() if self.weights_only else raw_model
+                
+                # Save as "last"
+                torch.save(state, os.path.join(self.path_root, f"last_{name}.pt"))
+                
+                # Save as "best"
+                if is_best:
+                    torch.save(state, os.path.join(self.path_root, f"best_{name}.pt"))
+
+            # 3. Periodic checkpoint (last_X_iter.pt)
+            if self.save_freq > 0 and epoch % self.save_freq == 0:
+                for name, model in models_dict.items():
+                    raw_model = model.module if hasattr(model, 'module') else model
+                    state = raw_model.state_dict() if self.weights_only else raw_model
+                    torch.save(state, os.path.join(self.path_root, f"epoch_{epoch}_{name}.pt"))

@@ -1,11 +1,11 @@
 import os
 import csv
+import sys
 from typing import Dict, Optional, List, Literal, Union, Tuple
 from collections import defaultdict
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
-from tqdm.auto import tqdm
 
 # Try to import progress-table
 try:
@@ -14,6 +14,12 @@ try:
 except ImportError:
     PROGRESS_TABLE_AVAILABLE = False
 
+IS_KAGGLE_COMMIT = os.environ.get('KAGGLE_KERNEL_RUN_TYPE', '') == 'Batch'
+
+if IS_KAGGLE_COMMIT:
+    from tqdm import tqdm
+else:
+    from tqdm.auto import tqdm
 
 class NoOpLogger:
     """
@@ -138,6 +144,7 @@ class TrainingLogger:
         save_csv: bool = True,
         save_batch_csv: bool = False,
         save_epoch_csv: bool = True,
+        log_batch_tensorboard: bool = False,
     ):
         self.epochs = epochs
         self.current_epoch = 0
@@ -147,6 +154,10 @@ class TrainingLogger:
         self.save_csv = save_csv
         self.save_batch_csv = save_batch_csv
         self.save_epoch_csv = save_epoch_csv
+        self.log_batch_tensorboard = log_batch_tensorboard
+        
+        # Global iteration counter for per-batch TensorBoard logging
+        self._global_step = 0
         
         # Validate progress_table availability
         if progress_type == "table" and not PROGRESS_TABLE_AVAILABLE:
@@ -200,7 +211,9 @@ class TrainingLogger:
                 total=self.epochs,
                 desc=description,
                 position=0,
-                leave=True
+                leave=True,
+                file=sys.stdout,
+                mininterval=30
             )
         else:
             # Initialize progress table with proper settings
@@ -238,7 +251,9 @@ class TrainingLogger:
                 total=num_batches,
                 desc=f"Epoch {self.current_epoch + 1}/{self.epochs} - {desc}",
                 position=1,
-                leave=False
+                leave=False,
+                file=sys.stdout,
+                mininterval=30
             )
         else:
             # For table mode, store num_batches for batch_iterator to use
@@ -268,7 +283,9 @@ class TrainingLogger:
                 total=num_batches,
                 desc=f"Epoch {self.current_epoch + 1}/{self.epochs} - {desc}",
                 position=1,
-                leave=False
+                leave=False,
+                file=sys.stdout,
+                mininterval=30
             )
         else:
             # For table mode, store num_batches for batch_iterator to use
@@ -372,6 +389,16 @@ class TrainingLogger:
             self._write_csv(self._csv_batch_path, self._csv_batch_fields, self._csv_batch_rows)
         
         self._current_batch += 1
+        self._global_step += 1
+
+        # Per-iteration TensorBoard logging
+        if self.log_batch_tensorboard:
+            tb_prefix = f"Iter_Train" if phase == "train" else f"Iter_Val"
+            for key, value in clean_metrics.items():
+                if key in phase_agnostic:
+                    self.writer.add_scalar(f"Iter_Misc/{key}", value, self._global_step)
+                else:
+                    self.writer.add_scalar(f"{tb_prefix}/{key}", value, self._global_step)
         
         if self.progress_type == "tqdm":
             # Update batch progress bar with current metrics
@@ -726,6 +753,7 @@ def create_supervised_logger(
     save_csv: bool = True,
     save_batch_csv: bool = False,
     save_epoch_csv: bool = True,
+    log_batch_tensorboard: bool = False,
 ) -> TrainingLogger:
     """
     Create a TrainingLogger configured for supervised training (with validation).
@@ -738,6 +766,7 @@ def create_supervised_logger(
         save_csv: Enable CSV export
         save_batch_csv: Save per-batch CSV rows
         save_epoch_csv: Save per-epoch CSV rows
+        log_batch_tensorboard: Log every iteration to TensorBoard (not just epoch averages)
         
     Returns:
         TrainingLogger instance with use_validation=True
@@ -751,6 +780,7 @@ def create_supervised_logger(
         save_csv=save_csv,
         save_batch_csv=save_batch_csv,
         save_epoch_csv=save_epoch_csv,
+        log_batch_tensorboard=log_batch_tensorboard,
     )
 
 
@@ -762,6 +792,7 @@ def create_self_supervised_logger(
     save_csv: bool = True,
     save_batch_csv: bool = False,
     save_epoch_csv: bool = True,
+    log_batch_tensorboard: bool = False,
 ) -> TrainingLogger:
     """
     Create a TrainingLogger configured for self-supervised training (no validation).
@@ -774,6 +805,7 @@ def create_self_supervised_logger(
         save_csv: Enable CSV export
         save_batch_csv: Save per-batch CSV rows
         save_epoch_csv: Save per-epoch CSV rows
+        log_batch_tensorboard: Log every iteration to TensorBoard (not just epoch averages)
         
     Returns:
         TrainingLogger instance with use_validation=False
@@ -787,6 +819,7 @@ def create_self_supervised_logger(
         save_csv=save_csv,
         save_batch_csv=save_batch_csv,
         save_epoch_csv=save_epoch_csv,
+        log_batch_tensorboard=log_batch_tensorboard,
     )
 
 

@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 
+from scipy.interpolate import interp1d
 from pathlib import Path
 
 def _calculate_frame_indices(seq_length, fpc, nclips, frame_step, allow_clip_overlap, random_jiggle_part):
@@ -68,18 +69,60 @@ def _load_samples_and_labels(data_paths):
     return samples, labels, mapping
 
 
-def _extract_metadata(meta_paths, meta):
+def _extract_metadata(meta_paths, meta_keys, aggregation = "mean"):
     """Extract ground truth metadata from .npy files"""
     from .decode import _find_metadata_values
     extracted_data = []
-    for path in meta_paths:
-        try:
-            metadata = np.load(path, allow_pickle=True)
-            gt_values = _find_metadata_values(metadata, meta)
-            extracted_data.append(gt_values)
-        except Exception as e:
-            print(f"Error extracting metadata from {path}: {e}")
-            extracted_data.append({})
+    for window_paths in meta_paths:
+        window_values = {key: [] for key in meta_keys}
+        valid_indices = []
+        for i, path in enumerate(window_paths):
+            try:
+                metadata = np.load(path, allow_pickle=True)
+                gt_values = _find_metadata_values(metadata, meta_keys)
+                found_any = False
+                for key in meta_keys:
+                    val = gt_values.get(key)
+                    if val is not None:
+                        window_values[key].append(float(val))
+                        found_any = True
+                if found_any:
+                    valid_indices.append(i)
+            except Exception as e:
+                continue
+    agg_result = {}
+    num_expected = len(window_paths)
+    
+    for key in meta_keys:
+        vals = window_values[key]
+        if not vals:
+            agg_result[key] = 0.0
+            continue
+        if aggregation == "mean":
+            agg_result[key] = np.mean(vals)
+        elif aggregation == "sequence":
+            if len(vals) < num_expected:
+                x = np.array(valid_indices)
+                f = interp1d(x, vals, kind = "linear", fill_value = "extrapolate")
+                agg_result[key] = f(np.arange(num_expected))
+            else:
+                agg_result[key] = np.array(vals)
+        elif aggregation == "interpolate":
+                # Returns the 'ideal' midpoint value or a smoothed estimate
+                # Useful if you want the value exactly at the center of the frame skip
+                if len(vals) > 1:
+                    x = np.array(valid_indices)
+                    f = interp1d(x, vals, kind='linear', fill_value="extrapolate")
+                    # Sample at the mathematical center of the skip
+                    agg_result[key] = float(f((num_expected - 1) / 2))
+                else:
+                    agg_result[key] = vals[0]
+
+        elif aggregation == "last":
+            agg_result[key] = vals[-1]
+        elif aggregation == "first":
+            agg_result[key] = vals[0]
+        extracted_data += [agg_result]
     return extracted_data
 
 def _check_structure(root_path):

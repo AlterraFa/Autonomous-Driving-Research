@@ -58,52 +58,51 @@ def init_distributed(port=37129, rank_and_world_size=(None, None)):
 
     return world_size, rank
 
-
-class AllGather(torch.autograd.Function):
+class DifferentiableDistGather(torch.autograd.Function):
+    """
+    Gathers tensors from all GPUs while preserving the backward gradient path.
+    Standard dist.all_gather breaks the graph; this class fixes it.
+    """
+    @staticmethod
+    def forward(ctx, tensor):
+        ctx.world_size = dist.get_world_size()
+        ctx.rank = dist.get_rank()
+        
+        # Create storage for gathered tensors
+        gathered = [torch.zeros_like(tensor) for _ in range(ctx.world_size)]
+        dist.all_gather(gathered, tensor)
+        
+        # Save the size for the backward pass
+        ctx.batch_size = tensor.size(0)
+        return torch.cat(gathered, dim=0)
 
     @staticmethod
-    def forward(ctx, x):
-        if dist.is_available() and dist.is_initialized() and (dist.get_world_size() > 1):
-            x = x.contiguous()
-            outputs = [torch.zeros_like(x) for _ in range(dist.get_world_size())]
-            dist.all_gather(outputs, x)
-            return torch.cat(outputs, 0)
-        return x
+    def backward(ctx, grad_output):
+        grads = grad_output.chunk(ctx.world_size, dim=0)
+        return grads[ctx.rank]
+
+def all_gather(tensor):
+    if not (dist.is_available() and dist.is_initialized()):
+        return tensor
+    return DifferentiableDistGather.apply(tensor)
+
+class DifferentiableDistAllReduce(torch.autograd.Function):
+    """
+    Performs an All-Reduce (Average) while preserving the autograd graph.
+    Standard dist.all_reduce is in-place and breaks the graph.
+    """
+    @staticmethod
+    def forward(ctx, tensor):
+        ctx.world_size = dist.get_world_size()
+        reduced_tensor = tensor.clone()
+        dist.all_reduce(reduced_tensor, op=dist.ReduceOp.SUM)
+        return reduced_tensor / ctx.world_size
 
     @staticmethod
-    def backward(ctx, grads):
-        if dist.is_available() and dist.is_initialized() and (dist.get_world_size() > 1):
-            s = (grads.shape[0] // dist.get_world_size()) * dist.get_rank()
-            e = (grads.shape[0] // dist.get_world_size()) * (dist.get_rank() + 1)
-            grads = grads.contiguous()
-            dist.all_reduce(grads)
-            return grads[s:e]
-        return grads
+    def backward(ctx, grad_output):
+        return grad_output
 
-
-class AllReduceSum(torch.autograd.Function):
-
-    @staticmethod
-    def forward(ctx, x):
-        if dist.is_available() and dist.is_initialized() and (dist.get_world_size() > 1):
-            x = x.contiguous()
-            dist.all_reduce(x)
-        return x
-
-    @staticmethod
-    def backward(ctx, grads):
-        return grads
-
-
-class AllReduce(torch.autograd.Function):
-
-    @staticmethod
-    def forward(ctx, x):
-        if dist.is_available() and dist.is_initialized() and (dist.get_world_size() > 1):
-            x = x.contiguous() / dist.get_world_size()
-            dist.all_reduce(x)
-        return x
-
-    @staticmethod
-    def backward(ctx, grads):
-        return grads
+def all_reduce(tensor):
+    if not (dist.is_available() and dist.is_initialized()):
+        return tensor
+    return DifferentiableDistAllReduce.apply(tensor)

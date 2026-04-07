@@ -10,6 +10,8 @@ import numpy as np
 import glob
 import torch
 import re
+import random
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from torch.utils.data import Dataset
 from torch.utils.data import Subset
@@ -21,8 +23,14 @@ from .utils.load_helper import (
     _extract_metadata,
     _check_structure
 )
+import traceback
 
 
+IS_KAGGLE_COMMIT = os.environ.get('KAGGLE_KERNEL_RUN_TYPE', '') == 'Batch'
+if IS_KAGGLE_COMMIT:
+    from tqdm import tqdm
+else:
+    from tqdm.auto import tqdm
 
 
 class VideoDataset(Dataset):
@@ -81,9 +89,14 @@ class VideoDataset(Dataset):
         sample = self.samples[index]
         dataset_idx = self.video_indices_map[index]
         fpc = self.datasets_fpc[dataset_idx]
+
+        metadata_paths = _check_structure(sample)
+        if not metadata_paths:
+            print("Not valid metadata structure", sample)
+            return None
         
         # Get image paths
-        image_paths = glob.glob(os.path.join(sample, "*"))
+        image_paths = glob.glob(os.path.join(metadata_paths, "*"))
         image_paths = sorted(image_paths, key=lambda x: int(re.findall(r'\d+', x.rsplit('.', 1)[0])[-1]))
         
         if not image_paths:
@@ -120,40 +133,6 @@ class VideoDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-    def split(self, train=0.9, val=0.1):
-        """Split each source CSV independently into train/val/test sets"""
-        train_indices = []
-        val_indices = []
-        test_indices = []
-
-        # Group sample indices by originating CSV/dataset
-        indices_by_dataset = {}
-        for sample_idx, dataset_idx in enumerate(self.video_indices_map):
-            if dataset_idx not in indices_by_dataset:
-                indices_by_dataset[dataset_idx] = []
-            indices_by_dataset[dataset_idx].append(sample_idx)
-
-        # Split each CSV independently, then merge
-        for dataset_idx in sorted(indices_by_dataset.keys()):
-            dataset_indices = np.array(indices_by_dataset[dataset_idx], dtype=np.int64)
-            if len(dataset_indices) == 0:
-                continue
-
-            shuffled = np.random.permutation(dataset_indices)
-            n_total = len(shuffled)
-            n_train = int(n_total * train)
-            n_val = int(n_total * val)
-
-            train_indices.extend(shuffled[:n_train].tolist())
-            val_indices.extend(shuffled[n_train:n_train + n_val].tolist())
-            test_indices.extend(shuffled[n_train + n_val:].tolist())
-
-        return (
-            Subset(self, train_indices),
-            Subset(self, val_indices),
-            Subset(self, test_indices),
-        )
-    
 class ActVideoDataset(Dataset):
     """Action-conditioned video dataset with context/prediction separation and metadata"""
     
@@ -207,6 +186,8 @@ class ActVideoDataset(Dataset):
                     print(f"Error loading sample at {index=}, retrying ({retry+1}/5): {e}")
                 else:
                     print(f"Failed to load sample at {index=} after 5 retries")
+
+        print(f"Failed to load sample at {index=} after 5 retries {e}")
         return None
 
     def load_image_sequences(self, index):
@@ -274,7 +255,7 @@ class ActVideoDataset(Dataset):
         return ctx_buffers, pred_buffers, gt_clips
     
 
-
+from typing import Literal
 class ProbeDataset(Dataset):
     """Action-conditioned video dataset with context/prediction separation and metadata"""
     
@@ -289,6 +270,7 @@ class ProbeDataset(Dataset):
         allow_clip_overlap=False,  
         random_jiggle_part=True,
         random_part=True,
+        agg_method: Literal['first', 'last', 'interpolate', 'sequence', 'mean'] = "first"
     ):
         super().__init__()
         self.data_paths = data_paths
@@ -304,6 +286,7 @@ class ProbeDataset(Dataset):
         self.frame_step = _ensure_list(frame_step, len(data_paths))
         
         # Load data from CSV files
+        self.agg_method = agg_method
         self.samples, self.labels, self.video_indices_map = _load_samples_and_labels(data_paths)
     
     def __len__(self):
@@ -321,6 +304,7 @@ class ProbeDataset(Dataset):
                     print(f"Error loading sample at {index=}, retrying ({retry+1}/5): {e}")
                 else:
                     print(f"Failed to load sample at {index=} after 5 retries")
+        print(f"Failed to load sample at {index=} after 5 retries: {e}")
         return None
 
     def load_image_sequences(self, index):
@@ -333,6 +317,7 @@ class ProbeDataset(Dataset):
         # Check structure and get metadata paths
         metadata_paths = _check_structure(sample)
         if not metadata_paths:
+            print("Not valid metadata structure", sample)
             return None
         
         # Get metadata file paths
@@ -340,6 +325,7 @@ class ProbeDataset(Dataset):
         meta_paths = sorted(meta_paths, key=lambda x: int(re.findall(r'\d+', x.rsplit('.', 1)[0])[-1]))
         
         if not meta_paths:
+            print("No metadata file found")
             return None
         
         # Calculate frame indices using helper function
@@ -351,7 +337,16 @@ class ProbeDataset(Dataset):
         # Load frames and metadata
         selected_paths = np.array(meta_paths)[buffer_indices]
         buffer = decode_batch(selected_paths)
-        gt_data = _extract_metadata(selected_paths, ("steer", "velocity", "lat_err"))
+        meta_windows = [
+            meta_paths[idx : min(idx + fps, len(meta_paths))] 
+            for idx in buffer_indices
+        ]
+        
+        gt_data = _extract_metadata(
+            meta_windows, 
+            ("steer", "velocity", "lat_err"), 
+            aggregation=self.agg_method 
+        )
 
         if hasattr(self, 'stats_cache'):
             gt_data = [self._transform_gt_values(frame_gt) for frame_gt in gt_data]
@@ -438,59 +433,75 @@ class ProbeDataset(Dataset):
             Subset(self, test_indices),
         )
 
-    def statistics(self, gt_types=("steer", "velocity", "lat_err"), unbiased=False, indices=None):
-        """Compute per-ground-truth mean and variance across all samples.
+    @staticmethod
+    def _meta_sort_key(path):
+        """Helper to sort metadata files numerically (frame_2 before frame_10)."""
+        stem = os.path.basename(path).rsplit('.', 1)[0]
+        nums = re.findall(r'\d+', stem)
+        if nums:
+            return (0, int(nums[-1]))
+        return (1, stem)
 
-        Args:
-            gt_types: Iterable of metadata keys to aggregate.
-            unbiased: If True, variance uses N-1 denominator (sample variance).
-            indices: Optional iterable of sample indices to restrict aggregation.
+    def _process_single_sample(self, sample_index, gt_types):
+        """Worker function to be run in threads."""
+        sample = self.samples[sample_index]
+        metadata_root = _check_structure(sample) # Ensure this is accessible
+        if not metadata_root:
+            return None
 
-        Returns:
-            Dict[str, Dict[str, float | int | None]] with count, mean, variance, std.
-        """
-        gt_types = tuple(gt_types)
-        running = {
-            key: {"count": 0, "mean": 0.0, "m2": 0.0}
-            for key in gt_types
-        }
+        meta_paths = glob.glob(os.path.join(metadata_root, "*"))
+        if not meta_paths:
+            return None
+        
+        meta_paths = sorted(meta_paths, key=self._meta_sort_key)
+        gt_data = _extract_metadata(meta_paths, gt_types) # Ensure this is accessible
 
-        def _meta_sort_key(path):
-            stem = path.rsplit('.', 1)[0]
-            nums = re.findall(r'\d+', stem)
-            if nums:
-                return (0, int(nums[-1]))
-            return (1, stem)
-
-        if indices is None:
-            sample_indices = range(len(self.samples))
-        else:
-            sample_indices = indices
-
-        for sample_index in sample_indices:
-            sample = self.samples[sample_index]
-            metadata_paths = _check_structure(sample)
-            if not metadata_paths:
+        # Collect all valid values from this specific sample
+        local_values = {key: [] for key in gt_types}
+        for frame_gt in gt_data:
+            if not isinstance(frame_gt, dict):
                 continue
-
-            meta_paths = glob.glob(os.path.join(metadata_paths, "*"))
-            meta_paths = sorted(meta_paths, key=_meta_sort_key)
-            if not meta_paths:
-                continue
-
-            gt_data = _extract_metadata(meta_paths, gt_types)
-            for frame_gt in gt_data:
-                if not isinstance(frame_gt, dict):
-                    continue
-                for key in gt_types:
-                    value = frame_gt.get(key)
-                    if value is None:
-                        continue
+            for key in gt_types:
+                value = frame_gt.get(key)
+                if value is not None:
                     try:
-                        x = float(value)
+                        local_values[key].append(float(value))
                     except (TypeError, ValueError):
                         continue
+        return local_values
 
+    def statistics(self, gt_types=("steer", "velocity", "lat_err"), unbiased=False, indices=None, max_samples=None, num_workers=os.cpu_count()):
+        """
+        Compute statistics using ThreadPoolExecutor for faster I/O.
+        """
+        gt_types = tuple(gt_types)
+        running = {key: {"count": 0, "mean": 0.0, "m2": 0.0} for key in gt_types}
+
+        if indices is None:
+            sample_indices = list(range(len(self.samples)))
+        else:
+            sample_indices = list(indices)
+
+        if max_samples is not None and len(sample_indices) > max_samples:
+            sample_indices = random.sample(sample_indices, max_samples)
+
+        # Use ThreadPoolExecutor to overlap I/O operations
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # We use list(executor.map) wrapped in tqdm to see progress
+            # The map ensures we process samples in parallel
+            results = list(tqdm(
+                executor.map(lambda idx: self._process_single_sample(idx, gt_types), sample_indices),
+                total=len(sample_indices),
+                desc="Parallel Stats Calculation"
+            ))
+
+        # Reduction step: Update the global running stats with results from threads
+        for local_values in results:
+            if local_values is None:
+                continue
+                
+            for key in gt_types:
+                for x in local_values[key]:
                     stat = running[key]
                     stat["count"] += 1
                     delta = x - stat["mean"]
@@ -498,16 +509,12 @@ class ProbeDataset(Dataset):
                     delta2 = x - stat["mean"]
                     stat["m2"] += delta * delta2
 
+        # Finalize Results
         stats = {}
         for key, stat in running.items():
             count = stat["count"]
             if count == 0:
-                stats[key] = {
-                    "count": 0,
-                    "mean": None,
-                    "variance": None,
-                    "std": None,
-                }
+                stats[key] = {"count": 0, "mean": None, "variance": None, "std": None}
                 continue
 
             denom = (count - 1) if unbiased else count
@@ -518,47 +525,108 @@ class ProbeDataset(Dataset):
                 "variance": variance,
                 "std": float(np.sqrt(variance)),
             }
-
-        self.stats_cache = stats
         return stats
 
+
+class StraighteningDataset(Dataset):
+    """Action-conditioned video dataset with context/prediction separation and metadata"""
+    
+    def __init__(
+        self,
+        data_paths,
+        shared_transform=None,
+        individual_transform=None,
+    ):
+        super().__init__()
+        self.data_paths = data_paths
+        self.individual_transform = individual_transform
+        self.shared_transform = shared_transform
+
+        self._load_samples()
+       
+    def _load_samples(self):
+        self.samples = []
+        self.mapping = []
+        for idx, path in enumerate(self.data_paths):
+            seq_paths = _check_structure(path)
+            if not seq_paths:
+                raise ValueError("No sequence path found to match the structure", path)
+            samples = glob.glob(os.path.join(seq_paths, "*"))
+            self.samples += samples    
+            self.mapping.extend([idx] * len(samples))
+            
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, index):
+        """Load sample with retry logic"""
+        for retry in range(5):
+            try:
+                sample = self.load_image_sequences(index)
+                if sample is not None:
+                    return sample
+            except Exception as e:
+                if retry < 4:
+                    print(f"Error loading sample at {index=}, retrying ({retry+1}/5): {e}")
+                else:
+                    print(f"Failed to load sample at {index=} after 5 retries")
+        print(f"Failed to load sample at {index=} after 5 retries: {e}")
+        return None
+
+    def load_image_sequences(self, index):
+        """Load image sequences with actions and metadata"""
+        sample   = self.samples[index]
+        abs_path = self.data_paths[self.mapping[index]]
+        
+        buffer = self._load_seq(abs_path, sample)
+
+        if self.individual_transform is not None:
+            buffer = np.array([self.individual_transform(image) for image in buffer])
+        
+        # Apply shared transforms
+        if self.shared_transform is not None:
+            buffer = self.shared_transform(buffer)
+        
+        return buffer
+    
+    def _load_seq(self, abs_path, path):
+        data = np.load(path, allow_pickle = True).item()
+        
+        img_dict = data['img_file']
+        image_paths = [os.path.join(abs_path, value) for value in img_dict.values()]
+
+        return decode_batch(image_paths)
+        
 if __name__ == "__main__":
     import yaml
     import cv2
+    from augmenter.transforms_builder import VideoTransform
+    from torch.utils.data import DataLoader
 
-    with open("./cfgs/probe/probe-384px-1024.24e.yaml", "r") as f:
-        args = yaml.safe_load(f)
-
-    train_arg = args['train']
     
-    dset = ProbeDataset(
-        data_paths = [dataset['path'] for dataset in train_arg['datasets']],    
-        frame_step = [dataset['fps'] for dataset in train_arg['datasets']],
-        frames_per_clips = train_arg['fpcs'],
-        nclips = 1,
-        allow_clip_overlap = train_arg['allow_clip_overlap'],
-        random_jiggle_part = train_arg['random_jiggle']
+    transform = VideoTransform(
+        random_horizontal_flip = False,
+        reprob = 0.1,
+        random_resize_aspect_ratio = (0.75, 4/3),
+        random_resize_scale = (0.7, 1.2),
+        auto_augment = True,
+        motion_shift = True,
+        normalize = ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
     )
-    train, val, _ = dset.split(0.85, 0.15)
-    
-    stats = val.dataset.statistics(indices=val.indices)
-    print("Val Ground-truth statistics:")
-    for key, values in stats.items():
-        print(
-            f"{key}: "
-            f"count={values['count']}, "
-            f"mean={values['mean']}, "
-            f"variance={values['variance']}, "
-            f"std={values['std']}"
-        )
 
-    stats = train.dataset.statistics(indices=train.indices)
-    print("Train Ground-truth statistics:")
-    for key, values in stats.items():
-        print(
-            f"{key}: "
-            f"count={values['count']}, "
-            f"mean={values['mean']}, "
-            f"variance={values['variance']}, "
-            f"std={values['std']}"
-        )
+    dataset = StraighteningDataset(
+        data_paths = [
+            "./../Autonomous_Dataset/carla/LAWM/recording_20251025_142727_best_spatial/",
+            "./../Autonomous_Dataset/carla/LAWM/recording_20260204_010805_spatial/",
+            "./../Autonomous_Dataset/carla/LAWM/recording_20260308_212005_spatial/",
+            "./../Autonomous_Dataset/carla/LAWM/recording_20260317_214033_best_spatial/",
+            "./../Autonomous_Dataset/carla/LAWM/recording_20260317_233603_spatial/",
+            "./../Autonomous_Dataset/carla/LAWM/recording_20260318_083409_best_spatial/",
+            "./../Autonomous_Dataset/carla/LAWM/recording_20260323_200940_best_spatial/",
+            "./../Autonomous_Dataset/carla/LAWM/recording_20260329_233141_best_spatial/",
+        ],
+        shared_transform = transform
+    )
+    
+    
+    DataLoader()

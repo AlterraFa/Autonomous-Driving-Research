@@ -112,6 +112,8 @@ class SelfPooler(nn.Module):
         target_timestep = num_tokens // patches_per_frame
 
         x = self.pos_encode(x, target_timestep)
+        if self.dropout_layer is not None:
+            x = self.dropout_layer(x)
         frame_tokens = x.reshape(batch_size, target_timestep, patches_per_frame, embed_dim)
         query_tokens = self.interp_q(self.query_tokens, target_timestep).repeat(batch_size, 1, 1).unsqueeze(2)
 
@@ -120,8 +122,6 @@ class SelfPooler(nn.Module):
         if self.dropout is not None:
             out = self.dropout(out)
         out = out + self.mlp(self.norm2(out))
-        if self.dropout is not None:
-            out = self.dropout(out)
         out = out.reshape(batch_size, target_timestep, -1, embed_dim)
 
         return out[:, :, -1, :]
@@ -174,7 +174,6 @@ class SelfProbe(Prober):
             nn.Sequential(
                 nn.Linear(embed_dim, embed_dim // 2, bias = True),
                 nn.LeakyReLU(),
-                nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
                 nn.Linear(embed_dim // 2, 1)
             ) for _ in range(output_dim)
         ])
