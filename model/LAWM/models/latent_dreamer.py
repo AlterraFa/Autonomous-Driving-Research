@@ -12,6 +12,7 @@ import torch.nn as nn
 from .utils.modules import ACBlock as Block
 from .utils.modules import build_action_block_causal_attention_mask
 from .utils.tensors import trunc_normal_
+from .utils.get_layers import get_norm_layer
 
 
 class VisionTransformerPredictorAC(nn.Module):
@@ -34,7 +35,8 @@ class VisionTransformerPredictorAC(nn.Module):
         drop_rate=0.0,
         attn_drop_rate=0.0,
         drop_path_rate=0.0,
-        norm_layer=nn.LayerNorm,
+        norm_layer="LayerNorm",
+        out_norm="LayerNorm",
         init_std=0.02,
         uniform_power=True,
         use_silu=False,
@@ -73,6 +75,9 @@ class VisionTransformerPredictorAC(nn.Module):
         # Position embedding
         self.uniform_power = uniform_power
 
+        out_norm = get_norm_layer(out_norm)
+        norm_layer = get_norm_layer(norm_layer)
+        
         # Attention Blocks
         self.use_rope = use_rope
         self.predictor_blocks = nn.ModuleList(
@@ -98,7 +103,7 @@ class VisionTransformerPredictorAC(nn.Module):
         )
 
         # Normalize & project back to input dimension
-        self.predictor_norm = norm_layer(predictor_embed_dim)
+        self.predictor_norm = out_norm(predictor_embed_dim)
         self.predictor_proj = nn.Linear(predictor_embed_dim, embed_dim, bias=True)
 
         # ------ initialize weights
@@ -179,7 +184,11 @@ class VisionTransformerPredictorAC(nn.Module):
         x = x.view(B, T, self.action_pframe + self.grid_height * self.grid_width, D)  # [B, T, K+H*W, D]
         x = x[:, :, self.action_pframe:, :].flatten(1, 2)
 
-        x = self.predictor_norm(x)
+
+        if hasattr(self.predictor_norm, 'num_features'):
+            x = self.predictor_norm(x.transpose(1, 2)).transpose(1, 2)
+        else:
+            x = self.predictor_norm(x)
         x = self.predictor_proj(x)
 
         return x

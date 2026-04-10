@@ -6,7 +6,7 @@ from torch.nn.modules.utils import _pair
 
 from .utils.modules import ACBlock, GCBlock, build_gc_causal_attn_mask
 from .utils.tensors import trunc_normal_
-
+from .utils.get_layers import get_norm_layer
 
 class TransformerActionPredictor(nn.Module):
     def  __init__(
@@ -27,7 +27,8 @@ class TransformerActionPredictor(nn.Module):
         drop_rate=0.0,
         attn_drop_rate=0.0,
         drop_path_rate=0.0,
-        norm_layer=nn.LayerNorm,
+        norm_layer="LayerNorm",
+        out_norm="LayerNorm",
         init_std=0.02,
         use_silu=False,
         wide_silu=True,
@@ -59,7 +60,10 @@ class TransformerActionPredictor(nn.Module):
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
 
-        self.norm = nn.LayerNorm(action_embed_dim)
+        out_norm = get_norm_layer(out_norm)
+        norm_layer = get_norm_layer(norm_layer)
+
+        self.norm = out_norm(action_embed_dim)
         self.action_blocks = nn.ModuleList(
             [
                 ACBlock(
@@ -173,6 +177,10 @@ class TransformerActionPredictor(nn.Module):
         a = x.reshape(B, total_timestep, -1, self.action_embed_dim)[:, :, -self.action_pframe:, :]
         a = a.reshape(B, -1, self.action_embed_dim)
 
+        if hasattr(self.norm, 'num_features'):
+            a = self.norm(a.transpose(1, 2)).transpose(1, 2)
+        else:
+            a = self.norm(a)
                 
         return a
 
@@ -194,7 +202,8 @@ class ActionTransformerPredictorGC(nn.Module):
         drop_rate=0.0,
         attn_drop_rate=0.0,
         drop_path_rate=0.0,
-        norm_layer=nn.LayerNorm,
+        norm_layer="LayerNorm",
+        out_norm="LayerNorm",
         init_std=0.02,
         use_silu=False,
         wide_silu=True,
@@ -220,8 +229,11 @@ class ActionTransformerPredictorGC(nn.Module):
         self.to_action = nn.Linear(embed_dim, action_embed_dim, bias = True)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
+        
+        norm_layer = get_norm_layer(norm_layer)
+        out_norm = get_norm_layer(out_norm)
 
-        self.norm = nn.LayerNorm(action_embed_dim)
+        self.norm = out_norm(action_embed_dim)
         self.action_blocks = nn.ModuleList(
             [
                 GCBlock(
@@ -243,19 +255,24 @@ class ActionTransformerPredictorGC(nn.Module):
                 ) for i in range(depth)
             ]
         )
-        
-        self.ctx_mask, self.goal_pad = build_gc_causal_attn_mask(
-            self.max_tubelets, 
-            self.grid_H, 
-            self.grid_W, 
-            add_tokens = self.action_pstep
-        )        
-        self.mask_idx = torch.arange(self.max_tubelets * self.token_pframes, dtype = torch.long)
+
+        self.mask_cache = {}
 
         self.init_std = init_std
         self.apply(self._init_weights)
         self._init_action()
         self._rescale_blocks()
+    
+    def get_mask(self, T, device):
+        """Retrieves or creates a mask for a specific sequence length T."""
+        # -- Recomputes causal attention mask if max_tubelets differs from T
+        # -- Enables handling different timestep
+        if T not in self.mask_cache:
+            # Only compute this once per sequence length
+            mask, goal_pad = build_gc_causal_attn_mask(T, self.grid_H, self.grid_W, add_tokens=self.action_pstep)
+            mask_idx = torch.arange(T * self.token_pframes, dtype = torch.long)
+            self.mask_cache[T] = (mask.to(device), goal_pad, mask_idx)
+        return self.mask_cache[T]
         
     def _init_action(self):
         nn.init.trunc_normal_(self.action_embed, std=self.init_std)
@@ -291,7 +308,7 @@ class ActionTransformerPredictorGC(nn.Module):
     def no_weight_decay(self):
         return {}
 
-    def forward(self, context: torch.Tensor, goal: torch.Tensor, goal_pos = -1):
+    def forward(self, context: torch.Tensor, goal: torch.Tensor, goal_pos = -1, T: int = None):
 
         B, N_ctx, _ = context.shape
         B, N_goal, _ = goal.shape
@@ -305,7 +322,12 @@ class ActionTransformerPredictorGC(nn.Module):
 
         context = context.view(B, ctx_timestep, self.token_pframes, self.action_embed_dim) # -- B, T, H*W, D
 
-        action_tokens = self.action_embed.expand(B, -1, -1)[:, :ctx_timestep * self.action_pstep, :]
+        current_T = T if T is not None else (ctx_timestep + goal.size(1) // self.token_pframes)
+
+
+        action_tokens = self.action_embed
+        action_tokens = F.interpolate(action_tokens.permute(0, 2, 1), current_T - 1, mode = "linear", align_corners = True).permute(0, 2, 1)
+        action_tokens = action_tokens.expand(B, -1, -1)[:, :ctx_timestep * self.action_pstep, :]
         action_tokens = action_tokens.view(
             B, ctx_timestep, self.action_pstep, self.action_embed_dim
         ) # -- B, T, A, D
@@ -314,15 +336,23 @@ class ActionTransformerPredictorGC(nn.Module):
         ctx_a = torch.cat([context, action_tokens], dim=2).reshape(
             B, ctx_timestep * (self.token_pframes + self.action_pstep), self.action_embed_dim
         ) # -- (B, T, H*W + A, D) -> (B, T*(H*W + A), D) 
+        
+        ctx_mask_base, goal_pad, mask_idx_base = self.get_mask(current_T, context.device)
 
         # -- Action attends to past context and goal image
         x = torch.cat([ctx_a, goal], dim = 1)
-        ctx_mask = self.ctx_mask[: ctx_a.size(1), :ctx_a.size(1)].to(ctx_a.device)
-        attn_mask = F.pad(ctx_mask, (0, self.goal_pad, 0, self.goal_pad), value = True)
+        ctx_mask = ctx_mask_base[: ctx_a.size(1), :ctx_a.size(1)].to(ctx_a.device)
+        total_len = ctx_a.size(1) + goal.size(1)
+        attn_mask = torch.zeros((total_len, total_len), dtype=torch.bool, device=ctx_a.device)
+        attn_mask[:ctx_a.size(1), :ctx_a.size(1)] = ctx_mask
+        
+        # -- Goal cannot attention to context but to itself only
+        attn_mask[:ctx_a.size(1), ctx_a.size(1):] = True
+        attn_mask[ctx_a.size(1):, ctx_a.size(1):] = True
         
         g_start = goal_pos * N_goal
         g_end   = (goal_pos + 1) * N_goal
-        mask_idx = torch.cat([self.mask_idx[:N_ctx], self.mask_idx[g_start: (g_end if g_end != 0 else None)]]).to(ctx_a.device)
+        mask_idx = torch.cat([mask_idx_base[:N_ctx], mask_idx_base[g_start: (g_end if g_end != 0 else None)]]).to(ctx_a.device)
         
         for i, blk in enumerate(self.action_blocks):
             if self.use_ckpt:
@@ -352,6 +382,22 @@ class ActionTransformerPredictorGC(nn.Module):
         a = ctx_a.reshape(B, ctx_timestep, -1, self.action_embed_dim)[:, :, -self.action_pstep:, :]
         a = a.reshape(B, -1, self.action_embed_dim)
 
-        a = self.norm(a)
-                
+        if hasattr(self.norm, 'num_features'):
+            a = self.norm(a.transpose(1, 2)).transpose(1, 2)
+        else:
+            a = self.norm(a)
+            
         return a
+    
+if __name__ == "__main__":
+    device = torch.device('cuda')
+    model = ActionTransformerPredictorGC(max_frames = 12, out_norm = "LayerNorm").to(device)
+    context_T = 6
+    goal_T = 1
+    context = torch.randn(5, (context_T - 3) * 196, 768).to(device)
+    goal    = torch.randn(5, goal_T * 196, 768).to(device)
+
+    with torch.no_grad():
+        output = model(context, goal, T = context_T + goal_T)   
+        output = model(context, goal, T = context_T + goal_T)   
+        print(output.shape)

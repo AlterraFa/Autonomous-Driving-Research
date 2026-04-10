@@ -10,6 +10,7 @@ except:
 from torch.nn.modules.utils import _pair
 from .utils.modules import Block
 from .utils.pos_embs import get_3d_sincos_pos_embed
+from .utils.get_layers import get_norm_layer
 
 FILTER_REGISTRY = {}
 def register(name):
@@ -29,9 +30,10 @@ class MambaStraightener(nn.Module):
         d_state: int = 16, 
         d_conv: int = 4, 
         expansion: int = 2,
-        layer_norm = nn.LayerNorm,
+        out_norm = "LayerNorm",
         drop_rate: float = 0.0,
         init_std: float = 0.2,
+        use_activation_checkpointing = False,
         **kwargs
     ):
         super().__init__()
@@ -43,8 +45,8 @@ class MambaStraightener(nn.Module):
             d_state = d_state,
             d_conv  = d_conv,
             expand  = expansion,
-            use_fast_path = False,
-            bias    = True
+            use_fast_path = True,
+            bias    = False
         )
 
         self.backward_mamba = Mamba(
@@ -52,17 +54,21 @@ class MambaStraightener(nn.Module):
             d_state = d_state,
             d_conv  = d_conv,
             expand  = expansion,
-            use_fast_path = False,
-            bias    = True
+            use_fast_path = True,
+            bias    = False
         )
         
-        self.norm = layer_norm(filter_dim)
+        print(f"Forward Mamba Fast Path: {self.forward_mamba.use_fast_path}")
+        
+        out_norm = get_norm_layer(out_norm)
+        self.norm = out_norm(filter_dim)
         self.straighten_embed = nn.Linear(embed_dim, filter_dim, bias = True)
         self.reproj = nn.Linear(filter_dim, embed_dim, bias = True)
         self.res_scale = nn.Parameter(torch.ones(1) * 0.1)
         
         self.dropout = nn.Dropout(drop_rate) if drop_rate > 0.0 else None
 
+        self.use_activation_checkpointing = use_activation_checkpointing
         self.init_std = init_std
         self.apply(self._init_weights)
 
@@ -104,12 +110,17 @@ class MambaStraightener(nn.Module):
         
         identity = x
         if T > 1:
-            x_norm = self.norm(x)
+            if hasattr(self.norm, 'num_features'):
+                x_norm = self.norm(x.transpose(1, 2)).transpose(1, 2).contiguous()
+            else:
+                x_norm = self.norm(x).contiguous()
             # -- Bidirectional mamba
-            forward = self.forward_mamba(x_norm)
-            bwd_in = x_norm.flip(dims=[1]).contiguous()
-            backward = self.backward_mamba(bwd_in).flip(dims=[1]).contiguous()
-            filtered = forward + backward
+            if self.use_activation_checkpointing:
+                filtered = torch.utils.checkpoint.checkpoint(
+                    self.bidirectional_mamba, x_norm, use_reentrant = False
+                )
+            else:
+                filtered = self.bidirectional_mamba(x_norm)
                 
             x = identity + self.res_scale * filtered
         else:
@@ -122,6 +133,11 @@ class MambaStraightener(nn.Module):
         x = x.view(B, H, W, -1, D).permute(0, 3, 1, 2, 4).reshape(B, N, D).contiguous()
         
         return x
+    
+    def bidirectional_mamba(self, input_tensor):
+        fwd = self.forward_mamba(input_tensor)
+        bwd = self.backward_mamba(input_tensor.flip(dims=[1]).contiguous())
+        return fwd + bwd.flip(dims=[1]).contiguous()
 
 @register("TransformerStraightener")
 class TransformerStraightener(nn.Module):
@@ -141,7 +157,8 @@ class TransformerStraightener(nn.Module):
         drop_rate=0.0,
         attn_drop_rate=0.0,
         drop_path_rate=0.0,
-        norm_layer=nn.LayerNorm,
+        norm_layer='LayerNorm',
+        out_norm='LayerNorm',
         init_std=0.02,
         uniform_power=False,
         use_silu=False,
@@ -175,6 +192,9 @@ class TransformerStraightener(nn.Module):
         self.use_rope = use_rope
         self.pos_embed = None if self.use_rope else nn.Parameter(torch.zeros(1, int(torch.prod(torch.Tensor(self.num_patches))) * (max_frames // tubelet_size), embed_dim), requires_grad=False)
 
+
+        out_norm = get_norm_layer(out_norm)
+        norm_layer = get_norm_layer(norm_layer)
         self.blocks = nn.ModuleList(
             [
                 Block(
@@ -197,7 +217,7 @@ class TransformerStraightener(nn.Module):
                 for i in range(depth)
             ]
         )
-        self.norm = norm_layer(embed_dim)
+        self.norm = out_norm(embed_dim)
 
         # ------ initialize weights
         if self.pos_embed is not None:
@@ -258,6 +278,7 @@ class TransformerStraightener(nn.Module):
         else: W = self.num_patches[1]
         T = N // (H * W)
 
+        x = self.straighten_embed(x)
 
         if not self.use_rope:
             pos_embed = self.interpolate_pos_encoding(x, self.pos_embed)
@@ -271,8 +292,12 @@ class TransformerStraightener(nn.Module):
             else:
                 x = blk(x, mask = None, attn_mask = None, T = T, H_patches = H, W_patches = W)
         
-        if self.norm is not None:
+        if hasattr(self.norm, 'num_features'):
+            x = self.norm(x.transpose(1, 2)).transpose(1, 2)
+        else:
             x = self.norm(x)
+            
+        x = self.reproj(x)
         
         return x
 
