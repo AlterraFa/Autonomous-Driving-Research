@@ -186,23 +186,33 @@ def main(args: dict, yaml_path: str):
 
     init_step = 2
     loss_cfg: dict = args.get('loss', {})
-    auto_steps        = min(init_step + loss_cfg.get('auto_steps', 0), fpcs // tubelet_size)
-    loss_exp          = loss_cfg.get("loss_exp", 1.0)
-    normalize_reps    = loss_cfg.get('normalize_reps', False)
-    normalize_actions = loss_cfg.get('normalize-actions', False)
-    reg_type          = loss_cfg.get("reg_name", "energy")
-    l1_energy         = loss_cfg.get('l1', 1.0)
-    l2_energy         = loss_cfg.get('l2', 0.0)
-    lv_vcm            = loss_cfg.get('lv', 0.0)
-    lc_vcm            = loss_cfg.get('lc', 0.0)
-    lm_vcm            = loss_cfg.get('lm', 0.0)
-    l_curve           = loss_cfg.get('lcurve', 1.0)
-    sig_weight        = loss_cfg.get("weight", 1.0)
-    num_proj          = loss_cfg.get('num_proj', 128)
-    samp_range        = loss_cfg.get('samp_range', [-1, 1])
-    samp_sz           = loss_cfg.get('samp_sz', 16)
-    cov_coeff         = loss_cfg.get('cov_coeff', 0.4)
-    std_coeff         = loss_cfg.get('std_coeff', 0.4)
+    auto_steps         = min(init_step + loss_cfg.get('auto_steps', 0), fpcs // tubelet_size)
+    autoregressive_idx = loss_cfg.get("autoregressive_idx", [])
+    loss_exp           = loss_cfg.get("loss_exp", 1.0)
+    normalize_reps     = loss_cfg.get('normalize_reps', False)
+    normalize_actions  = loss_cfg.get('normalize_actions', False)
+
+    action_reg = loss_cfg.get('action_reg', {})
+    reg_type   = action_reg.get("name", "energy")
+    if reg_type == "energy":
+        l1_energy = action_reg.get('l1', 1.0)
+        l2_energy = action_reg.get('l2', 0.0)
+        lv_vcm    = action_reg.get('lv', 0.0)
+        lc_vcm    = action_reg.get('lc', 0.0)
+        lm_vcm    = action_reg.get('lm', 0.0)
+    elif reg_type == "sigreg":
+        sig_weight = action_reg.get("weight", 1.0)
+        num_proj   = action_reg.get('num_proj', 128)
+        samp_range = action_reg.get('samp_range', [-1, 1])
+        samp_sz    = action_reg.get('samp_sz', 16)
+    else:
+        logger.ERROR("Incorrect type of regularization", exit_code = -2)
+    logger.INFO(f"Using action regularizer: {reg_type}")
+
+    representation_reg = loss_cfg.get('rep_reg', {})
+    l_curve            = representation_reg.get('lcurve', 1.0)
+    cov_coeff          = representation_reg.get('cov_coeff', 0.4)
+    std_coeff          = representation_reg.get('std_coeff', 0.4)
 
     
     meta_cfg: dict = args.get('meta', {})
@@ -419,43 +429,98 @@ def main(args: dict, yaml_path: str):
             save_config_pretty(args, os.path.join(run_dir, yaml_name))
 
         if log_model_graph:
-            class _FilterTraceWrapper(torch.nn.Module):
-                def __init__(self, model: torch.nn.Module, H: int, W: int):
+            class _StraighteningInferenceGraph(torch.nn.Module):
+                def __init__(
+                    self,
+                    encoder_model: torch.nn.Module,
+                    filter_model: torch.nn.Module,
+                    target_filter_model: torch.nn.Module,
+                    lpred_model: torch.nn.Module,
+                    apred_model: torch.nn.Module,
+                    patch_size: int,
+                    tokens_pframe: int,
+                    init_step: int,
+                    auto_steps: int,
+                    normalize_reps: bool,
+                    normalize_actions: bool,
+                ):
                     super().__init__()
-                    self.model = model
-                    self.H = H
-                    self.W = W
+                    self.encoder_model = encoder_model
+                    self.filter_model = filter_model
+                    self.target_filter_model = target_filter_model
+                    self.lpred_model = lpred_model
+                    self.apred_model = apred_model
+                    self.patch_size = patch_size
+                    self.tokens_pframe = tokens_pframe
+                    self.init_step = init_step
+                    self.auto_steps = auto_steps
+                    self.normalize_reps = normalize_reps
+                    self.normalize_actions = normalize_actions
 
-                def forward(self, latent: torch.Tensor):
-                    return self.model(latent, self.H, self.W)
+                def forward(self, clips: torch.Tensor):
+                    latent_ctx = self.encoder_model(clips[:, :, :-1])
+                    latent_goal = self.encoder_model(clips[:, :, -1:])
 
-            model_dim = filter_cfg.get('filter_dim', pred_cfg.get('pred_embed_dim', 768))
-            action_dim = act_cfg.get('action_embed_dim', 64)
-            n_frames = max(1, fpcs // tubelet_size)
-            n_ctx_frames = max(1, n_frames - 1)
-            h_patches = crop_size // patch_size
-            w_patches = crop_size // patch_size
+                    if self.normalize_reps:
+                        latent_ctx = F.layer_norm(latent_ctx, (latent_ctx.size(-1), ))
+                        latent_goal = F.layer_norm(latent_goal, (latent_goal.size(-1), ))
 
-            # -- apred(h_ctx, h_goal)
-            apred_ctx = torch.randn(1, n_ctx_frames * tokens_pframe, model_dim, device=device)
-            apred_goal = torch.randn(1, tokens_pframe, model_dim, device=device)
+                    h_patches = clips.shape[3] // self.patch_size
+                    w_patches = clips.shape[4] // self.patch_size
 
-            # -- lpred(h_ctx, a_ctx)
-            lpred_h = torch.randn(1, n_ctx_frames * tokens_pframe, model_dim, device=device)
-            lpred_a = torch.randn(1, n_ctx_frames * action_pframe, action_dim, device=device)
+                    h_ctx = self.filter_model(latent_ctx, h_patches, w_patches)
+                    h_goal = self.target_filter_model(latent_goal, h_patches, w_patches)
 
-            # -- filterer(latent, H, W)
-            filter_latent = torch.randn(1, n_frames * tokens_pframe, model_dim, device=device)
+                    if self.normalize_reps:
+                        h_ctx = F.layer_norm(h_ctx, (h_ctx.size(-1), ))
+                        h_goal = F.layer_norm(h_goal, (h_goal.size(-1), ))
 
-            apred_model = apred.module if isinstance(apred, DDP) else apred
-            lpred_model = lpred.module if isinstance(lpred, DDP) else lpred
-            filter_model = filterer.module if isinstance(filterer, DDP) else filterer
-            filter_trace_model = _FilterTraceWrapper(filter_model, h_patches, w_patches)
+                    t_steps = (latent_ctx.shape[1] + latent_goal.shape[1]) // self.tokens_pframe
 
-            log_stats.log_model_graph(apred_model, (apred_ctx, apred_goal))
-            log_stats.log_model_graph(lpred_model, (lpred_h, lpred_a))
-            log_stats.log_model_graph(filter_trace_model, (filter_latent,))
-            logger.INFO("Logged model graphs to TensorBoard: filterer, lpred, apred")
+                    def _step_action(h: torch.Tensor, g: torch.Tensor):
+                        a = self.apred_model(h, g, T=t_steps)
+                        if self.normalize_actions:
+                            a = F.layer_norm(a, (a.size(-1), ))
+                        return a
+
+                    def _step_prediction(h: torch.Tensor, a: torch.Tensor):
+                        z = self.lpred_model(h, a)
+                        if self.normalize_reps:
+                            z = F.layer_norm(z, (z.size(-1), ))
+                        return z
+
+                    z_ctx = h_ctx[:, :self.tokens_pframe]
+                    for _ in range(self.init_step, self.auto_steps):
+                        a_ctx = _step_action(z_ctx, h_goal)
+                        z_nxt = _step_prediction(z_ctx, a_ctx)[:, -self.tokens_pframe:]
+                        z_ctx = torch.cat([z_ctx, z_nxt], dim=1)
+
+                    z_ar = z_ctx[:, self.tokens_pframe:]
+                    return z_ar, a_ctx
+
+            graph_encoder = encoder.module if isinstance(encoder, DDP) else encoder
+            graph_filter = filterer.module if isinstance(filterer, DDP) else filterer
+            graph_target_filter = target_filterer.module if isinstance(target_filterer, DDP) else target_filterer
+            graph_lpred = lpred.module if isinstance(lpred, DDP) else lpred
+            graph_apred = apred.module if isinstance(apred, DDP) else apred
+
+            full_graph_model = _StraighteningInferenceGraph(
+                encoder_model=graph_encoder,
+                filter_model=graph_filter,
+                target_filter_model=graph_target_filter,
+                lpred_model=graph_lpred,
+                apred_model=graph_apred,
+                patch_size=patch_size,
+                tokens_pframe=tokens_pframe,
+                init_step=1,
+                auto_steps=fpcs // tubelet_size,
+                normalize_reps=normalize_reps,
+                normalize_actions=normalize_actions,
+            )
+
+            graph_clips = torch.randn(1, 3, fpcs, crop_size, crop_size, device=device)
+            log_stats.log_model_graph(full_graph_model, (graph_clips,))
+            logger.INFO("Logged one end-to-end TensorBoard model graph for straightening inference")
     else:
         log_stats = NoOpLogger()
    
@@ -515,8 +580,6 @@ def main(args: dict, yaml_path: str):
             # -- Autoregressive rollout of each timestep action and prediction
             z_ctx = torch.cat([h_ctx[:, :tokens_pframe], _z_tf[:, :tokens_pframe]], dim = 1)
             for n in range(init_step, auto_steps):
-                # -- Consider chunking?
-                # -- Since the latent is predicted on action, the action must not drift
                 a_ctx = _step_action(z_ctx, h_goal)
                 # a_ctx = _a_tf[:, :n * action_pframe]
 
@@ -527,9 +590,28 @@ def main(args: dict, yaml_path: str):
             
             return _z_tf, _z_ar, _a_tf
             
-        def latent_loss(h, z):
+        def latent_loss(h: torch.Tensor, z: torch.Tensor, time_indicies: list[int] = None):
             sub_h = h[:, tokens_pframe: z.size(1) + tokens_pframe]
-            return torch.mean(torch.abs(z - sub_h) ** loss_exp) / loss_exp
+            T = sub_h.size(1) // tokens_pframe
+            B, L, D = sub_h.shape
+
+            sub_h_view = sub_h.view(B, T, tokens_pframe, D)
+            z_view = z.view(B, T, tokens_pframe, D)
+
+            device = h.device
+            if time_indicies is None or len(time_indicies) == 0:
+                idx_tensor = torch.arange(T, device=device)
+            else:
+                valid_idx = [i for i in time_indicies if i < T]
+                if not valid_idx: # If provided list was out of bounds, default to all
+                    idx_tensor = torch.arange(T, device=device)
+                else:
+                    idx_tensor = torch.tensor(valid_idx, device=device)
+            
+            selected_h = sub_h_view[:, idx_tensor].flatten(1, 2)
+            selected_z = z_view[:, idx_tensor].flatten(1, 2)
+            
+            return torch.mean(torch.abs(selected_z - selected_h) ** loss_exp) / loss_exp
 
         @loss_registry("sigreg")
         def sigreg(a: torch.Tensor):
@@ -644,11 +726,10 @@ def main(args: dict, yaml_path: str):
             h_ctx  = forward_context(latent_ctx, H_patches, W_patches)
             h_goal = forward_target(latent_goal, H_patches, W_patches)
             h = torch.concat([h_ctx, h_goal], dim = 1)
-
-            
             z_tf, z_ar, a_tf = forward_prediction(h_ctx, h_goal, T)
+            
             loss_tf                    = latent_loss(h, z_tf)
-            loss_ar                    = latent_loss(h, z_ar)
+            loss_ar                    = latent_loss(h, z_ar, autoregressive_idx)
             loss_straight              = straighten_loss(h)
             loss_collapse              = collapse_loss(latent_ctx, h_ctx)
             loss_act, energy, vcm = ACTION_LOSS[reg_type](a_tf)

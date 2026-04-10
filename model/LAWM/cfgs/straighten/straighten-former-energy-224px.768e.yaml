@@ -62,7 +62,7 @@ model:
     <<: *common_model
     name: TransformerStraightener
     filter_dim: 768
-    depth: 6
+    depth: 4
     num_heads: 12
     mlp_ratio: 4.0
     qkv_bias: true
@@ -96,7 +96,7 @@ model:
   action:
     <<: *common_settings
     <<: *common_model
-    action_embed_dim: 128
+    action_embed_dim: 64
     depth: 6
     num_heads: 8
     mlp_ratio: 4.0
@@ -124,19 +124,22 @@ optimization:
   weight_decay: 0.04
 
 loss:
-  auto_steps: 3
+  auto_steps: 6
   loss_exp: 1.0
   normalize_reps: true
   normalize_actions: true
-  reg_name: energy
-  l2: 1.0
-  l1: 0.01
-  lv: 1.0
-  lc: 0.01  # Increased from 0.001 to 0.01 (10x higher)
-  lm: 0.1
-  lcurve: 1.0
-  std_coeff: 0.4
-  cov_coeff: 0.4
+  autogresssive_idx: [-1, -2, -3]
+  action_reg: 
+    name: energy
+    l2: 1.0
+    l1: 0.01
+    lv: 1.0
+    lc: 0.01  # Increased from 0.001 to 0.01 (10x higher)
+    lm: 0.1
+  rep_reg:
+    lcurve: 1.0
+    std_coeff: 0.4
+    cov_coeff: 0.4
 
 meta:
   save_root_dir: ./Experiment
