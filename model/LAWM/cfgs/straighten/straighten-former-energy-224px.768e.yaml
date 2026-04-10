@@ -49,9 +49,9 @@ model:
     use_sdpa: true
     use_rope: true
     use_activation_checkpointing: true
+    norm_layer: LayerNorm
 
   enc: 
-    <<: *common_settings
     <<: *common_model
     name: vjepa2_1_vit_base_384
     load_from: /home/alterraonix/.cache/torch/hub/facebookresearch_vjepa2_main
@@ -62,7 +62,7 @@ model:
     <<: *common_model
     name: TransformerStraightener
     filter_dim: 768
-    depth: 2
+    depth: 6
     num_heads: 12
     mlp_ratio: 4.0
     qkv_bias: true
@@ -74,6 +74,7 @@ model:
     uniform_power: false
     use_silu: true
     wide_silu: true
+    out_norm: LayerNorm
 
   pred:
     <<: *common_settings
@@ -90,12 +91,13 @@ model:
     use_silu: true
     wide_silu: true
     is_frame_causal: true
+    out_norm: LayerNorm
 
   action:
     <<: *common_settings
     <<: *common_model
-    action_embed_dim: 256
-    depth: 4
+    action_embed_dim: 128
+    depth: 6
     num_heads: 8
     mlp_ratio: 4.0
     qkv_bias: true
@@ -105,7 +107,7 @@ model:
     init_std: 0.02
     use_silu: true
     wide_silu: true
-    use_activation_checkpointing: true
+    out_norm: LayerNorm
 
 optimization:
   ema:
@@ -122,15 +124,19 @@ optimization:
   weight_decay: 0.04
 
 loss:
-  auto_steps: 2
+  auto_steps: 3
   loss_exp: 1.0
   normalize_reps: true
+  normalize_actions: true
   reg_name: energy
   l2: 1.0
-  l1: 0.05
-  lv: 0.1
+  l1: 0.01
+  lv: 1.0
   lc: 0.01  # Increased from 0.001 to 0.01 (10x higher)
   lm: 0.1
+  lcurve: 1.0
+  std_coeff: 0.4
+  cov_coeff: 0.4
 
 meta:
   save_root_dir: ./Experiment

@@ -9,7 +9,7 @@ common: &common_settings
 
 train:
   <<: *common_settings
-  batch_size: 16
+  batch_size: 20
   num_workers: 4
   persistent_workers: true
   pin_mem: true
@@ -49,6 +49,7 @@ model:
     use_sdpa: true
     use_rope: true
     use_activation_checkpointing: true
+    norm_layer: LayerNorm
 
   enc: 
     <<: *common_settings
@@ -62,18 +63,19 @@ model:
     <<: *common_model
     name: TransformerStraightener
     filter_dim: 768
-    depth: 2
+    depth: 6
     num_heads: 12
     mlp_ratio: 4.0
     qkv_bias: true
     qk_scale: null
-    drop_rate: 0.0
+    drop_rate: 0.01
     attn_drop_rate: 0.0
     drop_path_rate: 0.0
     init_std: 0.02
     uniform_power: false
     use_silu: true
     wide_silu: true
+    out_norm: LayerNorm
 
   pred:
     <<: *common_settings
@@ -90,6 +92,7 @@ model:
     use_silu: true
     wide_silu: true
     is_frame_causal: true
+    out_norm: LayerNorm
 
   action:
     <<: *common_settings
@@ -105,7 +108,7 @@ model:
     init_std: 0.02
     use_silu: true
     wide_silu: true
-    use_activation_checkpointing: true
+    out_norm: BatchNorm1d
 
 optimization:
   ema:
@@ -116,22 +119,24 @@ optimization:
   warmup: 10
   final_lr: 0.0
   final_weight_decay: 0.015
-  ipe: 150
+  ipe: 75
   lr: 0.000125
   start_lr: 4.5e-05
-  weight_decay: 0.04
+  weight_decay: 0.02
 
 loss:
-  auto_steps: 2
-  loss_exp: 2.0
-  normalize_reps: false
+  auto_steps: 3
+  loss_exp: 1.0
+  normalize_reps: true
   normalize_actions: false
   reg_name: sigreg
   weight: 1.0
-  num_proj: 512
+  num_proj: 256
   samp_range: [-5.0, 5.0]
   samp_sz: 16
-  lcurve: 0.1
+  lcurve: 1.0 
+  std_coeff: 0.4
+  cov_coeff: 0.4
 
 meta:
   save_root_dir: ./Experiment

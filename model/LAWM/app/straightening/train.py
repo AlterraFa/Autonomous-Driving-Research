@@ -201,6 +201,8 @@ def main(args: dict, yaml_path: str):
     num_proj          = loss_cfg.get('num_proj', 128)
     samp_range        = loss_cfg.get('samp_range', [-1, 1])
     samp_sz           = loss_cfg.get('samp_sz', 16)
+    cov_coeff         = loss_cfg.get('cov_coeff', 0.4)
+    std_coeff         = loss_cfg.get('std_coeff', 0.4)
 
     
     meta_cfg: dict = args.get('meta', {})
@@ -417,6 +419,16 @@ def main(args: dict, yaml_path: str):
             save_config_pretty(args, os.path.join(run_dir, yaml_name))
 
         if log_model_graph:
+            class _FilterTraceWrapper(torch.nn.Module):
+                def __init__(self, model: torch.nn.Module, H: int, W: int):
+                    super().__init__()
+                    self.model = model
+                    self.H = H
+                    self.W = W
+
+                def forward(self, latent: torch.Tensor):
+                    return self.model(latent, self.H, self.W)
+
             model_dim = filter_cfg.get('filter_dim', pred_cfg.get('pred_embed_dim', 768))
             action_dim = act_cfg.get('action_embed_dim', 64)
             n_frames = max(1, fpcs // tubelet_size)
@@ -438,10 +450,11 @@ def main(args: dict, yaml_path: str):
             apred_model = apred.module if isinstance(apred, DDP) else apred
             lpred_model = lpred.module if isinstance(lpred, DDP) else lpred
             filter_model = filterer.module if isinstance(filterer, DDP) else filterer
+            filter_trace_model = _FilterTraceWrapper(filter_model, h_patches, w_patches)
 
             log_stats.log_model_graph(apred_model, (apred_ctx, apred_goal))
             log_stats.log_model_graph(lpred_model, (lpred_h, lpred_a))
-            log_stats.log_model_graph(filter_model, (filter_latent, h_patches, w_patches))
+            log_stats.log_model_graph(filter_trace_model, (filter_latent,))
             logger.INFO("Logged model graphs to TensorBoard: filterer, lpred, apred")
     else:
         log_stats = NoOpLogger()
@@ -481,9 +494,9 @@ def main(args: dict, yaml_path: str):
                     latent = F.layer_norm(latent, (latent.size(-1), ))
                 return latent
 
-        def forward_prediction(h_ctx: torch.Tensor, h_goal: torch.Tensor):
+        def forward_prediction(h_ctx: torch.Tensor, h_goal: torch.Tensor, T: int):
             def _step_action(h, g):
-                _a: torch.Tensor = apred(h, g)
+                _a: torch.Tensor = apred(h, g, T = T)
                 if normalize_actions:
                     _a = F.layer_norm(_a, (_a.size(-1), ))
                 return _a
@@ -498,13 +511,14 @@ def main(args: dict, yaml_path: str):
             _a_tf = _step_action(h_ctx, h_goal)
             _z_tf = _step_prediction(h_ctx, _a_tf)
 
+
             # -- Autoregressive rollout of each timestep action and prediction
             z_ctx = torch.cat([h_ctx[:, :tokens_pframe], _z_tf[:, :tokens_pframe]], dim = 1)
-            a_ctx = _a_tf[:, : action_pframe] 
             for n in range(init_step, auto_steps):
                 # -- Consider chunking?
                 # -- Since the latent is predicted on action, the action must not drift
-                a_ctx = _a_tf[:, :n * action_pframe]
+                a_ctx = _step_action(z_ctx, h_goal)
+                # a_ctx = _a_tf[:, :n * action_pframe]
 
                 # -- Prediction shifting all frames to 1 timestep to the future
                 z_nxt = _step_prediction(z_ctx, a_ctx)[:, -tokens_pframe: ]
@@ -514,7 +528,7 @@ def main(args: dict, yaml_path: str):
             return _z_tf, _z_ar, _a_tf
             
         def latent_loss(h, z):
-            sub_h = h[:, tokens_pframe: z.size(-2) + tokens_pframe]
+            sub_h = h[:, tokens_pframe: z.size(1) + tokens_pframe]
             return torch.mean(torch.abs(z - sub_h) ** loss_exp) / loss_exp
 
         @loss_registry("sigreg")
@@ -562,7 +576,7 @@ def main(args: dict, yaml_path: str):
                 # -- Ensure each sample in batch is different (prevent collapse)
                 # -- A pure hinge saturates at 1.0 when std->0; the log barrier keeps pressure near collapse.
                 std = torch.std(a, dim = 0, unbiased = False)
-                variance = torch.relu(1 - std).mean() * lv_vcm
+                variance = torch.mean((1 - std) ** 2) * lv_vcm
 
                 # -- Prevent static action to have value different than 0
                 mean = a.mean().abs() * lm_vcm
@@ -594,24 +608,51 @@ def main(args: dict, yaml_path: str):
             v1 = v[:, :, 1:]
             cos_sim = torch.cosine_similarity(v0, v1, dim=-1)
             return (1 - cos_sim).mean() * l_curve
+        
+        def collapse_loss(enc_h: torch.Tensor, filter_h: torch.Tensor):
+            enc_h = enc_h.float()
+            filter_h = filter_h.float()
+
+            with torch.no_grad():
+                enc_flat = enc_h.reshape(-1, latent_ctx.size(-1))
+                enc_flat = enc_flat - enc_flat.mean(dim=0)
+                
+                target_std = torch.sqrt(enc_flat.var(dim=0) + 1e-6)
+                
+            filter_flat = filter_h.reshape(-1, filter_h.size(-1))
+            filter_flat_centered = filter_flat - filter_flat.mean(dim=0)
+            filter_std = torch.sqrt(filter_flat.var(dim=0) + 1e-6)
+            std_loss = torch.mean(torch.relu(target_std - filter_std))
+            
+            N, D = filter_flat.shape
+            filter_cov = (filter_flat_centered.T @ filter_flat_centered) / (N - 1)
+            diag_mask = torch.eye(D, device=filter_h.device).bool()
+            cov_loss = filter_cov[~diag_mask].pow(2).mean()
+
+            return (std_loss * std_coeff) + (cov_loss * cov_coeff)
+                
 
         with torch.amp.autocast(device_type, dtype = dtype, enabled = mixed_precision):
 
-            latent = to_latent(clips)
+            latent_ctx  = to_latent(clips[:, :, :-1])
+            latent_goal = to_latent(clips[:, :, -1:])
             H_patches = clips.shape[3] // patch_size
             W_patches = clips.shape[4] // patch_size
-            
-            h = forward_context(latent, H_patches, W_patches)
-            h_goal = forward_target(latent[:, -tokens_pframe:, :], H_patches, W_patches)
-            h_ctx  = h[:, :-tokens_pframe, :].contiguous()
+            T = (latent_ctx.shape[1] + latent_goal.shape[1]) // tokens_pframe
             
             
-            z_tf, z_ar, a_tf = forward_prediction(h_ctx, h_goal)
-            loss_tf  = latent_loss(h, z_tf)
-            loss_ar  = latent_loss(h, z_ar)
-            loss_straight = straighten_loss(h)
+            h_ctx  = forward_context(latent_ctx, H_patches, W_patches)
+            h_goal = forward_target(latent_goal, H_patches, W_patches)
+            h = torch.concat([h_ctx, h_goal], dim = 1)
+
+            
+            z_tf, z_ar, a_tf = forward_prediction(h_ctx, h_goal, T)
+            loss_tf                    = latent_loss(h, z_tf)
+            loss_ar                    = latent_loss(h, z_ar)
+            loss_straight              = straighten_loss(h)
+            loss_collapse              = collapse_loss(latent_ctx, h_ctx)
             loss_act, energy, vcm = ACTION_LOSS[reg_type](a_tf)
-            loss = loss_tf + loss_ar + loss_act + loss_straight
+            loss = loss_tf + loss_ar + loss_act + loss_straight + loss_collapse
             
             
         if mixed_precision:
@@ -648,11 +689,13 @@ def main(args: dict, yaml_path: str):
             loss_ar,
             loss_act,
             loss_straight,
+            loss_collapse,
             energy,
             vcm,
             _new_lr,
             _new_wd
         )
+        
     
     with log_stats:
         log_stats.start_training("Training Filtering Latent Action WM")
@@ -683,7 +726,7 @@ def main(args: dict, yaml_path: str):
                         
                 clips = sample.to(device)
                 
-                (loss, loss_tf, loss_ar, loss_act, loss_straight, energy, vcm, curr_lr, curr_wd), elapsed_time = gpu_timer(partial(train_step, clips))
+                (loss, loss_tf, loss_ar, loss_act, loss_collapse, loss_straight, energy, vcm, curr_lr, curr_wd), elapsed_time = gpu_timer(partial(train_step, clips))
 
                 if np.isnan(loss) or np.isinf(loss):
                     logger.ERROR(f"Model failed to converge. {'nan' if np.isnan(loss) else 'inf' if np.isinf(loss) else ''} detected", exit_code = -213)
@@ -696,6 +739,7 @@ def main(args: dict, yaml_path: str):
                         "Teach Force|Z": loss_tf,
                         "Autoregressive|Z": loss_ar,
                         "Action": loss_act,
+                        "Collapse": loss_collapse,
                         "Straight": loss_straight,
                         "Hinge|Erg": energy[0],
                         "Sparsity|Erg": energy[1],
@@ -712,6 +756,7 @@ def main(args: dict, yaml_path: str):
                         "Teach Force|Z": loss_tf,
                         "Autoregressive|Z": loss_ar,
                         "Action | SIGReg": loss_act,
+                        "Collapse": loss_collapse,
                         "Straight": loss_straight,
                     })
                     

@@ -81,8 +81,9 @@ def compile_model(
         'drop_rate': lpred_cfg.get('drop_rate', 0.0),
         'attn_drop_rate': lpred_cfg.get('attn_drop_rate', 0.0),
         'drop_path_rate': lpred_cfg.get('drop_path_rate', 0.0),
-        'norm_layer': nn.LayerNorm,
+        'norm_layer': lpred_cfg.get('norm_layer', "LayerNorm"),
         'init_std': lpred_cfg.get('init_std', 0.1),
+        'out_norm': lpred_cfg.get('out_norm', 'LayerNorm'),
         'uniform_power': lpred_cfg.get('uniform_power', True),
         'use_silu': lpred_cfg.get('use_silu', False),
         'wide_silu': lpred_cfg.get('wide_silu', True),
@@ -120,6 +121,7 @@ def compile_model(
         use_rope=latent_params['use_rope'],
         action_embed_dim=latent_params['action_embed_dim'],
         use_sdpa=latent_params['use_sdpa'],
+        out_norm=latent_params['out_norm']
 
     )
     latent_predictor.to(device)
@@ -128,7 +130,7 @@ def compile_model(
     action_params = {
         'img_size': apred_cfg.get('crop_size', 224),
         'patch_size': apred_cfg.get('patch_size', 16),
-        'max_frame': apred_cfg.get('fpcs', 1),
+        'max_frames': apred_cfg.get('fpcs', 1),
         'tubelet_size': apred_cfg.get('tubelet_size', 2),
         'action_per_step': apred_cfg.get('action_pframe', 1),
         'embed_dim': encoder.embed_dim,
@@ -141,7 +143,8 @@ def compile_model(
         'drop_rate': apred_cfg.get('drop_rate', 0.0),
         'attn_drop_rate': apred_cfg.get('attn_drop_rate', 0.0),
         'drop_path_rate': apred_cfg.get('drop_path_rate', 0.0),
-        'norm_layer': nn.LayerNorm,
+        'norm_layer': apred_cfg.get('norm_layer', "LayerNorm"),
+        'out_norm': apred_cfg.get('out_norm', 'LayerNorm'),
         'init_std': apred_cfg.get('init_std', 0.1),
         'uniform_power': apred_cfg.get('uniform_power', True),
         'use_silu': apred_cfg.get('use_silu', False),
@@ -155,7 +158,7 @@ def compile_model(
     action_predictor = APred(
         img_size=action_params['img_size'],
         patch_size=action_params['patch_size'],
-        max_frame=action_params['max_frame'],
+        max_frames=action_params['max_frames'],
         tubelet_size=action_params['tubelet_size'],
         action_per_step=action_params['action_per_step'],
         embed_dim=action_params['embed_dim'],
@@ -176,7 +179,7 @@ def compile_model(
         use_activation_checkpointing=action_params['use_activation_checkpointing'],
         use_rope=action_params['use_rope'],
         use_sdpa=action_params['use_sdpa'],
-
+        out_norm=action_params['out_norm']
     )
     action_predictor.to(device)
 

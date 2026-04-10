@@ -125,6 +125,9 @@ loss:
   lv: 0.1
   lc: 0.01  # Increased from 0.001 to 0.01 (10x higher)
   lm: 0.1
+  lcurve: 1.0
+  std_coeff: 0.4
+  cov_coeff: 0.4
 
 meta:
   save_root_dir: ./Experiment

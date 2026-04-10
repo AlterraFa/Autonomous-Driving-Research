@@ -49,6 +49,7 @@ model:
     use_sdpa: true
     use_rope: true
     use_activation_checkpointing: true
+    norm_layer: LayerNorm
 
   enc: 
     <<: *common_settings
@@ -62,17 +63,17 @@ model:
     <<: *common_model
     name: MambaStraightener
     filter_dim: 768
-    d_state: 16
+    d_state: 12
     d_conv: 4
-    expansion: 2
-    norm_layer: layernorm
+    expansion: 1.0
     init_std: 0.02
     drop_rate: 0.0
+    out_norm: LayerNorm
 
   pred:
     <<: *common_settings
     <<: *common_model
-    pred_embed_dim: 512
+    pred_embed_dim: 768
     depth: 6
     num_heads: 8
     mlp_ratio: 4.0
@@ -84,12 +85,13 @@ model:
     use_silu: true
     wide_silu: true
     is_frame_causal: true
+    out_norm: LayerNorm
 
   action:
     <<: *common_settings
     <<: *common_model
-    action_embed_dim: 256
-    depth: 4
+    action_embed_dim: 128
+    depth: 6
     num_heads: 8
     mlp_ratio: 4.0
     qkv_bias: true
@@ -99,33 +101,35 @@ model:
     init_std: 0.02
     use_silu: true
     wide_silu: true
-    use_activation_checkpointing: true
+    out_norm: BatchNorm1d
 
 optimization:
   ema:
     - 0.99925
     - 0.99925
-  anneal: 30
-  epochs: 50
+  anneal: 45
   warmup: 10
+  epochs: 60
   final_lr: 0.0
   final_weight_decay: 0.015
-  ipe: 150
+  ipe: 75
   lr: 0.000125
   start_lr: 4.5e-05
   weight_decay: 0.04
 
 loss:
-  auto_steps: 2
-  loss_exp: 2.0
-  normalize_reps: false
+  auto_steps: 3
+  loss_exp: 1.0
+  normalize_reps: true
   normalize_actions: false
   reg_name: sigreg
   weight: 1.0
-  num_proj: 512
+  num_proj: 256
   samp_range: [-5.0, 5.0]
   samp_sz: 16
   lcurve: 0.1
+  std_coeff: 0.4
+  cov_coeff: 0.4
 
 meta:
   save_root_dir: ./Experiment
