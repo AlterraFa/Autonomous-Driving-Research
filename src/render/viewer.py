@@ -59,7 +59,6 @@ PATH_ITER        = CONFIG.rand_path.path_iter
 FONT_SIZE = CONFIG.ui.font_size
 FONT_NAME = CONFIG.ui.font_name
 
-front_offset = CONFIG.offsets.front_offset
 
 max_steer = CONFIG.vehicle.physics.max_steer
 
@@ -573,15 +572,9 @@ class ManualViewer(Viewer):
             vehicle_location = vehicle_transform.location
             vehicle_rotation = vehicle_transform.rotation
 
-            yaw_rad = np.radians(vehicle_rotation.yaw)
-
-            front_offset = front_offset  # meters
-            offset_x = front_offset * np.cos(yaw_rad)
-            offset_y = front_offset * np.sin(yaw_rad)
-
-            front_location = np.array([
-                vehicle_location.x + offset_x,
-                vehicle_location.y + offset_y,
+            vehicle_location = np.array([
+                vehicle_location.x,
+                vehicle_location.y,
                 vehicle_location.z  # same height as center
             ])
             vehicle_rotation = np.array([
@@ -589,7 +582,12 @@ class ManualViewer(Viewer):
                 vehicle_rotation.pitch,
                 vehicle_rotation.yaw
             ])
-            self.traj_logger.update(front_location, vehicle_location)
+            
+            r_ego = rpy2ypr(vehicle_rotation)
+            front_vec = r_ego.apply(np.array([CONFIG.offsets.front_offset, 0.0, 0.0]))
+            front_location = vehicle_location + front_vec
+            self.world.debug.draw_point(carla.Location(*front_location), 0.5, life_time = 2.0 * (1 / self.server_fps))
+            self.traj_logger.update(front_location, vehicle_rotation)
 
 
 @register_mode("replay")
@@ -760,7 +758,7 @@ class ReplayViewer(Viewer):
             ])
             
             r_ego = rpy2ypr(vehicle_rotation)
-            front_vec = r_ego.apply(np.array([front_offset, 0.0, 0.0]))
+            front_vec = r_ego.apply(np.array([CONFIG.offsets.front_offset, 0.0, 0.0]))
             front_location = vehicle_location + front_vec
             self.world.debug.draw_point(carla.Location(*front_location), 0.5, life_time = 2.0 * (1 / self.server_fps))
             self.traj_logger.update(front_location, vehicle_rotation)
