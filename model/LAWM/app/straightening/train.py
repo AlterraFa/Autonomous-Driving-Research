@@ -1,10 +1,7 @@
 import os, sys
 import resource
-import yaml
 import time
 import gc
-import glob
-import re
 from ruamel.yaml import YAML
 from functools import partial
 from pathlib import Path
@@ -246,6 +243,7 @@ def main(args: dict, yaml_path: str):
     else:
         logger.INFO("DDP disabled (single-GPU/single-process mode)")
     
+    torch.manual_seed(seed)
     
     if dtype.lower() == "bfloat16":
         dtype = torch.bfloat16
@@ -272,12 +270,12 @@ def main(args: dict, yaml_path: str):
     if model_cfg.get('compile', False):
         logger.INFO("Compiling model")
         torch._dynamo.config.optimize_ddp = False
-        target_filterer.compile()
-        agg.compile()
-        filterer.compile()
-        encoder.compile()
-        lpred.compile()
-        apred.compile()
+        target_filterer.compile(mode = "reduce-overhead", dynamic = True)
+        agg.compile(mode = "reduce-overhead", dynamic = False)
+        filterer.compile(mode = "reduce-overhead", dynamic = True)
+        encoder.compile(mode = "reduce-overhead", dynamic = True)
+        lpred.compile(mode = "reduce-overhead", dynamic = True)
+        apred.compile(mode = "reduce-overhead", dynamic = True)
 
     if dist.is_initialized() and world_size > 1:
         agg              = DDP(agg, static_graph = False, find_unused_parameters = True)
@@ -418,7 +416,8 @@ def main(args: dict, yaml_path: str):
             patience = patience,
             freq = save_freq,
             path_root = os.path.join(run_dir, "weights"),
-            weights_only = True
+            weights_only = True,
+            min_delta = min_delta
         )
         if resume_best_loss is not None:
             saver.best_loss = resume_best_loss
@@ -456,6 +455,18 @@ def main(args: dict, yaml_path: str):
                     self.auto_steps = auto_steps
                     self.normalize_reps = normalize_reps
                     self.normalize_actions = normalize_actions
+                    
+                def _step_action(self, h: torch.Tensor, g: torch.Tensor, t_steps: int):
+                    a = self.apred_model(h, g, T=t_steps)
+                    if self.normalize_actions:
+                        a = F.layer_norm(a, (a.size(-1), ))
+                    return a
+
+                def _step_prediction(self, h: torch.Tensor, a: torch.Tensor):
+                    z = self.lpred_model(h, a)
+                    if self.normalize_reps:
+                        z = F.layer_norm(z, (z.size(-1), ))
+                    return z
 
                 def forward(self, clips: torch.Tensor):
                     latent_ctx = self.encoder_model(clips[:, :, :-1])
@@ -465,8 +476,10 @@ def main(args: dict, yaml_path: str):
                         latent_ctx = F.layer_norm(latent_ctx, (latent_ctx.size(-1), ))
                         latent_goal = F.layer_norm(latent_goal, (latent_goal.size(-1), ))
 
-                    h_patches = clips.shape[3] // self.patch_size
-                    w_patches = clips.shape[4] // self.patch_size
+                    # Get patches from clips
+                    _, _, _, H, W = clips.shape
+                    h_patches = H // self.patch_size
+                    w_patches = W // self.patch_size
 
                     h_ctx = self.filter_model(latent_ctx, h_patches, w_patches)
                     h_goal = self.target_filter_model(latent_goal, h_patches, w_patches)
@@ -477,22 +490,13 @@ def main(args: dict, yaml_path: str):
 
                     t_steps = (latent_ctx.shape[1] + latent_goal.shape[1]) // self.tokens_pframe
 
-                    def _step_action(h: torch.Tensor, g: torch.Tensor):
-                        a = self.apred_model(h, g, T=t_steps)
-                        if self.normalize_actions:
-                            a = F.layer_norm(a, (a.size(-1), ))
-                        return a
-
-                    def _step_prediction(h: torch.Tensor, a: torch.Tensor):
-                        z = self.lpred_model(h, a)
-                        if self.normalize_reps:
-                            z = F.layer_norm(z, (z.size(-1), ))
-                        return z
-
                     z_ctx = h_ctx[:, :self.tokens_pframe]
+                    
+                    # The loop will be unrolled into the graph
                     for _ in range(self.init_step, self.auto_steps):
-                        a_ctx = _step_action(z_ctx, h_goal)
-                        z_nxt = _step_prediction(z_ctx, a_ctx)[:, -self.tokens_pframe:]
+                        a_ctx = self._step_action(z_ctx, h_goal, t_steps)
+                        z_pred = self._step_prediction(z_ctx, a_ctx)
+                        z_nxt = z_pred[:, -self.tokens_pframe:]
                         z_ctx = torch.cat([z_ctx, z_nxt], dim=1)
 
                     z_ar = z_ctx[:, self.tokens_pframe:]
@@ -517,10 +521,17 @@ def main(args: dict, yaml_path: str):
                 normalize_reps=normalize_reps,
                 normalize_actions=normalize_actions,
             )
+            full_graph_model.eval()
+            for m in full_graph_model.modules():
+                if hasattr(m, "use_fast_path"):
+                    m.use_fast_path = False
 
             graph_clips = torch.randn(1, 3, fpcs, crop_size, crop_size, device=device)
             log_stats.log_model_graph(full_graph_model, (graph_clips,))
             logger.INFO("Logged one end-to-end TensorBoard model graph for straightening inference")
+            for m in full_graph_model.modules():
+                if hasattr(m, "use_fast_path"):
+                    m.use_fast_path = True
     else:
         log_stats = NoOpLogger()
    
@@ -619,7 +630,7 @@ def main(args: dict, yaml_path: str):
 
             t = torch.linspace(*samp_range, samp_sz, device = device)
             exp_f = torch.exp(-0.5 * (t**2))
-            g = torch.Generator(device=device).manual_seed(42) 
+            g = torch.Generator(device=device).manual_seed(seed) 
             u = torch.randn(a.size(2), num_proj, device = device, generator = g)
             u /= u.norm(p = 2, dim = 0)
             

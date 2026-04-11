@@ -151,7 +151,7 @@ class VisionTransformerPredictorAC(nn.Module):
         _, a_tok, _ = actions.shape
         a = self.action_encoder(actions).reshape(B, a_tok // self.action_pframe, self.action_pframe, -1)
         x = x.view(B, T, self.grid_height * self.grid_width, D)  # [B, T, H*W, D]
-        x = torch.cat([a, x], dim=2).flatten(1, 2)  # [B, T*(H*W+2), D]
+        x = torch.cat([x, a], dim=2).flatten(1, 2)  # [B, T*(H*W+2), D]
 
         attn_mask = self.attn_mask[: x.size(1), : x.size(1)].to(x.device, non_blocking=True)
 
@@ -182,7 +182,7 @@ class VisionTransformerPredictorAC(nn.Module):
 
         # Split out action and frame tokens
         x = x.view(B, T, self.action_pframe + self.grid_height * self.grid_width, D)  # [B, T, K+H*W, D]
-        x = x[:, :, self.action_pframe:, :].flatten(1, 2)
+        x = x[:, :, :-self.action_pframe, :].flatten(1, 2)
 
 
         if hasattr(self.predictor_norm, 'num_features'):
@@ -206,10 +206,10 @@ def vit_ac_predictor(**kwargs):
 if __name__ == "__main__":
     device = torch.device('cuda')
 
-    action_pframe = 1
+    action_pframe = 5
     frame_size = 224; patch_sz = 16
     grid_sz = int(frame_size // patch_sz) 
-    num_frames = 16; tubelet_sz = 2
+    num_frames = 12; tubelet_sz = 2
     grid_depth = int(num_frames // tubelet_sz)
     action_token = action_pframe * grid_depth
     

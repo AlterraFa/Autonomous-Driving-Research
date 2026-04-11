@@ -258,6 +258,8 @@ class ActionTransformerPredictorGC(nn.Module):
 
         self.mask_cache = {}
 
+        self.is_norm_channels_first = hasattr(self.norm, 'num_features') or isinstance(self.norm, (nn.BatchNorm1d, nn.BatchNorm2d))
+
         self.init_std = init_std
         self.apply(self._init_weights)
         self._init_action()
@@ -345,7 +347,7 @@ class ActionTransformerPredictorGC(nn.Module):
         total_len = ctx_a.size(1) + goal.size(1)
         attn_mask = torch.zeros((total_len, total_len), dtype=torch.bool, device=ctx_a.device)
         attn_mask[:ctx_a.size(1), :ctx_a.size(1)] = ctx_mask
-        
+
         # -- Goal cannot attention to context but to itself only
         attn_mask[:ctx_a.size(1), ctx_a.size(1):] = True
         attn_mask[ctx_a.size(1):, ctx_a.size(1):] = True
@@ -378,11 +380,11 @@ class ActionTransformerPredictorGC(nn.Module):
                     apstep = self.action_pstep
                 )
         
-        ctx_a = x[:, :-self.token_pframes]    
-        a = ctx_a.reshape(B, ctx_timestep, -1, self.action_embed_dim)[:, :, -self.action_pstep:, :]
+        ctx_a = x[:, :-self.token_pframes] # -- Remove goal frame
+        a = ctx_a.reshape(B, ctx_timestep, -1, self.action_embed_dim)[:, :, -self.action_pstep:, :] # -- Extract actions -> B, T, A, D
         a = a.reshape(B, -1, self.action_embed_dim)
 
-        if hasattr(self.norm, 'num_features'):
+        if self.is_norm_channels_first:
             a = self.norm(a.transpose(1, 2)).transpose(1, 2)
         else:
             a = self.norm(a)
@@ -394,8 +396,8 @@ if __name__ == "__main__":
     model = ActionTransformerPredictorGC(max_frames = 12, out_norm = "LayerNorm").to(device)
     context_T = 6
     goal_T = 1
-    context = torch.randn(5, (context_T - 3) * 196, 768).to(device)
-    goal    = torch.randn(5, goal_T * 196, 768).to(device)
+    context = torch.randn(9, (context_T - 1) * 196, 768).to(device)
+    goal    = torch.randn(9, goal_T * 196, 768).to(device)
 
     with torch.no_grad():
         output = model(context, goal, T = context_T + goal_T)   
