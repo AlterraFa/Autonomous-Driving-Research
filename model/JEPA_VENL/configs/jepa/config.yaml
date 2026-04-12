@@ -1,0 +1,78 @@
+model:
+  encoder:
+    architecture: ViT
+    image_size: 
+      - 224
+      - 368
+    patch_size: 16
+    in_channels: 3
+    embed_dim: 512
+    depth: 6
+    num_heads: 8
+    mlp_ratio: 4.0
+    qkv_bias: true
+    qk_scale: null 
+    drop_rate: 7.5e-3
+    attn_drop_rate: 0.0
+    drop_path_rate: 0.0
+    init_std: 0.02
+  predictor:
+    architecture: ViT
+    embed_dim: 384
+    depth: 6
+    num_heads: 12
+    mlp_ratio: 4.0
+    qkv_bias: true
+    qk_scale: null 
+    drop_rate: 0.0
+    attn_drop_rate: 0.0
+    drop_path_rate: 0.0
+    init_std: 0.02
+data:
+  dataset_name: Carla
+  dataset_path: ../../data/JEPA
+  batch_size: 32
+  num_workers: 8
+  train_split: 0.8
+  val_split: 0.2
+  shuffle: true
+  augmentations:
+    image_size: 
+      - 244
+      - 368
+    crop:
+      - 0.20
+      - 1.0
+    horizontal_flip: true
+    color_distortion: true
+    gaussian_blur: true
+    random_resize: true
+    color_jitter: 0.1
+    scale: [0.7, 1.0]
+    ratio: [0.8, 1.2]
+    normalization: [
+      [0.7658, 0.7465, 0.7223],
+      [0.1965, 0.2005, 0.2027]
+    ]
+  collator:
+    enc_mask_scale: [0.85, 1.0]
+    pred_mask_scale: [0.15, 0.2]
+    aspect_ratio: [0.75, 1.3333]
+    nenc: 1
+    npred: 4
+    allowed_overlap: false
+    min_patches: 4
+train_param: 
+  ema: 
+    - 0.996
+    - 1.0
+  init_lr: 5.0e-4
+  final_lr: 1.0e-8
+  plateau_point: 0.75
+  weight_decay: 0.01
+  epochs: 300
+  betas: [0.9, 0.999]
+  early_stopping: 
+    patience: 50
+    delta: 1.0e-4
+# Model changes: accept rectangular images

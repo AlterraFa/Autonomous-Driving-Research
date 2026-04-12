@@ -1,7 +1,7 @@
 [project]
 name = "cooking_station"
 version = "2.5.0"
-requires-python = ">=3.10,<3.11"
+requires-python = ">=3.10,<3.12"
 dependencies = [
     "decord>=0.6.0",
     "einops>=0.8.2",
@@ -17,11 +17,10 @@ dependencies = [
     "pycuda>=2026.1",
     "pyturbojpeg>=1.8.2",
     "pyyaml>=6.0.3",
-    "rich>=14.3.1",
     "scikit-image>=0.25.2",
     "scikit-learn>=1.7.2",
     "seaborn>=0.13.2",
-    "setuptools>=80.10.2",
+    "setuptools==81.0.0",
     "tensorboard>=2.20.0",
     "tensorboardx>=2.6.4",
     "tensorrt-cu12==10.15.1.29",
@@ -34,11 +33,21 @@ dependencies = [
     "tqdm>=4.67.2",
     "wheel>=0.46.3",
     "yacs>=0.1.8",
-    "rich",
     "tensorflow>=2.20.0",
     "yapf>=0.43.0",
     "opencv-python>=4.13.0.92",
     "psutil>=7.2.2",
+    "rich>=14.3.3",
+    "pipreqs>=0.5.0",
+    "ipykernel>=7.2.0",
+    "ipyprogress>=0.1.0",
+    "ipywidgets>=8.1.8",
+    "pip>=26.0.1",
+    "kaggle>=1.7.4.5",
+    "kagglehub>=1.0.0",
+    "ruamel-yaml>=0.19.1",
+    "mamba-ssm>=2.3.1",
+    "causal-conv1d>=1.6.1",
 ]
 
 [tool.uv]

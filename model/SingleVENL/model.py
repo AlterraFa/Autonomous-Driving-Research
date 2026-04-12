@@ -3,17 +3,40 @@ import torch
 import torch.nn as nn
 import torch.nn.init as init
 import warnings
+import numpy as np
 
 from utils.messages.logger import Logger
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", category=UserWarning)
-
+                    
         
 class SingleVENL(nn.Module):
-    def __init__(self, droprate: float = 0.1):
+    def __init__(
+        self, 
+        input_metadata: dict,
+        output_names: list,
+        components: int,
+        num_waypoints: int,
+        droprate: float = 0.0, 
+        drop_route: float = 0.0, 
+        drop_all: float = 0.0
+    ):
         self.log = Logger()
         super().__init__()
+
+        # Extract mode from output_names
+        self.mode = output_names[0]
+        
+        # Store configuration
+        self.components = components
+        self.num_waypoints = num_waypoints
+        self.input_metadata = input_metadata
+        self.output_names = output_names
+        self.droprate = droprate
+        self.drop_route = drop_route
+        self.drop_all = drop_all
+        self.initialized = False
 
         # Might change to WRN to improve performance
         self.cam_backbone: nn.Sequential = nn.Sequential(*[
@@ -80,13 +103,22 @@ class SingleVENL(nn.Module):
         )
 
         self.fusion_projector = nn.Sequential(
-            nn.LazyLinear(100),
+            nn.LazyLinear(500),
             nn.GELU(),
             nn.Dropout(droprate)
         )
-    
-        self.initialized = False
-        self.droprate = droprate
+
+        # Create mode-specific heads
+        if self.mode == "steer":
+            self.log.INFO("Using steer mode")
+            self.gmm_head = nn.Linear(200, 3 * components)  # 3 gaussian parameters * number of modes
+            self.determ_head = nn.Linear(500, 1)
+        elif self.mode == "waypoint":
+            self.log.INFO("Using waypoint mode")
+            self.gmm_head = nn.Linear(200, components * (1 + num_waypoints * 4))  # 1 weights, num_waypoints * 2 mean, num_waypoints * 2 standard deviation
+            self.determ_head = nn.Linear(500, num_waypoints * 2)
+        else:
+            raise ValueError(f"Invalid output_names[0]: {self.mode}. Expected 'steer' or 'waypoint'.")
 
     def _init_weights(self):
         """Custom weight initialization for all submodules."""
@@ -109,40 +141,7 @@ class SingleVENL(nn.Module):
         self.__dict__.update(state)
         self.log = Logger()
 
-    @classmethod
-    def steer(cls, camera_shape = (80, 200), map_shape = (50, 50), components: int = 3, droprate = 0.1) -> "SingleVENL":
-        self = cls(droprate = droprate)
-        self.components = components
-        self.log.INFO("Using steer mode")
 
-        self.gmm_head = nn.Linear(200, 3 * components) # 3 gaussian parameters * number of modes
-        self.determ_head = nn.Linear(100, 1)
-        self.input_metadata = {
-            "I0": (1, 3, *camera_shape),
-            "MU": (1, 1, *map_shape),
-            "MR": (1, 3, *map_shape),
-        }
-        self.output_names = ["steer", "weights", "muy", "sigma"]
-        
-        return self
-
-    @classmethod
-    def waypoint(cls, camera_shape = (80, 200), map_shape = (50, 50), num_waypoints = 1, components: int = 3, droprate = 0.1) -> "SingleVENL":
-        self = cls(droprate = droprate)
-        self.num_waypoints = num_waypoints
-        self.components = components
-        self.log.INFO("Using waypoint mode")
-
-        self.gmm_head = nn.Linear(200, components * (1 + num_waypoints * 4)) # 1 weights, num_waypoints * 2 mean, num_waypoints * 2 standard deviation
-        self.determ_head = nn.Linear(100, num_waypoints * 2)
-        self.input_metadata = {
-            "I0": (1, 3, *camera_shape),
-            "MU": (1, 1, *map_shape),
-            "MR": (1, 3, *map_shape),
-        }
-        self.output_names = ["waypoint", "weights", "muy", "sigma"]
-
-        return self
 
     def initialize_module(self, I0: torch.Tensor, MU: torch.Tensor, MR: torch.Tensor):
         if self.initialized == False:
@@ -161,15 +160,25 @@ class SingleVENL(nn.Module):
         argnames = self.forward.__code__.co_varnames[: argcount]
 
         if self.initialized == False:
-            self.log.ERROR(f"Modules not initialized", exit_code = -1)
+            self.log.WARNING(f"Modules not initialized", once = True)
         
         if not torch.onnx.is_in_onnx_export():
             for name in argnames[1: ]: # skip self
                 tensor = locals()[name]
                 expected_shape = self.input_metadata.get(name)
-                if expected_shape[1:] != tuple(tensor.shape)[1:]:
+                if tuple(expected_shape[1:]) != tuple(tensor.shape)[1:]:
                     self.log.ERROR(f"Input tensor {name} has shape {tensor.shape[1:]}, expected {expected_shape[1:]}", exit_code = 12)
 
+        if self.training:
+            mask_route = torch.rand(MR.shape[0], device=MR.device) < self.drop_route
+            mask_all = (torch.rand(MR.shape[0], device=MR.device) < self.drop_all) & mask_route
+            
+            m1 = mask_route.view(-1, 1, 1, 1)
+            m2 = mask_all.view(-1, 1, 1, 1)
+
+            MR = torch.where(m1, MU.repeat(1, 3, 1, 1), MR)
+            MR = torch.where(m2, torch.zeros_like(MR), MR)
+            MU = torch.where(m2, torch.zeros_like(MU), MU)
         # features of multicam setup
         f0 = self.cam_backbone(I0)
         # features of unrouted map
@@ -179,9 +188,6 @@ class SingleVENL(nn.Module):
         features_cat = torch.cat([f0, fmu], dim=1) # TENSORRT DOES NOT SUPPORT HSTACK OR VSTACK
 
         out = self.feature_downsize(features_cat)
-        if self.training:
-            dropmask = torch.rand(MR.shape[0], device = MR.device) < 0.18
-            MR[dropmask] = MU[dropmask].repeat(1, 3, 1, 1)  # randomly drop MR during training
         routed_features = self.routed_backbone(MR)
 
         gmm_out = self.gmm_head(out)
@@ -226,16 +232,27 @@ class SingleVENL(nn.Module):
         if missing_keys:
             self.log.ERROR(f"Missing keys: {missing_keys}", exit_code = 2)
 
-        H, W, _    = kwargs["I0"].shape
-        x_top_left = 150; x_top_right = W - x_top_left
-        y_hor      = 370; y_bot         = 720
-        I0 = kwargs['I0'][y_hor: y_bot, x_top_left: x_top_right]
-        I0 = cv2.resize(I0, (self.input_metadata["I0"][3], self.input_metadata["I0"][2]))[..., :3]
+        if not hasattr(self, "bottom"):
+            import yaml
+            with open(self.config_path, "r") as f:
+                args = yaml.safe_load(f)
+            dimension = args['data']['crop']
+            self.top    = dimension['vertical'][0]
+            self.bottom = dimension['vertical'][1]
+            self.left   = dimension['horizontal'][0]
+            self.right  = dimension['horizontal'][1]
 
+        I0 = kwargs['I0'][self.top: self.bottom, self.left: self.right]
+        debug = I0.copy()
+        I0 = cv2.resize(I0, (self.input_metadata["I0"][3], self.input_metadata["I0"][2]))[..., :3][...]
         MU = cv2.resize(kwargs["MU"], (self.input_metadata["MU"][3], self.input_metadata["MU"][2]))[..., None]
         MR = cv2.resize(kwargs["MR"], (self.input_metadata["MR"][3], self.input_metadata["MR"][2]))[..., ::-1]
+        
+        I0 = (I0.transpose(2, 0, 1)[None, ...] / 255.0).astype(np.float32)
+        MU = (MU.transpose(2, 0, 1)[None, ...] / 255.0).astype(np.float32)
+        MR = (MR.transpose(2, 0, 1)[None, ...] / 255.0).astype(np.float32)
 
-        return (I0, MU, MR)
+        return (I0, MU, MR), debug
 
 
     def gaussian_function(self, sample, parameters: tuple[torch.Tensor, torch.Tensor, torch.Tensor]):

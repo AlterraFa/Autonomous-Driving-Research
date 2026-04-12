@@ -592,7 +592,7 @@ class TrainingLogger:
                 input_sample = tuple(input_sample.values())
             
             model.eval()
-            self.writer.add_graph(model, input_sample)
+            self.writer.add_graph(model, input_sample, use_strict_trace=False)
             self.writer.flush()
         except Exception as e:
             msg = f"Warning: Could not log model graph: {e}"

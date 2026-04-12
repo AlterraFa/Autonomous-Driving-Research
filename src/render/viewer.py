@@ -12,7 +12,8 @@ import carla
 from src.control import (
     World, Controller, SensorManager
 )
-from . import HUD, draw_border, overlay_waypoints_on_map, overlay_gmm_on_map
+from .hud import HUD, draw_border, overlay_waypoints_on_map, overlay_gmm_on_map
+from .world_map import Map
 from src.control import Vehicle, lateral_control, longitudinal_speed
 
 from config.enum import (
@@ -50,7 +51,7 @@ from abc import ABC, abstractmethod
 
 from model.inference import AsyncInference
 from src.others.data_processor import TrajectoryBuffer, ReplayHandler
-from src.math import Map, OptimizePath, rpy2ypr, ContractingWP
+from src.math import OptimizePath, rpy2ypr, ContractingWP
 
 MIN_DISTANT_NODE = CONFIG.rand_path.min_distant_node
 MAX_DISTANT_NODE = CONFIG.rand_path.max_distant_node
@@ -712,7 +713,7 @@ class ReplayViewer(Viewer):
             self.choosen_view = [view for view in self.sensor_manager.camera_views if view.startswith("FIRST") or view.startswith("LOCAL")]
 
             if self.replayer.data_collector: 
-                if self.frame_id % 3 == 0:
+                if self.frame_id % 4 == 0:
                     self.view_index = self.i % len(self.choosen_view)
                     self.view_name = self.choosen_view[self.view_index]
                     self.change_view_all(self.view_name, show_info = False)

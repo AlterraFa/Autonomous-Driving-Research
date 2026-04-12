@@ -1,25 +1,47 @@
+data:
+  crop:
+    vertical:   [150, 720]
+    horizontal: [370, 1130]
 
 config:
-  initLR: 7.5e-4
-  targetLR: 1e-7
+  initLR: 3.0e-4
+  targetLR: 1.0e-7
+  initWD: 0.0
+  targetWD: 0.0
   epochs: 300
+model:
   components: 5
   l1: 1e-4
   l2: 1e-4
-  l1_weight: 1e-2
-  l2_weight: 1e-3
+  l1_weight: 1e-3
+  l2_weight: 1e-4
   target_std: [0.6, 0.8, 1.0, 1.2, 1.4, 1.6]
   target_sep: [0.6, 0.8, 1.0, 1.2, 1.4, 1.6]
-  patience: 50
-  droprate: 0.30
+  droprate  : 0.25
+  drop_route: 0.15
+  drop_all  : 0.75
+  input_metadata:
+    I0: [1, 3, 160, 400]
+    MU: [1, 1, 100, 100]
+    MR: [1, 3, 100, 100]
+  output_names: ["waypoint", "weights", "muy", "sigma"]
+  num_waypoints: 6
 
 loss_contrib:
-  mse_contrib       :  1.5
-  nll_contrib       :  0.75
-  std_reg_contrib   :  0.7
+  mse_contrib       :  1.0
+  nll_contrib       :  0.7
+  std_reg_contrib   :  0.1
   entropy_contrib   : -0.3   # negative to maximize entropy. But not too much to enforce uniformity
   repulsion_contrib :  0.0
-  l1_weight_contrib :  0.5
-  l2_weight_contrib :  0.5
-  l1_contrib        :  1.0
-  l2_contrib        :  1.0
+  l1_weight_contrib :  0.0
+  l2_weight_contrib :  0.0
+  l1_contrib        :  0.0
+  l2_contrib        :  0.0
+
+checkpoints:
+  save_best_only: true
+  mode: "min"
+  save_weights_only: true
+  frequency: 10
+  patience: 20
+  min_delta: 1.0e-4

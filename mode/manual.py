@@ -3,14 +3,12 @@ import datetime
 import line_profiler
 from config import CONFIG
 
-from src.messages.logger import Logger
 from src.control.vehicle_control import Vehicle
 from src.others.data_processor import TrajectoryBuffer
 from src.render.viewer import VIEWER_REGISTRY
 from config.enum import VehicleClass as VClass, CameraView
 
 from .utils import (
-    logger,
     num_npc,
     MIN_SAVING_DIST,
     make_map_and_optimizer,

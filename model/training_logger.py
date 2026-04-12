@@ -1,4 +1,5 @@
 import os
+import csv
 from typing import Dict, Optional, List, Literal, Union, Tuple
 from collections import defaultdict
 
@@ -56,7 +57,13 @@ class NoOpLogger:
         """Returns the dataloader as-is without progress tracking."""
         return dataloader
     
-    def log_batch(self, metrics: Dict[str, float], phase: str = "train", step: Optional[int] = None):
+    def log_batch(
+        self,
+        metrics: Dict[str, float],
+        phase: str = "train",
+        step: Optional[int] = None,
+        phase_agnostic: Optional[List[str]] = None,
+    ):
         """No-op batch logging."""
         pass
     
@@ -127,13 +134,19 @@ class TrainingLogger:
         run_name: Optional[str] = None,
         metrics_to_track: Optional[List[str]] = None,
         progress_type: Literal["tqdm", "table"] = "tqdm",
-        use_validation: bool = True
+        use_validation: bool = True,
+        save_csv: bool = True,
+        save_batch_csv: bool = False,
+        save_epoch_csv: bool = True,
     ):
         self.epochs = epochs
         self.current_epoch = 0
         self.metrics_to_track = metrics_to_track or []
         self.progress_type = progress_type
         self.use_validation = use_validation
+        self.save_csv = save_csv
+        self.save_batch_csv = save_batch_csv
+        self.save_epoch_csv = save_epoch_csv
         
         # Validate progress_table availability
         if progress_type == "table" and not PROGRESS_TABLE_AVAILABLE:
@@ -163,6 +176,15 @@ class TrainingLogger:
         # Metric accumulators for epoch averaging
         self._train_metrics_accum = defaultdict(list)
         self._val_metrics_accum = defaultdict(list)
+        self._misc_metrics_accum = defaultdict(list)
+
+        # CSV logging buffers and schema
+        self._csv_batch_rows: List[Dict[str, Union[str, float, int]]] = []
+        self._csv_epoch_rows: List[Dict[str, Union[str, float, int]]] = []
+        self._csv_batch_fields: List[str] = []
+        self._csv_epoch_fields: List[str] = []
+        self._csv_batch_path = os.path.join(self.log_dir, "batch_metrics.csv")
+        self._csv_epoch_path = os.path.join(self.log_dir, "epoch_metrics.csv")
         
         # Track state for table display
         self._current_phase = "train"
@@ -206,6 +228,7 @@ class TrainingLogger:
         self.current_epoch = epoch
         self._train_metrics_accum.clear()
         self._val_metrics_accum.clear()
+        self._misc_metrics_accum.clear()
         self._current_phase = desc.lower()
         self._num_batches = num_batches
         self._current_batch = 0
@@ -279,12 +302,39 @@ class TrainingLogger:
                 yield from self.progress_table(dataloader)
             else:
                 yield from dataloader
+
+    @staticmethod
+    def _normalize_csv_value(value):
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 1:
+                return value.item()
+            return str(value.detach().cpu().tolist())
+        if isinstance(value, (list, tuple, dict)):
+            return str(value)
+        return value
+
+    @staticmethod
+    def _upsert_fieldnames(fieldnames: List[str], row: Dict[str, Union[str, float, int]]) -> List[str]:
+        fields = list(fieldnames)
+        for key in row.keys():
+            if key not in fields:
+                fields.append(key)
+        return fields
+
+    @staticmethod
+    def _write_csv(path: str, fieldnames: List[str], rows: List[Dict[str, Union[str, float, int]]]):
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({field: row.get(field, "") for field in fieldnames})
         
     def log_batch(
         self,
         metrics: Dict[str, float],
         phase: str = "train",
-        step: Optional[int] = None
+        step: Optional[int] = None,
+        phase_agnostic: Optional[List[str]] = None,
     ):
         """
         Log metrics for a single batch and update progress display.
@@ -294,12 +344,32 @@ class TrainingLogger:
             phase: Either "train" or "val"
             step: Optional global step (if None, uses internal counter)
         """
-        # Accumulate metrics for epoch averaging
-        accum = self._train_metrics_accum if phase == "train" else self._val_metrics_accum
+        phase_agnostic = set(phase_agnostic or [])
+
+        clean_metrics: Dict[str, float] = {}
         for key, value in metrics.items():
             if isinstance(value, torch.Tensor):
                 value = value.item()
-            accum[key].append(value)
+            clean_metrics[key] = value
+
+        # Accumulate metrics for epoch averaging
+        train_or_val_accum = self._train_metrics_accum if phase == "train" else self._val_metrics_accum
+        for key, value in clean_metrics.items():
+            if key in phase_agnostic:
+                self._misc_metrics_accum[key].append(value)
+            else:
+                train_or_val_accum[key].append(value)
+
+        if self.save_csv and self.save_batch_csv:
+            row = {
+                "epoch": self.current_epoch + 1,
+                "batch": self._current_batch + 1,
+                "phase": phase,
+            }
+            row.update({k: self._normalize_csv_value(v) for k, v in clean_metrics.items()})
+            self._csv_batch_rows.append(row)
+            self._csv_batch_fields = self._upsert_fieldnames(self._csv_batch_fields, row)
+            self._write_csv(self._csv_batch_path, self._csv_batch_fields, self._csv_batch_rows)
         
         self._current_batch += 1
         
@@ -314,8 +384,10 @@ class TrainingLogger:
             if self.progress_table is not None:
                 # Add metric columns dynamically on first batch
                 if not self._table_columns_added:
-                    for key in metrics.keys():
-                        if self.use_validation:
+                    for key in clean_metrics.keys():
+                        if key in phase_agnostic:
+                            self.progress_table.add_column(f"{key}", color="magenta")
+                        elif self.use_validation:
                             self.progress_table.add_column(f"Train | {key}", color="blue")
                             self.progress_table.add_column(f"Val | {key}", color="green")
                         else:
@@ -324,15 +396,18 @@ class TrainingLogger:
                     self._table_columns_added = True
                 
                 # Update running average in the table
-                if self.use_validation:
-                    prefix = "Train | " if phase == "train" else "Val | "
-                else:
-                    prefix = ""  # No prefix in self-supervised mode
-                for key in metrics.keys():
-                    # Get running average from accumulator
-                    avg_value = sum(accum[key]) / len(accum[key])
-                    column_name = f"{prefix}{key}" if prefix else key
-                    self.progress_table[column_name] = self._format_value(avg_value)
+                for key in clean_metrics.keys():
+                    if key in phase_agnostic:
+                        avg_value = sum(self._misc_metrics_accum[key]) / len(self._misc_metrics_accum[key])
+                        self.progress_table[f"{key}"] = self._format_value(avg_value)
+                    else:
+                        if self.use_validation:
+                            prefix = "Train | " if phase == "train" else "Val | "
+                        else:
+                            prefix = ""
+                        avg_value = sum(train_or_val_accum[key]) / len(train_or_val_accum[key])
+                        column_name = f"{prefix}{key}" if prefix else key
+                        self.progress_table[column_name] = self._format_value(avg_value)
             
     def log_epoch(
         self,
@@ -372,11 +447,35 @@ class TrainingLogger:
                 self.writer.add_scalar(f"Val/{key}", value, epoch)
             
         # Log extra metrics (learning rate, EMA, etc.)
+        misc_metrics = {k: sum(v) / len(v) for k, v in self._misc_metrics_accum.items() if v}
+        if misc_metrics:
+            for key, value in misc_metrics.items():
+                if isinstance(value, torch.Tensor):
+                    value = value.item()
+                self.writer.add_scalar(f"Misc/{key}", value, epoch)
+
         if extra_metrics:
             for key, value in extra_metrics.items():
                 if isinstance(value, torch.Tensor):
                     value = value.item()
                 self.writer.add_scalar(f"Misc/{key}", value, epoch)
+
+        if self.save_csv and self.save_epoch_csv:
+            row = {"epoch": epoch}
+            for key, value in train_metrics.items():
+                row[f"Train/{key}"] = self._normalize_csv_value(value)
+            if self.use_validation and val_metrics:
+                for key, value in val_metrics.items():
+                    row[f"Val/{key}"] = self._normalize_csv_value(value)
+            for key, value in misc_metrics.items():
+                row[f"Misc/{key}"] = self._normalize_csv_value(value)
+            if extra_metrics:
+                for key, value in extra_metrics.items():
+                    row[f"Misc/{key}"] = self._normalize_csv_value(value)
+
+            self._csv_epoch_rows.append(row)
+            self._csv_epoch_fields = self._upsert_fieldnames(self._csv_epoch_fields, row)
+            self._write_csv(self._csv_epoch_path, self._csv_epoch_fields, self._csv_epoch_rows)
         
         self.writer.flush()
         
@@ -396,7 +495,7 @@ class TrainingLogger:
                 if extra_metrics and not hasattr(self, '_extra_columns_added'):
                     for key in extra_metrics.keys():
                         color = "yellow" if "lr" in key.lower() else "magenta"
-                        self.progress_table.add_column(f"Misc | {key}", color=color)
+                        self.progress_table.add_column(f"{key}", color=color)
                     self._extra_columns_added = True
                 
                 # Update extra metrics
@@ -404,7 +503,7 @@ class TrainingLogger:
                     for key, value in extra_metrics.items():
                         if isinstance(value, torch.Tensor):
                             value = value.item()
-                        self.progress_table[f"Misc | {key}"] = self._format_value(value)
+                        self.progress_table[f"{key}"] = self._format_value(value)
                 
                 self.progress_table.next_row()
             
@@ -492,6 +591,8 @@ class TrainingLogger:
             Dictionary of metric names to averaged values
         """
         accum = self._train_metrics_accum if phase == "train" else self._val_metrics_accum
+        if phase == "misc":
+            accum = self._misc_metrics_accum
         return {k: sum(v) / len(v) for k, v in accum.items() if v}
     
     def get_metric(self, metric_name: str, phase: str = "val") -> Optional[float]:
@@ -507,6 +608,8 @@ class TrainingLogger:
             The averaged metric value, or None if not found
         """
         accum = self._train_metrics_accum if phase == "train" else self._val_metrics_accum
+        if phase == "misc":
+            accum = self._misc_metrics_accum
         if metric_name in accum and accum[metric_name]:
             return sum(accum[metric_name]) / len(accum[metric_name])
         return None
@@ -619,7 +722,10 @@ def create_supervised_logger(
     log_dir: str,
     epochs: int,
     run_name: Optional[str] = None,
-    progress_type: Literal["tqdm", "table"] = "tqdm"
+    progress_type: Literal["tqdm", "table"] = "tqdm",
+    save_csv: bool = True,
+    save_batch_csv: bool = False,
+    save_epoch_csv: bool = True,
 ) -> TrainingLogger:
     """
     Create a TrainingLogger configured for supervised training (with validation).
@@ -629,6 +735,9 @@ def create_supervised_logger(
         epochs: Total number of training epochs
         run_name: Optional name for the run (will be appended to log_dir)
         progress_type: Either "tqdm" or "table" for progress display style
+        save_csv: Enable CSV export
+        save_batch_csv: Save per-batch CSV rows
+        save_epoch_csv: Save per-epoch CSV rows
         
     Returns:
         TrainingLogger instance with use_validation=True
@@ -638,7 +747,10 @@ def create_supervised_logger(
         epochs=epochs,
         run_name=run_name,
         progress_type=progress_type,
-        use_validation=True
+        use_validation=True,
+        save_csv=save_csv,
+        save_batch_csv=save_batch_csv,
+        save_epoch_csv=save_epoch_csv,
     )
 
 
@@ -646,7 +758,10 @@ def create_self_supervised_logger(
     log_dir: str,
     epochs: int,
     run_name: Optional[str] = None,
-    progress_type: Literal["tqdm", "table"] = "tqdm"
+    progress_type: Literal["tqdm", "table"] = "tqdm",
+    save_csv: bool = True,
+    save_batch_csv: bool = False,
+    save_epoch_csv: bool = True,
 ) -> TrainingLogger:
     """
     Create a TrainingLogger configured for self-supervised training (no validation).
@@ -656,6 +771,9 @@ def create_self_supervised_logger(
         epochs: Total number of training epochs
         run_name: Optional name for the run (will be appended to log_dir)
         progress_type: Either "tqdm" or "table" for progress display style
+        save_csv: Enable CSV export
+        save_batch_csv: Save per-batch CSV rows
+        save_epoch_csv: Save per-epoch CSV rows
         
     Returns:
         TrainingLogger instance with use_validation=False
@@ -665,7 +783,10 @@ def create_self_supervised_logger(
         epochs=epochs,
         run_name=run_name,
         progress_type=progress_type,
-        use_validation=False
+        use_validation=False,
+        save_csv=save_csv,
+        save_batch_csv=save_batch_csv,
+        save_epoch_csv=save_epoch_csv,
     )
 
 

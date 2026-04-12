@@ -1,1 +1,4 @@
 - Action predictor is a bridge -> velocity cannot be controlled reliably if it is goal dependent
+https://kaggle.com/datasets/2d97b52b0f13c4508e10acba9a321fcd1d324dbc5c86ff3894e3ee7daf89e828
+https://kaggle.com/datasets/5aa504ebd25ef61e4ef6195f520491f41a6731bb24319bf254787589186eee4d
+https://www.kaggle.com/code/konstantinboyko/aimo-3-whl-d165-vllm-0-14-0-cu-128-v02

@@ -18,7 +18,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(FILE_DIR, "../.."))   # .../ (CARLAP
 sys.path.append(PROJECT_ROOT)
 from model.PilotNet.model import PilotNetStatic, single_epoch_training_static, single_epoch_val_static
 from model.data_loader import CarlaDatasetLoader, get_next_run
-from utils.others.helper import EarlyStopping
+from early_stop import EarlyStopping
 
 
 def get_next_run(base_dir: str = "PilotNetExperiment") -> int:

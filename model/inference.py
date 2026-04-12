@@ -14,7 +14,7 @@ from .tensor_engine import ImageTensorRTInference
 
 # Cuda group
 import pycuda.driver as cuda
-import pycuda.autoinit
+cuda.init()
 
 # Logging group
 from traceback import print_exc

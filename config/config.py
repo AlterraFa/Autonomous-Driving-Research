@@ -70,7 +70,7 @@ class UIConfig:
 class OffsetsConfig:
     front_offset: float = 1.5
     temporal_offset: tuple[float, ...] = (0.0, 0.15, 0.3, 0.45, 0.6, 0.75)
-    spatial_offset: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+    spatial_offset: tuple[int, ...] = (0, 1.5, 3, 4.5, 6, 7.5, 9, 10.5, 12, 13.5, 15, 16.5)
     scout_offset_params: tuple[int, int, int] = (-18, 33, 2)
 
 

@@ -9,7 +9,7 @@ from config import CONFIG
 
 from src.messages.logger import Logger
 from src.spawn.sensor_spawner import GNSS, IMU
-from src.math.world_map import Map
+from src.render import Map
 from src.math.path import OptimizePath
 
 logger = Logger("Global")

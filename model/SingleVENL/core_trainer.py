@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import numpy as np
 
 from tqdm.auto import tqdm
-from model.VENL.model import VENL
+from model.SingleVENL.model import SingleVENL
 
 from torch import optim
 from torch.utils.data import DataLoader
@@ -21,44 +21,34 @@ with open(FILE_DIR + "/model_cfg.yaml", "r") as f:
 venl_config = config["config"]
 venl_loss = config["loss_contrib"]
 
-mse_contrib       = float(venl_loss.get("mse_contrib", 0.0))
-nll_contrib       = float(venl_loss.get("nll_contrib", 0.0))
-std_reg_contrib   = float(venl_loss.get("std_reg_contrib", 0.0))
-entropy_contrib   = float(venl_loss.get("entropy_contrib", 0.0))
-repulsion_contrib = float(venl_loss.get("repulsion_contrib", 0.0))
-l1_weight_contrib = float(venl_loss.get("l1_weight_contrib", 0.0))
-l2_weight_contrib = float(venl_loss.get("l2_weight_contrib", 0.0))
-l1_contrib        = float(venl_loss.get("l1_contrib", 0.0))
-l2_contrib        = float(venl_loss.get("l2_contrib", 0.0))
+mse_contrib       = config['loss_contrib']['mse_contrib']
+nll_contrib       = config['loss_contrib']['nll_contrib']
+std_reg_contrib   = config['loss_contrib']['std_reg_contrib']
+entropy_contrib   = config['loss_contrib']['entropy_contrib']
+repulsion_contrib = config['loss_contrib']['repulsion_contrib']
+l1_contrib        = config['loss_contrib']['l1_contrib']
+l2_contrib        = config['loss_contrib']['l2_contrib']
+l1_weight_contrib = config['loss_contrib']['l1_weight_contrib']
+l2_weight_contrib = config['loss_contrib']['l2_weight_contrib']
 
-l1         = float(venl_config["l1"])
-l2         = float(venl_config["l2"])
-l1_weight  = float(venl_config["l1_weight"])
-l2_weight  = float(venl_config["l2_weight"])
-target_std = torch.tensor(venl_config["target_std"])
-target_sep = torch.tensor(venl_config["target_sep"])
+l1         = float(config['model']['l1'])
+l2         = float(config['model']['l2'])
+l1_weight  = float(config['model']['l1_weight'])
+l2_weight  = float(config['model']['l2_weight'])
+target_std = torch.tensor(config['model']['target_std'])   # List
+target_sep = torch.tensor(config['model']['target_sep'])   # List
+
+# Optional waypoint normalization stats (per-waypoint, per-dim)
+wp_mean_cfg = config['model'].get('wp_mean', None)
+wp_std_cfg  = config['model'].get('wp_std',  None)
 
 
-def single_epoch_training(model: VENL, loader: DataLoader, optimizer: optim):
+def single_epoch_training(model: SingleVENL, loader: DataLoader, lr_scheduler, wd_scheduler, optimizer: optim, log_stats):
     model.train()
     device = next(model.parameters()).device
 
-    trainBar = tqdm(loader, desc="Train", position=1, leave=False)
 
-    # Metrics now include loss + gradient stats
-    trainMetrics = {
-        "Total": 0,
-        "MSE": 0,
-        "NLL": 0,
-        "STD Reg": 0,
-        "Weights Entropy": 0,
-        "Repulsion": 0,
-        "Grad_Routed": 0,
-        "Grad_Unrouted": 0,
-        "Grad_Cam": 0,
-    }
-
-    for batch_idx, (images, controls) in enumerate(trainBar):
+    for images, controls in log_stats.batch_iterator(loader):
         optimizer.zero_grad(set_to_none=True)
 
         images = {name: image.to(device) for name, image in images.items()}
@@ -66,7 +56,26 @@ def single_epoch_training(model: VENL, loader: DataLoader, optimizer: optim):
         aux_gt = controls['aux_wp'].to(device)
 
         determ, weights, muy, sigma = model(**images)
-        gmm_prob_per_mode = model.gaussian_function(aux_gt, (weights, muy, sigma))
+
+        # === NLL in normalized space (if stats provided) ===
+        use_norm = (wp_mean_cfg is not None) and (wp_std_cfg is not None)
+        if use_norm:
+            wp_mean = torch.tensor(wp_mean_cfg, dtype=gt.dtype, device=device)  # (N,2)
+            wp_std  = torch.tensor(wp_std_cfg,  dtype=gt.dtype, device=device)  # (N,2)
+
+            # reshape for broadcasting: (1,1,N,2)
+            mean_b = wp_mean.view(1, 1, model.num_waypoints, 2)
+            std_b  = wp_std.view(1, 1, model.num_waypoints, 2)
+
+            # normalize aux ground truth
+            aux_in = (aux_gt - mean_b) / (std_b + 1e-6)
+            
+            muy_in   = muy
+            sigma_in = sigma
+        else:
+            aux_in, muy_in, sigma_in = aux_gt, muy, sigma
+
+        gmm_prob_per_mode = model.gaussian_function(aux_in, (weights, muy_in, sigma_in))
         mask_aux          = aux_gt.abs().sum((-1, -2), keepdim = True) != 0
         masked_gmm_prob   = gmm_prob_per_mode * mask_aux
         total_gmm_prob    = (masked_gmm_prob.sum(1) / mask_aux.sum(1)).sum(1)
@@ -74,7 +83,15 @@ def single_epoch_training(model: VENL, loader: DataLoader, optimizer: optim):
 
         # Loss Components
         nll_loss = (-torch.log(total_gmm_prob + 1e-20)).mean()
-        mse_loss = F.mse_loss(determ, gt)
+
+        if use_norm and model.output_names[0] == 'waypoint':
+            mean_wp = wp_mean.view(1, model.num_waypoints, 2)
+            std_wp  = wp_std.view(1, model.num_waypoints, 2)
+            gt_m     = (gt - mean_wp) / (std_wp + 1e-6)
+            mse_loss = F.mse_loss(determ, gt_m)
+        else:
+            mse_loss = F.mse_loss(determ, gt)
+            
 
         #  Extra loss to encourage correct GMM Behavior
         a = muy.unsqueeze(1)
@@ -111,73 +128,37 @@ def single_epoch_training(model: VENL, loader: DataLoader, optimizer: optim):
 
         loss.backward()
 
-        # === Gradient Monitoring ===
-        def grad_mean_abs(module):
-            grads = [p.grad.abs().mean().item() for p in module.parameters() if p.grad is not None]
-            return float(np.mean(grads)) if grads else 0.0
-
-        grad_cam0 = grad_mean_abs(model.cam_backbone)
-        grad_unrouted = grad_mean_abs(model.unrouted_backbone)
-        grad_routed = grad_mean_abs(model.routed_backbone)
-
-        # Add gradient stats to metrics
-        trainMetrics["Grad_Routed"]     += grad_routed
-        trainMetrics["Grad_Unrouted"]   += grad_unrouted
-        trainMetrics["Grad_Cam"]  += grad_cam0
-
         optimizer.step()
+        lr_scheduler.step() 
+        wd_scheduler.step()
 
-        # Update losses
-        trainMetrics["Total"]           += loss.item()
-        trainMetrics["MSE"]             += mse_loss.item()
-        trainMetrics["NLL"]             += nll_loss.item()
-        trainMetrics["STD Reg"]         += std_reg.item()
-        trainMetrics["Repulsion"]       += repulsion_loss.item()
-        trainMetrics["Weights Entropy"] += entropy_w.item()
+        # Debug: monitor gradients to deterministic head
+        det_head_grads = [p.grad.abs().mean().item() for p in model.determ_head.parameters() if p.grad is not None]
+        fus_grads = [p.grad.abs().mean().item() for p in model.fusion_projector.parameters() if p.grad is not None]
+        det_head_grad_mean = float(np.mean(det_head_grads)) if det_head_grads else 0.0
+        fus_grad_mean = float(np.mean(fus_grads)) if fus_grads else 0.0
 
-        step = trainBar.n + 1
-        avg_total = trainMetrics["Total"] / step
-        avg_mse   = trainMetrics["MSE"] / step
-        avg_nll   = trainMetrics["NLL"] / step
-        avg_std   = trainMetrics["STD Reg"] / step
-        avg_rep   = trainMetrics["Repulsion"] / step
-        avg_ent   = trainMetrics["Weights Entropy"] / step
-
-        # Gradient averages for postfix display
-        avg_grad_routed   = trainMetrics["Grad_Routed"] / step
-        avg_grad_unrouted = trainMetrics["Grad_Unrouted"] / step
-        avg_grad_cam      = np.mean([trainMetrics["Grad_Cam"]]) / step
-
-        trainBar.set_postfix({
-            "Total": f"{avg_total:.3f}",
-            "MSE": f"{avg_mse:.3f}",
-            "NLL": f"{avg_nll:.3f}",
-            "STD": f"{avg_std:.3f}",
-            "ENT": f"{avg_ent:.3f}",
-            "REP": f"{avg_rep:.3f}",
-            "GradCam": f"{avg_grad_cam:.2e}",
-            "GradUnR": f"{avg_grad_unrouted:.2e}",
-            "GradR": f"{avg_grad_routed:.2e}"
+        log_stats.log_batch({
+            "Total": loss.item(),
+            "MSE": mse_loss.item(),
+            "NLL": nll_loss.item(),
+            "STD": std_reg.item(),
+            "ENT": entropy_w.item(),
+            "DH_Grad": det_head_grad_mean,
+            "Fus_Grad": fus_grad_mean,
         })
 
-    # Normalize final metrics
-    for key in trainMetrics.keys():
-        trainMetrics[key] /= len(loader)
 
     del images, gt, determ, weights, muy, sigma
     torch.cuda.empty_cache()
 
-    return trainMetrics
 
-
-def single_epoch_val(model: VENL, loader: DataLoader):
+def single_epoch_val(model: SingleVENL, loader: DataLoader, log_stats):
     model.eval()
     device = next(model.parameters()).device
 
-    valBar = tqdm(loader, desc = "Val", position = 2, leave = False)
-    valMetrics = {"Total": 0, "MSE": 0, "NLL": 0, "STD Reg": 0, "Weights Entropy": 0, "Repulsion": 0}
     with torch.no_grad():
-        for images, controls in valBar:
+        for images, controls in log_stats.batch_iterator(loader):
 
             images = {name: image.to(device) for name, image in images.items()}
             gt     = controls['midlane_wp'].to(device) if model.output_names[0] == "waypoint" else controls['steer'].unsqueeze(1).to(device)
@@ -185,14 +166,38 @@ def single_epoch_val(model: VENL, loader: DataLoader):
 
 
             determ, weights, muy, sigma = model(**images)
-            gmm_prob_per_mode = model.gaussian_function(aux_gt, (weights, muy, sigma))
+
+            # === NLL in normalized space (if stats provided) ===
+            use_norm = (wp_mean_cfg is not None) and (wp_std_cfg is not None)
+            if use_norm:
+                wp_mean = torch.tensor(wp_mean_cfg, dtype=gt.dtype, device=device)  # (N,2)
+                wp_std  = torch.tensor(wp_std_cfg,  dtype=gt.dtype, device=device)  # (N,2)
+
+                # reshape for broadcasting: (1,1,N,2)
+                mean_b = wp_mean.view(1, 1, model.num_waypoints, 2)
+                std_b  = wp_std.view(1, 1, model.num_waypoints, 2)
+
+                aux_in = (aux_gt - mean_b) / (std_b + 1e-6)
+                muy_in   = muy
+                sigma_in = sigma
+            else:
+                aux_in, muy_in, sigma_in = aux_gt, muy, sigma
+
+            gmm_prob_per_mode = model.gaussian_function(aux_in, (weights, muy_in, sigma_in))
             mask_aux          = aux_gt.abs().sum((-1, -2), keepdim = True) != 0
             masked_gmm_prob   = gmm_prob_per_mode * mask_aux
             total_gmm_prob    = (masked_gmm_prob.sum(1) / mask_aux.sum(1)).sum(1)
 
             # Loss Components
             nll_loss = (-torch.log(total_gmm_prob + 1e-20)).mean()
-            mse_loss = F.mse_loss(determ, gt)
+
+            if use_norm and model.output_names[0] == 'waypoint':
+                mean_wp = wp_mean.view(1, model.num_waypoints, 2)
+                std_wp  = wp_std.view(1, model.num_waypoints, 2)
+                gt_m     = (gt - mean_wp) / (std_wp + 1e-6)
+                mse_loss = F.mse_loss(determ, gt_m)
+            else:
+                mse_loss = F.mse_loss(determ, gt)
 
             #  Extra loss to encourage correct GMM Behavior
             a = muy.unsqueeze(1)
@@ -203,7 +208,7 @@ def single_epoch_val(model: VENL, loader: DataLoader):
                 mask_sep  = torch.triu(torch.ones(model.components, model.components, dtype = torch.float).to(device), diagonal = 1)
                 mask_sep  = mask_sep.unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
             sep_coeff = sep_coeff * mask_sep.expand_as(sep_coeff)
-            repulsion_loss = sep_coeff.sum((1, 2, 3, 4)).mean() # Sum over all gaussians
+            repulsion_loss = sep_coeff.sum((1, 2, 3, 4)).mean() / model.components # Sum over all gaussians and normalize by the number of components
             std_reg = F.mse_loss(torch.log(sigma), target_std.view(1, 1, -1, 1).expand_as(sigma).to(device))
             entropy_w = -(weights.squeeze() * torch.log(weights.squeeze() + 1e-9)).sum(dim=1).mean()
             l1_weights_norm = weights.abs().mean()
@@ -227,39 +232,22 @@ def single_epoch_val(model: VENL, loader: DataLoader):
                 l2_contrib        * l2Norm * l2
             )
 
+            # Debug: monitor gradients to deterministic head
+            det_head_grads = [p.grad.abs().mean().item() for p in model.determ_head.parameters() if p.grad is not None]
+            fus_grads = [p.grad.abs().mean().item() for p in model.fusion_projector.parameters() if p.grad is not None]
+            det_head_grad_mean = float(np.mean(det_head_grads)) if det_head_grads else 0.0
+            fus_grad_mean = float(np.mean(fus_grads)) if fus_grads else 0.0
 
+            log_stats.log_batch({
+                "Total": loss.item(),
+                "MSE": mse_loss.item(),
+                "NLL": nll_loss.item(),
+                "STD": std_reg.item(),
+                "ENT": entropy_w.item(),
+                "DH_Grad": det_head_grad_mean,
+                "Fus_Grad": fus_grad_mean,
+            }, phase = "val")
 
-            valMetrics["Total"]           += loss.item()
-            valMetrics["MSE"]             += mse_loss.item()
-            valMetrics["NLL"]             += nll_loss.item()
-            valMetrics["STD Reg"]         += std_reg.item()
-            valMetrics["Repulsion"]       += repulsion_loss.item()
-            valMetrics["Weights Entropy"] += entropy_w.item()
-
-            avg_total = valMetrics["Total"] / (valBar.n + 1)
-            avg_mse   = valMetrics["MSE"] / (valBar.n + 1)
-            avg_nll   = valMetrics["NLL"] / (valBar.n + 1)
-            avg_std   = valMetrics["STD Reg"] / (valBar.n + 1)
-            avg_rep   = valMetrics["Repulsion"] / (valBar.n + 1)
-            avg_ent   = valMetrics["Weights Entropy"] / (valBar.n + 1)
-
-            valBar.set_postfix({
-                "Total": f"{avg_total:.3f}",
-                "MSE": f"{avg_mse:.3f}",
-                "NLL": f"{avg_nll:.3f}",
-                "STD": f"{avg_std:.3f}",
-                "ENT": f"{avg_ent:.3f}",
-                "REP": f"{avg_ent:.3f}"
-            })
-
-    valMetrics["Total"]           /= len(loader)
-    valMetrics["MSE"]             /= len(loader)
-    valMetrics["NLL"]             /= len(loader)
-    valMetrics["STD Reg"]         /= len(loader)
-    valMetrics["Repulsion"]       /= len(loader)
-    valMetrics["Weights Entropy"] /= len(loader)
 
     del images, gt, determ, weights, muy, sigma
     torch.cuda.empty_cache()
-
-    return valMetrics

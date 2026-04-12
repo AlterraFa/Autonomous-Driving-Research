@@ -23,7 +23,7 @@ sys.path.append(PROJECT_ROOT)
 from model.VENL.model import VENL
 from model.data_loader import CarlaDatasetLoader, get_next_run
 from model.VENL.core_trainer import single_epoch_training, single_epoch_val
-from utils.others.helper import EarlyStopping
+from model.early_stop import EarlyStopping
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", category=UserWarning)
@@ -148,7 +148,7 @@ if __name__ == "__main__":
         writer.add_scalar("Misc/LearningRate", currentLr, epoch+1)
         writer.flush()
 
-        earlystop(val_metrics['Total'], model)
+        earlystop(val_metrics['Total'], model, epoch = epoch, optimizer = optimizer)
         if earlystop.early_stop:
             print(f"STOPPED AT EPOCH {epoch}")
             break

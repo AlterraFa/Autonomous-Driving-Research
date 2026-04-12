@@ -1,0 +1,57 @@
+model:
+  map_shape: [100, 100]
+  num_waypoints: 6
+  components: 3
+  drop_rate: 0.3
+  map_droprate: 0.1
+  enc_weight_path: ../Experiment/pretraining/run12/weights/best_target_run12.pt
+data:
+  dataset_name: Carla
+  dataset_path: ../../data/JEPA_VENL
+  ram_caching: true
+  batch_size: 32
+  num_workers: 8
+  train_split: 0.8
+  val_split: 0.2
+  shuffle: true
+  pad_value: -30000
+  augmentations:
+    image_size: 
+      - 224
+      - 368
+    crop:
+      - 0.20
+      - 1.0
+    color_distortion: true
+    gaussian_blur: true
+    color_jitter: 0.1
+    normalization: [
+      [0.7658, 0.7465, 0.7223],
+      [0.1965, 0.2005, 0.2027]
+    ]
+train_param: 
+  full_finetune: true
+  init_lr: 5.0e-4
+  final_lr: 1.0e-8
+  plateau_point: 0.75
+  weight_decay: 0.02
+  epochs: 210
+  betas: [0.9, 0.999]
+  early_stopping: 
+    patience: 20
+    delta: 5.0e-3
+  loss_args:
+    huber_delta: 0.03
+    target_std: [0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
+    target_sep: [0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
+  loss_contrib:
+    mse       :  1.0
+    nll       :  1.0
+    std_reg   :  0.5
+    entropy   : -0.3   # negative to maximize entropy. But not too much to enforce uniformity
+    repulsion :  0.0
+    l1_model  : 1.0e-4
+    l2_model  : 1.0e-3
+    l1_gmm    : 1.0e-4
+    l2_gmm    : 1.0e-3
+# Model changes: disable nll loss
