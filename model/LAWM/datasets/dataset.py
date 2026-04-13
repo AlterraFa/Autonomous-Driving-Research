@@ -596,6 +596,115 @@ class StraighteningDataset(Dataset):
         image_paths = [os.path.join(abs_path, value) for value in img_dict.values()]
 
         return decode_batch(image_paths)
+
+
+class StraighteningProbeDataset(Dataset):
+    """Straightening dataset that also extracts waypoint ground-truth for probing.
+    
+    Returns (clip_tensor, gt_dict) where gt_dict contains:
+        - midlane_wp: (N_wp, 2) float32 array of spatial waypoints in Frenet coords
+        - midlane_wp_temporal: (N_wpt, 2) float32 array of temporal waypoints
+        - road_type: str ('uni' or 'multi') for gate conditioning
+    """
+
+    def __init__(
+        self,
+        data_paths,
+        shared_transform=None,
+        individual_transform=None,
+        waypoint_key="midlane_wp",
+        n_waypoints=12,
+    ):
+        super().__init__()
+        self.data_paths = data_paths
+        self.individual_transform = individual_transform
+        self.shared_transform = shared_transform
+        self.waypoint_key = waypoint_key
+        self.n_waypoints = n_waypoints
+
+        self._load_samples()
+
+    def _load_samples(self):
+        self.samples = []
+        self.mapping = []
+        for idx, path in enumerate(self.data_paths):
+            seq_paths = _check_structure(path)
+            if not seq_paths:
+                raise ValueError("No sequence path found to match the structure", path)
+            samples = glob.glob(os.path.join(seq_paths, "*"))
+            self.samples += samples
+            self.mapping.extend([idx] * len(samples))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        for retry in range(5):
+            try:
+                sample = self._load_sample(index)
+                if sample is not None:
+                    return sample
+            except Exception as e:
+                if retry < 4:
+                    print(f"Error loading sample at {index=}, retrying ({retry+1}/5): {e}")
+                else:
+                    print(f"Failed to load sample at {index=} after 5 retries: {e}")
+        return None
+
+    def _load_sample(self, index):
+        sample_path = self.samples[index]
+        abs_path = self.data_paths[self.mapping[index]]
+
+        data = np.load(sample_path, allow_pickle=True).item()
+
+        # Decode images
+        img_dict = data['img_file']
+        image_paths = [os.path.join(abs_path, value) for value in img_dict.values()]
+        buffer = decode_batch(image_paths)
+
+        if self.individual_transform is not None:
+            buffer = np.array([self.individual_transform(image) for image in buffer])
+        if self.shared_transform is not None:
+            buffer = self.shared_transform(buffer)
+
+        # Extract GT waypoints
+        metadata = data.get('metadata', {})
+        gt_data = metadata.get('gt_data', {})
+        condition = metadata.get('condition', {})
+
+        wp = gt_data.get(self.waypoint_key, np.zeros((self.n_waypoints, 2), dtype=np.float32))
+        if not isinstance(wp, np.ndarray):
+            wp = np.array(wp, dtype=np.float32)
+        wp = wp.astype(np.float32)
+
+        # Interpolate to n_waypoints if needed
+        if wp.shape[0] != self.n_waypoints:
+            from scipy.interpolate import interp1d
+            t_src = np.linspace(0, 1, wp.shape[0])
+            t_dst = np.linspace(0, 1, self.n_waypoints)
+            wp = interp1d(t_src, wp, axis=0, kind='linear')(t_dst).astype(np.float32)
+
+        road_type = condition.get('road_type', 'uni')
+        gate_score = 1.0 if road_type == 'multi' else 0.0
+
+        gt = {
+            'midlane_wp': torch.from_numpy(wp),
+            'gate_score': torch.tensor(gate_score, dtype=torch.float32),
+        }
+
+        return buffer, gt
+
+    def split(self, train=0.9, val=0.1):
+        n = len(self.samples)
+        indices = list(range(n))
+        random.shuffle(indices)
+        n_train = int(n * train)
+        n_val = int(n * val)
+        train_set = Subset(self, indices[:n_train])
+        val_set = Subset(self, indices[n_train:n_train + n_val])
+        test_set = Subset(self, indices[n_train + n_val:])
+        return train_set, val_set, test_set
+
         
 if __name__ == "__main__":
     import yaml

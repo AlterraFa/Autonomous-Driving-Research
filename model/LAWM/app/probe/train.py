@@ -23,9 +23,7 @@ from .compile import (
     compile_transform,
     compile_dataloader,
     compile_opt,
-    compile_grad_optimizer,
-    compile_loss, format_targets,
-    load_checkpoint, restore_resume_state
+    compile_fdat_loss,
 )
 from utils.training_logger import (
     get_next_run,
@@ -39,91 +37,29 @@ from utils.early_stop import EarlyStopping
 logger = Logger(__name__)
 
 
-def _unwrap_module(module):
-    return module.module if hasattr(module, "module") else module
-
-
-def _task_metric_name(task_name: str) -> str:
-    return task_name.replace("_", " ").title()
-
-
-def _collect_affine_metrics(module, enabled_tasks=None, max_dims: int = 4, affine_modality: str = None):
-    core = _unwrap_module(module)
-    metrics = {}
-    task_names = list(enabled_tasks) if enabled_tasks is not None else []
-
-    scale_param = getattr(core, "scale", None)
-    shift_param = getattr(core, "shift", None)
-    if affine_modality is not None and affine_modality in task_names:
-        idx = task_names.index(affine_modality)
-        label = _task_metric_name(affine_modality)
-        if scale_param is not None:
-            raw_scale = scale_param.detach().float().flatten().cpu().tolist()
-            eff_scale = F.softplus(scale_param.detach()).float().flatten().cpu().tolist()
-            metrics[f"Raw Scale {label}"] = float(raw_scale[idx])
-            metrics[f"Scale {label}"] = float(eff_scale[idx])
-        if shift_param is not None:
-            shift_vals = shift_param.detach().float().flatten().cpu().tolist()
-            metrics[f"Shift {label}"] = float(shift_vals[idx])
-        return metrics
-
-    # Default: log all modalities
-    if scale_param is not None:
-        raw_scale = scale_param.detach().float().flatten().cpu()
-        eff_scale = F.softplus(scale_param.detach()).float().flatten().cpu()
-        metrics["Scale Mean"] = float(eff_scale.mean().item())
-        for i, value in enumerate(raw_scale[:max_dims]):
-            if i < len(task_names):
-                task_label = _task_metric_name(task_names[i])
-                metrics[f"Raw Scale {task_label}"] = float(value.item())
-            else:
-                metrics[f"Raw Scale[{i}]"] = float(value.item())
-        for i, value in enumerate(eff_scale[:max_dims]):
-            if i < len(task_names):
-                task_label = _task_metric_name(task_names[i])
-                metrics[f"Scale {task_label}"] = float(value.item())
-            else:
-                metrics[f"Scale[{i}]"] = float(value.item())
-
-    if shift_param is not None:
-        shift_vals = shift_param.detach().float().flatten().cpu()
-        metrics["Shift Mean"] = float(shift_vals.mean().item())
-        for i, value in enumerate(shift_vals[:max_dims]):
-            if i < len(task_names):
-                task_label = _task_metric_name(task_names[i])
-                metrics[f"Shift {task_label}"] = float(value.item())
-            else:
-                metrics[f"Shift[{i}]"] = float(value.item())
-
-    return metrics
-
-def gpu_timer(funct, log_timming = True):
+def gpu_timer(funct, log_timming=True):
     log_timming = log_timming and torch.cuda.is_available()
-    
     elapsed_time = -1.0
     if log_timming:
-        start = torch.cuda.Event(enable_timing = True)
-        end = torch.cuda.Event(enable_timing = True)
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
         start.record()
-        
     result = funct()
     if log_timming:
         end.record()
         torch.cuda.synchronize()
         elapsed_time = start.elapsed_time(end)
-    
     return result, elapsed_time
+
 
 def save_config_pretty(config_dict, save_path):
     yaml = YAML()
-    # Basic formatting
     yaml.indent(mapping=2, sequence=4, offset=2)
     yaml.preserve_quotes = True
     yaml.default_flow_style = False
-    
-    # This turns the dict into a 'ruamel' internal dict that supports comments/spacing
+
     from ruamel.yaml.comments import CommentedMap
-    
+
     def dict_to_commented(d):
         if isinstance(d, dict):
             cm = CommentedMap()
@@ -133,8 +69,6 @@ def save_config_pretty(config_dict, save_path):
         return d
 
     pretty_data = dict_to_commented(config_dict)
-
-    # Add a blank line before every top-level key for readability
     first = True
     for key in pretty_data.keys():
         if not first:
@@ -145,86 +79,79 @@ def save_config_pretty(config_dict, save_path):
         yaml.dump(pretty_data, f)
 
 
-    
 GLOBAL_SEED = 12
 random.seed(GLOBAL_SEED)
 np.random.seed(GLOBAL_SEED)
 torch.manual_seed(GLOBAL_SEED)
 torch.backends.cudnn.benchmark = True
 
+
 def main(args: dict, *noargs, **nokwargs):
-    meta_cfg: dict = args.get('meta', {})
-    affine_modality = meta_cfg.get('affine_modality', None)
-    
+    # ======================== Config unpacking ========================
     train_cfg: dict = args.get("train", {})
-    crop_size    = train_cfg.get('crop_size', 224)
-    nclips       = train_cfg.get('nclips', 1)
-    
+    crop_size = train_cfg.get('crop_size', 256)
+    fpcs = train_cfg.get('fpcs', 12)
+
     loader_cfg: dict = args.get('loader_setup', {})
-    num_workers        = loader_cfg.get('num_workers', 1)
-    persistent_workers = loader_cfg.get('persistent_workers', False)
-    pin_mem            = loader_cfg.get('pin_mem', False)
+    num_workers = loader_cfg.get('num_workers', 4)
+    persistent_workers = loader_cfg.get('persistent_workers', True)
+    pin_mem = loader_cfg.get('pin_mem', True)
 
     model_cfg: dict = args.get("model", {})
-    enc_cfg   = model_cfg.get('enc', {})
+    enc_cfg = model_cfg.get('enc', {})
     probe_cfg = model_cfg.get('probe', {})
+    world_model_cfg = model_cfg.get('world_model', {})
 
     augment_cfg: dict = args.get('data_aug', {})
-    auto_augment        = augment_cfg.get('auto_augment', False)
-    horizontal_flip     = augment_cfg.get('horizontal_flip', False)
-    motion_shift        = augment_cfg.get('motion_shift', False)
+    auto_augment = augment_cfg.get('auto_augment', False)
+    horizontal_flip = augment_cfg.get('horizontal_flip', False)
+    motion_shift = augment_cfg.get('motion_shift', False)
     random_aspect_ratio = augment_cfg.get('random_resize_aspect_ratio', (1.0, 1.0))
     random_resize_scale = augment_cfg.get('random_resize_scale', (1.0, 1.0))
-    reprob              = augment_cfg.get('reprob', 0.0)
-    normalize_targets   = augment_cfg.get('normalize_targets', False)
-    
+    reprob = augment_cfg.get('reprob', 0.0)
+
     optim_cfg: dict = args.get('optimization', {})
-    anneal       = optim_cfg.get('annel', optim_cfg.get('anneal', 1))
-    epochs       = optim_cfg.get('epochs', 100)
-    final_lr     = optim_cfg.get('final_lr', 0.0)
-    final_wd     = optim_cfg.get("final_weight_decay", 0.0)
-    ipe          = optim_cfg.get('ipe', 100)
-    lr           = optim_cfg.get('lr', 1e-3)
-    start_lr     = optim_cfg.get('start_lr', 1e-3)
-    warmup       = optim_cfg.get('warmup', 10)
-    weight_decay = optim_cfg.get('weight_decay', 0.0)
-    betas        = optim_cfg.get('betas', (0.9, 0.999))
-    eps          = optim_cfg.get('eps', 1.0e-8)
-    
-    grad_optim_cfg: dict = optim_cfg.get('gradient_optimizer', {})
-    grad_optim_name = grad_optim_cfg.get('type', 'normal')
-    grad_optim_params = grad_optim_cfg.get('params', {})
+    anneal = optim_cfg.get('anneal', optim_cfg.get('annel', 15))
+    epochs = optim_cfg.get('epochs', 50)
+    final_lr = optim_cfg.get('final_lr', 0.0)
+    final_wd = optim_cfg.get("final_weight_decay", 0.0)
+    ipe = optim_cfg.get('ipe', 100)
+    lr = optim_cfg.get('lr', 1e-3)
+    start_lr = optim_cfg.get('start_lr', 1e-4)
+    warmup = optim_cfg.get('warmup', 5)
+    weight_decay = optim_cfg.get('weight_decay', 0.01)
+    betas = optim_cfg.get('betas', (0.9, 0.999))
+    eps = optim_cfg.get('eps', 1.0e-8)
 
     loss_cfg: dict = args.get('loss', {})
-    normalize_rep = loss_cfg.get('normalize_rep', False)
 
     meta_cfg: dict = args.get('meta', {})
-    dtype                     = meta_cfg.get('dtype', 'float32')
-    save_freq                 = meta_cfg.get('save_every_freq', 2)
-    save_root_dir_cfg         = meta_cfg.get('save_root_dir', "./Experiment")
-    sync_gc                   = meta_cfg.get('sync_gc', False)
+    dtype = meta_cfg.get('dtype', 'bfloat16')
+    save_freq = meta_cfg.get('save_every_freq', 5)
+    save_root_dir_cfg = meta_cfg.get('save_root_dir', "./Experiment")
+    sync_gc = meta_cfg.get('sync_gc', False)
+    seed = meta_cfg.get('seed', 239)
     continue_from_path = meta_cfg.get('continue_from_path', None)
-    continue_train                 = bool(continue_from_path)
-    resume_prefer_best             = bool(meta_cfg.get('resume_prefer_best', True))
+    continue_train = bool(continue_from_path)
+    resume_prefer_best = bool(meta_cfg.get('resume_prefer_best', True))
 
     checkpoint_cfg: dict = args.get('checkpoint', {})
     patience = checkpoint_cfg.get('patience', epochs)
     min_delta = checkpoint_cfg.get('min_delta', 0.0)
 
     logging_cfg: dict = args.get('logging', {})
-    progress_type  = logging_cfg.get('progress_type', 'table')
-    save_csv       = logging_cfg.get('save_csv', True)
+    progress_type = logging_cfg.get('progress_type', 'table')
+    save_csv = logging_cfg.get('save_csv', True)
     save_batch_csv = logging_cfg.get('save_batch_csv', False)
     save_epoch_csv = logging_cfg.get('save_epoch_csv', True)
-    
 
+    # ======================== Distributed setup ========================
     world_size, rank = init_distributed()
     if dist.is_available() and dist.is_initialized() and world_size > 1:
         logger.CUSTOM("SUCCESS", f"DDP enabled (world_size={world_size}, rank={rank})")
     else:
         logger.INFO("DDP disabled (single-GPU/single-process mode)")
-    
-    
+
     if dtype.lower() == "bfloat16":
         dtype = torch.bfloat16
         mixed_precision = True
@@ -234,105 +161,71 @@ def main(args: dict, *noargs, **nokwargs):
     else:
         dtype = torch.float32
         mixed_precision = False
-    
+
+    torch.manual_seed(seed)
     torch.cuda.set_device(rank)
     device_type = f'cuda:{rank}'
     device = torch.device(device_type)
-    
-    criterion = compile_loss(loss_cfg = loss_cfg, device = device)
-    if dist.is_initialized() and world_size > 1:
-        criterion = DDP(criterion, device_ids=[rank], output_device=rank, find_unused_parameters=False)
-    criterion_core = _unwrap_module(criterion)
-    enabled_tasks = list(getattr(criterion_core, "enabled_tasks", []))
-    
+
+    # ======================== Compile components ========================
+    criterion = compile_fdat_loss(loss_cfg=loss_cfg, device=device)
+
     transform = compile_transform(
-        random_horizontal_flip = horizontal_flip,
-        random_resize_aspect_ratio = random_aspect_ratio,
-        random_resize_scale = random_resize_scale,
-        reprob = reprob,
-        auto_augment = auto_augment,
-        motion_shift = motion_shift,
-        crop_size    = crop_size,
+        random_horizontal_flip=horizontal_flip,
+        random_resize_aspect_ratio=random_aspect_ratio,
+        random_resize_scale=random_resize_scale,
+        reprob=reprob,
+        auto_augment=auto_augment,
+        motion_shift=motion_shift,
+        crop_size=crop_size,
     )
-    
-    video_loader, val_loader, video_sampler, val_sampler, stats = compile_dataloader(
-        train_cfg, 
-        nclips = nclips,
-        transform = transform,
-        collate_fn = torch.utils.data.default_collate,
-        num_workers  = num_workers,
-        persistance_workers = persistent_workers,
-        pin_memory = pin_mem,
-        world_sz = world_size,
-        rank = rank,
-        normalize_targets = normalize_targets,
+
+    video_loader, val_loader, video_sampler, val_sampler, _ = compile_dataloader(
+        train_cfg,
+        nclips=1,
+        transform=transform,
+        collate_fn=torch.utils.data.default_collate,
+        num_workers=num_workers,
+        persistance_workers=persistent_workers,
+        pin_memory=pin_mem,
+        world_sz=world_size,
+        rank=rank,
+        dataset_type="straightening_probe",
     )
-    
-    
-    inv_softplus = lambda x: np.where(x > 20, x, np.log(np.exp(np.clip(x, 1e-9, 20)) - 1.0))
-    probe_cfg['init_scales'] = [] if probe_cfg['init_scales'] == "auto" else None
-    probe_cfg['init_shifts'] = [] if probe_cfg['init_shifts'] == "auto" else None
-    for task in enabled_tasks:
-        mod_stats = stats[task]
-        if probe_cfg['init_scales'] is not None:
-            probe_cfg['init_scales'] += [float(inv_softplus(mod_stats['std']))]
-        if probe_cfg['init_shifts'] is not None:
-            probe_cfg['init_shifts'] += [mod_stats['mean']]
-    
-    encoder, probe= compile_model(
-        enc_cfg = enc_cfg,
-        probe_cfg = probe_cfg,
-        device = device
+
+    world_model, decoder = compile_model(
+        enc_cfg=enc_cfg,
+        probe_cfg=probe_cfg,
+        world_model_cfg=world_model_cfg,
+        device=device,
     )
 
     if model_cfg.get('compile', False):
-        logger.INFO("Compiling model")
+        logger.INFO("Compiling decoder")
         torch._dynamo.config.optimize_ddp = False
-        encoder.compile()
-        probe.compile()
+        decoder = torch.compile(decoder)
 
     if dist.is_initialized() and world_size > 1:
-        encoder = DDP(encoder, static_graph = True)
-        probe   = DDP(probe, static_graph = False, find_unused_parameters = False)
-    encoder.eval()
-    for p in encoder.parameters():
-        p.requires_grad = False
-    
+        decoder = DDP(decoder, device_ids=[rank], output_device=rank, find_unused_parameters=False)
+
     optim, scaler, lr_scheduler, wd_scheduler = compile_opt(
-        encoder              = encoder,
-        probe                = probe,
-        iterations_per_epoch = ipe,
-        start_lr             = start_lr,
-        warmup               = warmup, 
-        anneal               = anneal,
-        num_epochs           = epochs,
-        wd                   = weight_decay,
-        final_lr             = final_lr,
-        mixed_precision      = mixed_precision,
-        betas                = betas,
-        eps                  = eps,
-        ref_lr               = lr,
-        final_wd             = final_wd
+        encoder=world_model,  # unused for param groups, but kept for interface compat
+        probe=decoder,
+        iterations_per_epoch=ipe,
+        start_lr=start_lr,
+        warmup=warmup,
+        anneal=anneal,
+        num_epochs=epochs,
+        wd=weight_decay,
+        final_lr=final_lr,
+        mixed_precision=mixed_precision,
+        betas=betas,
+        eps=eps,
+        ref_lr=lr,
+        final_wd=final_wd,
     )
 
-
-    n_tasks = len(criterion_core.enabled_tasks) if hasattr(criterion_core, 'enabled_tasks') else 1
-    optim.add_param_group({
-        "params": list(criterion.parameters()),
-        "lr_scale": 0.1,
-        "weight_decay": 0.0,
-    })
-    logger.INFO("Added uncertainty loss parameters to optimizer (lr_scale=0.1)")
-
-    # Initialize gradient optimizer for multi-task learning
-    grad_optim = compile_grad_optimizer(
-        base_optimizer = optim,
-        optimizer_name = grad_optim_name,
-        n_tasks        = n_tasks,
-        device         = device_type,
-        **grad_optim_params
-    )
-
+    # ======================== Run directory ========================
     log_dir = os.path.join(save_root_dir_cfg, "probe")
     logger.INFO(f"Probe save root directory: {log_dir}")
 
@@ -345,18 +238,12 @@ def main(args: dict, *noargs, **nokwargs):
         if not os.path.isdir(continue_run_dir):
             raise FileNotFoundError(f"continue_from_path does not exist: {continue_from_path}")
         continue_run_name = os.path.basename(continue_run_dir)
-        if not continue_run_name.startswith("run"):
-            raise ValueError(
-                f"Expected continue_from_path to point to a run directory like '.../run1', got: {continue_run_dir}"
-            )
 
     if rank == 0:
         if continue_train:
             resolved_run_idx = int(continue_run_name.removeprefix("run"))
-            logger.INFO(f"Resuming requested. Selected run directory: {continue_run_dir}")
         else:
-            next_run_idx = get_next_run(log_dir)
-            resolved_run_idx = next_run_idx
+            resolved_run_idx = get_next_run(log_dir)
         run_idx_tensor = torch.tensor([resolved_run_idx], dtype=torch.long, device=device)
     else:
         run_idx_tensor = torch.tensor([0], dtype=torch.long, device=device)
@@ -374,160 +261,147 @@ def main(args: dict, *noargs, **nokwargs):
         run_dir = continue_run_dir
         run_name = os.path.basename(run_dir)
 
+    # Resume decoder checkpoint
     if continue_train:
         resume_dir = os.path.join(run_dir, "weights")
-        probe, optim, start_epoch, resume_score, resume_meta = load_checkpoint(
-            model=probe,
-            optimizer=optim,
-            checkpoint_dir=resume_dir,
-            checkpoint_name="probe.pt",
-            prefer_best=resume_prefer_best,
-            map_location=device,
-        )
-        restore_resume_state(
-            resume_meta=resume_meta,
-            scaler=scaler,
-            criterion=criterion,
-            lr_scheduler=lr_scheduler,
-            wd_scheduler=wd_scheduler,
-            start_epoch=start_epoch,
-            ipe=ipe,
-            rank=rank,
-            run_idx=run_idx,
-            resume_prefer_best=resume_prefer_best,
-        )
-    
+        ckpt_path = os.path.join(resume_dir, "best_decoder.pt" if resume_prefer_best else "last_decoder.pt")
+        if os.path.exists(ckpt_path):
+            state = torch.load(ckpt_path, map_location=device, weights_only=False)
+            core = decoder.module if hasattr(decoder, 'module') else decoder
+            core.load_state_dict(state)
+            logger.INFO(f"Resumed decoder from {ckpt_path}")
 
-    # Only create logger and run directories for rank 0 to avoid race conditions
+        meta_path = os.path.join(resume_dir, "checkpoint.pt")
+        if os.path.exists(meta_path):
+            meta = torch.load(meta_path, map_location=device, weights_only=False)
+            start_epoch = meta.get("epoch", 0) + 1
+            resume_score = meta.get("score")
+            if meta.get("optimizer_state_dict"):
+                optim.load_state_dict(meta["optimizer_state_dict"])
+            # Advance schedulers
+            for _ in range(start_epoch * ipe):
+                lr_scheduler.step()
+                wd_scheduler.step()
+            logger.INFO(f"Resumed from epoch {start_epoch}, score={resume_score}")
+
+    # ======================== Logger + Early stopping ========================
     if rank == 0:
         log_stats = create_supervised_logger(
-            log_dir = log_dir,
-            epochs = epochs,
-            run_name = run_name,
-            progress_type = progress_type,
-            save_csv = save_csv,
-            save_batch_csv = save_batch_csv,
-            save_epoch_csv = save_epoch_csv,
+            log_dir=log_dir,
+            epochs=epochs,
+            run_name=run_name,
+            progress_type=progress_type,
+            save_csv=save_csv,
+            save_batch_csv=save_batch_csv,
+            save_epoch_csv=save_epoch_csv,
         )
-        probe_save = EarlyStopping(
-            patience = patience,
-            freq = save_freq,
-            min_delta = min_delta,
-            path = os.path.join(run_dir, "weights/probe.pt"),
-            weights_only = True,
+        decoder_save = EarlyStopping(
+            patience=patience,
+            freq=save_freq,
+            min_delta=min_delta,
+            path=os.path.join(run_dir, "weights/decoder.pt"),
+            weights_only=True,
         )
         if resume_score is not None:
-            probe_save.best_loss = resume_score
+            decoder_save.best_loss = resume_score
         if not continue_train:
-            yaml_name = f"{args['app']}-{probe_cfg['name']}-{args['common']['crop_size']}.px.yaml"
+            yaml_name = f"probe-action-{crop_size}px.yaml"
             save_config_pretty(args, os.path.join(run_dir, yaml_name))
     else:
         log_stats = NoOpLogger()
-   
+
     if sync_gc:
         gc.disable()
         gc.collect()
 
+    # ======================== Training Loop ========================
+    n_waypoints = train_cfg.get('n_waypoints', 12)
+    decoder_type = probe_cfg.get('decoder', {}).get('type', 'ActionDecoder')
 
-    def train_step(clips, actions):
+    def train_step(clips, gt):
         _new_lr = lr_scheduler.step()
         _new_wd = wd_scheduler.step()
-        use_multi_task_grad = grad_optim_name.lower() in {"pcgrad", "gradnorm", "famo"}
-        
-        def forward_target(c: torch.Tensor):
+
+        with torch.amp.autocast(device_type, dtype=dtype, enabled=mixed_precision):
+            # Forward frozen world model to get action latents
             with torch.no_grad():
-                h: torch.Tensor = encoder(c)
-                if normalize_rep:
-                    h = F.layer_norm(h, (h.size(-1), ))
-            return h
+                a_latent = world_model(clips)  # [B, T_act, action_embed_dim]
 
-        def forward_prediction(h: torch.Tensor):
-            _a = probe(h)
-            return _a
-
-        def regression(pred: torch.Tensor, target: dict[str, torch.Tensor]):
-            loss, detail = criterion(pred, target)
-            return loss, detail
-
-        with torch.amp.autocast(device_type, dtype = dtype, enabled = mixed_precision):
-            h = forward_target(clips)
-            a = forward_prediction(h)
-            targets = format_targets(a, actions, criterion_core.enabled_tasks)
-            loss, detail = regression(a, targets)
-            task_loss_map = criterion_core.compute_task_losses(a, targets, weighted=True) if use_multi_task_grad else None
-
-        grad_optim.zero_grad()
-
-        if use_multi_task_grad and task_loss_map is not None:
-            task_losses = [task_loss_map[task_name] for task_name in criterion_core.enabled_tasks]
-            if len(task_losses) == 1:
-                task_losses = [loss]
-
-            # For gradient-surgery methods, run native backward so task-specific
-            # hook-captured gradients remain consistent.
-            grad_optim.backward(*task_losses)
-            grad_optim.step()
-        else:
-            if mixed_precision:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optim)
-                scaler.step(optim)
-                scaler.update()
+            # Decode action latents to waypoints
+            if decoder_type == 'EfficientProbe':
+                # EfficientProbe expects [B, N, D] and outputs [B, output_dim]
+                pred_flat = decoder(a_latent)  # [B, n_waypoints*2]
+                pred_wp = pred_flat.view(-1, n_waypoints, 2)
             else:
-                loss.backward()
-                grad_optim.step()
-        
-        loss_details = {
-            "Total Loss": float(detail["total_loss"].item()),
+                pred_wp = decoder(a_latent)  # [B, n_waypoints, 2]
+
+            gt_wp = gt['midlane_wp'].to(device=clips.device, dtype=pred_wp.dtype)
+            gate_score = gt['gate_score'].to(device=clips.device, dtype=pred_wp.dtype)
+
+            loss_dict = criterion(pred_wp, gt_wp, gate_score=gate_score)
+            loss = loss_dict['total'].mean()
+
+        if mixed_precision:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optim)
+            scaler.step(optim)
+            scaler.update()
+        else:
+            loss.backward()
+            optim.step()
+        optim.zero_grad()
+
+        details = {
+            "Total": loss.item(),
+            "Frenet": loss_dict['frenet'].mean().item(),
+            "Heading": loss_dict['heading'].mean().item(),
+            "Smooth": loss_dict['smooth'].mean().item(),
         }
-        for task_name, task_detail in detail["per_task"].items():
-            task_title = task_name.replace("_", " ").title()
-            loss_details[f"{task_title}"] = float(task_detail["base_loss"].item())
-        for task_name, task_detail in detail["per_task"].items():
-            task_title = task_name.replace("_", " ").title()
-            loss_details[f"Weight {task_title}"] = float(task_detail["weighted_loss"].item())
-        
-        return (
-            loss.item(),
-            _new_lr,
-            _new_wd,
-            loss_details,
-        )
+
+        return loss.item(), _new_lr, _new_wd, details
 
     @torch.no_grad()
-    def val_step(clips, actions):
-        with torch.amp.autocast(device_type, dtype = dtype, enabled = mixed_precision):
-            h = encoder(clips)
-            if normalize_rep:
-                h = F.layer_norm(h, (h.size(-1), ))
-            a  = probe(h)
-            targets = format_targets(a, actions, criterion_core.enabled_tasks)
-            loss, detail = criterion(a, targets)
+    def val_step(clips, gt):
+        with torch.amp.autocast(device_type, dtype=dtype, enabled=mixed_precision):
+            a_latent = world_model(clips)
 
-        loss_details = {
-            "Total Loss": float(detail["total_loss"].item()),
+            if decoder_type == 'EfficientProbe':
+                pred_flat = decoder(a_latent)
+                pred_wp = pred_flat.view(-1, n_waypoints, 2)
+            else:
+                pred_wp = decoder(a_latent)
+
+            gt_wp = gt['midlane_wp'].to(device=clips.device, dtype=pred_wp.dtype)
+            gate_score = gt['gate_score'].to(device=clips.device, dtype=pred_wp.dtype)
+
+            loss_dict = criterion(pred_wp, gt_wp, gate_score=gate_score)
+            loss = loss_dict['total'].mean()
+
+        details = {
+            "Total": loss.item(),
+            "Frenet": loss_dict['frenet'].mean().item(),
+            "Heading": loss_dict['heading'].mean().item(),
+            "Smooth": loss_dict['smooth'].mean().item(),
         }
-        for task_name, task_detail in detail["per_task"].items():
-            task_title = task_name.replace("_", " ").title()
-            loss_details[f"{task_title}"] = float(task_detail["base_loss"].item())
+        return loss.item(), details
 
-        return float(loss.item()), loss_details
-    
     loader = iter(video_loader)
     with log_stats:
-        log_stats.start_training("Training Latent Action WM")
+        log_stats.start_training("Training Action Latent Waypoint Probe")
         video_sampler.set_epoch(0)
         last_loss = 0.0
         last_val_loss = 0.0
         curr_lr, curr_wd = 0.0, 0.0
+
         for epoch in range(start_epoch, epochs):
-            
+
             # ==================================== #
             #               TRAINING
             # ==================================== #
-            log_stats.start_epoch(epoch, ipe, desc = "Training")
+            decoder.train()
+            log_stats.start_epoch(epoch, ipe, desc="Training")
             for _ in log_stats.batch_iterator(range(ipe)):
-                
+
                 iter_retries = 0
                 iter_success = False
                 while not iter_success:
@@ -540,87 +414,64 @@ def main(args: dict, *noargs, **nokwargs):
                     except Exception as e:
                         NUM_RETRIES = 5
                         if iter_retries < NUM_RETRIES:
-                            logger.WARNING(f"Encountered an error while iterating loader: {e}")
+                            logger.WARNING(f"Dataloader error: {e}")
                             iter_retries += 1
-                            time.sleep(5)
+                            time.sleep(2)
                         else:
-                            logger.ERROR("Exceeded maximum retries when iterating dataloader. Please check for error", exit_code = 5, full_traceback = e)
-                        
-                def load_clips():
-                    clips = sample[0][0].to(device, non_blocking = True)
-                    actions = [{key: value.to(device, non_blocking=True) for key, value in action_dict.items()} for action_dict in sample[1]]
-                    return clips, actions
-                
-                clips, actions = load_clips()
-                
-                (loss, curr_lr, curr_wd, loss_details), elapsed_time = gpu_timer(partial(train_step, clips, actions[0]))
-                last_loss = loss
+                            logger.ERROR("Exceeded max retries on dataloader", exit_code=5, full_traceback=e)
 
-                if np.isnan(loss) or np.isinf(loss):
-                    logger.ERROR(
-                        f"Model failed to converge. {'nan' if np.isnan(loss) else 'inf'} detected",
-                        exit_code=-213,
-                    )
+                clips, gt = sample
+                clips = clips.to(device)
 
-                batch_metrics = {
-                    "LR": curr_lr,
-                    "WD": curr_wd,
-                    "GPU Timer": elapsed_time,
-                    **loss_details,
-                }
-                log_stats.log_batch(batch_metrics, phase="train", phase_agnostic=["LR", "WD", "GPU Timer", "Weight Lat Err", "Weight Velocity", "Weight Steer"])
-
-            # ==================================== #
-            #               VALUATING
-            # ==================================== #
-            if val_loader is not None and len(val_loader) > 0:
-                probe.eval()
-                val_sampler.set_epoch(epoch)
-                log_stats.start_phase(len(val_loader), desc="Validation")
-
-                for sample in log_stats.batch_iterator(val_loader):
-                    clips = sample[0][0].to(device, non_blocking=True)
-                    actions = [{key: value.to(device, non_blocking=True) for key, value in action_dict.items()} for action_dict in sample[1]]
-
-                    val_loss, val_details = val_step(clips, actions[0])
-                    last_val_loss = val_loss
-
-                    val_metrics = {
-                        **val_details,
-                    }
-                    log_stats.log_batch(val_metrics, phase="val")
-
-                probe.train()
-
-            log_stats.log_epoch()
-
-            gc.collect()
-
-            if rank == 0:
-                metric_loss = log_stats.get_metric("Total Loss", "val")
-                if metric_loss is None:
-                    metric_loss = log_stats.get_metric("Total Loss", "train")
-                if metric_loss is None:
-                    metric_loss = last_val_loss if last_val_loss > 0 else last_loss
-                probe_save(
-                    metric_loss,
-                    probe,
-                    epoch=epoch,
-                    optimizer=optim,
-                    scaler=scaler,
-                    loss=last_loss,
-                    lr=curr_lr,
-                    criterion=_unwrap_module(criterion).state_dict()
+                (last_loss, curr_lr, curr_wd, details), elapsed = gpu_timer(
+                    partial(train_step, clips, gt)
                 )
 
-            should_stop = False
+                if np.isnan(last_loss) or np.isinf(last_loss):
+                    logger.ERROR(f"Diverged: {'nan' if np.isnan(last_loss) else 'inf'}", exit_code=-213)
+
+                log_stats.log_batch({
+                    "LR": curr_lr,
+                    "WD": curr_wd,
+                    **details,
+                })
+
+            # ==================================== #
+            #              VALIDATION
+            # ==================================== #
+            decoder.eval()
+            val_losses = []
+            val_details_accum = {}
+            for val_batch in val_loader:
+                val_clips, val_gt = val_batch
+                val_clips = val_clips.to(device)
+                v_loss, v_details = val_step(val_clips, val_gt)
+                val_losses.append(v_loss)
+                for k, v in v_details.items():
+                    val_details_accum.setdefault(k, []).append(v)
+
+            last_val_loss = np.mean(val_losses) if val_losses else 0.0
+            val_metrics = {f"Val {k}": np.mean(v) for k, v in val_details_accum.items()}
+
+            log_stats.end_epoch({
+                "Train Loss": last_loss,
+                "Val Loss": last_val_loss,
+                **val_metrics,
+            })
+
+            # ==================================== #
+            #            CHECKPOINTING
+            # ==================================== #
             if rank == 0:
-                should_stop = bool(probe_save.early_stop)
+                core_decoder = decoder.module if hasattr(decoder, 'module') else decoder
+                decoder_save(
+                    last_val_loss,
+                    core_decoder,
+                    epoch=epoch,
+                    optimizer=optim.state_dict(),
+                    scaler=scaler.state_dict() if scaler is not None else None,
+                )
 
-            if dist.is_initialized() and world_size > 1:
-                stop_tensor = torch.tensor([int(should_stop)], device=device)
-                dist.broadcast(stop_tensor, src=0)
-                should_stop = bool(stop_tensor.item())
-
-            if should_stop:
-                break
+            if sync_gc:
+                gc.collect()
+    #             break

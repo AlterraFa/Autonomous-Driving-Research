@@ -1,0 +1,112 @@
+app: probe
+
+common:
+  patch_size: 16
+  tubelet_size: 2
+  crop_size: 256
+  fpcs: 12
+
+train:
+  dataset_type: straightening_probe
+  patch_size: 16
+  tubelet_size: 2
+  crop_size: 256
+  fpcs: 12
+  batch_size: 16
+  waypoint_key: midlane_wp
+  n_waypoints: 12
+  datasets_path:
+    - ./../Autonomous_Dataset/carla/LAWM/recording_20251025_142727_best_spatial/
+    - ./../Autonomous_Dataset/carla/LAWM/recording_20260204_010805_spatial/
+    - ./../Autonomous_Dataset/carla/LAWM/recording_20260308_212005_spatial/
+    - ./../Autonomous_Dataset/carla/LAWM/recording_20260317_214033_best_spatial/
+    - ./../Autonomous_Dataset/carla/LAWM/recording_20260317_233603_spatial/
+    - ./../Autonomous_Dataset/carla/LAWM/recording_20260318_083409_best_spatial/
+    - ./../Autonomous_Dataset/carla/LAWM/recording_20260323_200940_best_spatial/
+    - ./../Autonomous_Dataset/carla/LAWM/recording_20260329_233141_best_spatial/
+    - ./../Autonomous_Dataset/carla/LAWM/recording_20260323_204100_best_spatial/
+    - ./../Autonomous_Dataset/carla/LAWM/recording_20260323_210357_best_spatial/
+    - ./../Autonomous_Dataset/carla/LAWM/recording_20260329_164940_best_spatial/
+    - ./../Autonomous_Dataset/carla/LAWM/recording_20260410_152712_best_spatial/
+    - ./../Autonomous_Dataset/carla/LAWM/recording_20260410_154404_best_spatial/
+    - ./../Autonomous_Dataset/carla/LAWM/recording_20260410_160255_best_spatial/
+
+loader_setup:
+  num_workers: 8
+  persistent_workers: true
+  pin_mem: true
+
+data_aug:
+  auto_augment: false
+  horizontal_flip: false
+  motion_shift: false
+  random_resize_aspect_ratio:
+    - 0.75
+    - 1.35
+  random_resize_scale:
+    - 1.777
+    - 1.777
+  reprob: 0.0
+
+model:
+  compile: false
+  # enc + world_model architecture is auto-loaded from the run config below.
+  # Only override keys you want to change (e.g. crop_size for a different res).
+  enc: {}
+  world_model:
+    checkpoint_dir: ./Experiment/straightening/run10
+    prefer_best: true
+  probe:
+    decoder:
+      type: ActionDecoder
+      n_waypoints: 12
+      d_model: 256
+      n_heads: 8
+      n_layers: 4
+      dim_feedforward: 512
+      mlp_hidden: 128
+      dropout: 0.1
+
+optimization:
+  anneal: 30
+  epochs: 80
+  warmup: 5
+  final_lr: 0.0
+  final_weight_decay: 0.01
+  ipe: 100
+  lr: 5.0e-4
+  start_lr: 1.0e-5
+  weight_decay: 0.01
+  betas:
+    - 0.9
+    - 0.999
+  eps: 1.0e-8
+
+loss:
+  alpha_lane: 20.0
+  beta_lane: 1.0
+  alpha_inter: 10.0
+  beta_inter: 3.0
+  lambda_heading: 0.5
+  lambda_endpoint: 0.0
+  lambda_smooth: 0.3
+  tau_start: 0.3
+  tau_end: 1.0
+  sl1_beta: 0.5
+
+checkpoint:
+  patience: 80
+  min_delta: 0.0
+
+logging:
+  progress_type: table
+  save_csv: true
+  save_batch_csv: false
+  save_epoch_csv: true
+
+meta:
+  save_root_dir: ./Experiment
+  dtype: bfloat16
+  save_every_freq: 5
+  seed: 239
+  sync_gc: true

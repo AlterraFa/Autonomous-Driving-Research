@@ -1,6 +1,3 @@
-import math
-from typing import Any
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,285 +7,169 @@ from utils.logger import Logger
 logger = Logger(__name__)
 
 
-class UncertaintyWeightedProbeLoss(nn.Module):
-	"""
-	Multi-task regression loss with homoscedastic uncertainty weighting.
+class FDATLoss(nn.Module):
+    """Frenet-Decomposed Anisotropic Trajectory Loss.
 
-	Default task-to-loss mapping:
-	- velocity      -> Log-Cosh
-	- steer         -> MAE
-	- lateral_error -> MAE
+    Decomposes waypoint prediction error into along-track (tangential) and
+    cross-track (normal) components in the Frenet frame of the GT trajectory,
+    then applies anisotropic penalties conditioned on scene context (gate).
 
-	Objective per enabled task i:
-		exp(-s_i) * L_i + s_i
-	where s_i is a learnable log-variance parameter.
-	"""
+    Inputs are expected in a space with isotropic axes — here, normalized pixel
+    coordinates (u, v) ∈ [-1, 1] from camera projection. Using metric (x, y)
+    with non-uniform normalization would distort the Frenet tangent.
 
-	DEFAULT_TASK_ORDER = ("velocity", "steer", "lat_err")
-	DEFAULT_TASK_INDEX = {
-		"velocity": 0,
-		"steer": 1,
-		"lat_err": 2,
-	}
-	SUPPORTED_LOSSES = {"log_cosh", "mae", "mse", "smooth_l1"}
+    Key properties:
+        - Cross-track error penalized much more than along-track (lane adherence)
+        - Gate-conditioned dual mode: lane-following vs. intersection
+        - Heading consistency via cosine similarity of direction vectors
+        - Bathtub positional weighting: start + end waypoints weighted more
+        - Endpoint anchor loss for intersection mode
+        - Built-in smoothness regularizer (jerk penalty)
+    """
 
-	def __init__(
-		self,
-		enabled: dict[str, bool] | None = None,
-		task_to_loss: dict[str, str] | None = None,
-		task_to_index: dict[str, int] | None = None,
-		initial_log_vars: dict[str, float] | None = None,
-		reduction: str = "mean",
-	):
-		super().__init__()
+    def __init__(
+        self,
+        alpha_lane: float = 20.0,
+        beta_lane: float = 1.0,
+        alpha_inter: float = 10.0,
+        beta_inter: float = 3.0,
+        lambda_heading: float = 2.0,
+        lambda_endpoint: float = 5.0,
+        lambda_smooth: float = 0.05,
+        tau_start: float = 2.0,
+        tau_end: float = 4.0,
+        sl1_beta: float = 0.02,
+    ):
+        super().__init__()
+        self.alpha_lane = alpha_lane
+        self.beta_lane = beta_lane
+        self.alpha_inter = alpha_inter
+        self.beta_inter = beta_inter
+        self.lambda_heading = lambda_heading
+        self.lambda_endpoint = lambda_endpoint
+        self.lambda_smooth = lambda_smooth
+        self.tau_start = tau_start
+        self.tau_end = tau_end
+        self.sl1_beta = sl1_beta
 
-		if reduction not in {"mean", "sum"}:
-			raise ValueError(f"Unsupported reduction '{reduction}'. Use 'mean' or 'sum'.")
+    def _frenet_decompose(self, pred, gt):
+        """Project error vectors into the Frenet frame of the GT curve.
 
-		enabled = enabled or {
-			"velocity": True,
-			"steer": True,
-			"lat_err": True,
-		}
+        Returns:
+            e_s: along-track error  [B, T]
+            e_d: cross-track error  [B, T]
+        """
+        T_vec = torch.zeros_like(gt)
+        T_vec[:, 1:-1] = gt[:, 2:] - gt[:, :-2]
+        T_vec[:, 0] = gt[:, 1] - gt[:, 0]
+        T_vec[:, -1] = gt[:, -1] - gt[:, -2]
+        T_vec = T_vec / (T_vec.norm(dim=-1, keepdim=True) + 1e-6)
 
-		task_to_loss = task_to_loss or {
-			"velocity": "log_cosh",
-			"steer": "mae",
-			"lat_err": "mae",
-		}
+        N_vec = torch.stack([-T_vec[..., 1], T_vec[..., 0]], dim=-1)
 
-		task_to_index = task_to_index or dict(self.DEFAULT_TASK_INDEX)
-		initial_log_vars = initial_log_vars or {}
+        e = pred - gt
+        e_s = (e * T_vec).sum(dim=-1)
+        e_d = (e * N_vec).sum(dim=-1)
+        return e_s, e_d
 
-		self.reduction = reduction
-		self.task_to_index = dict(task_to_index)
-		self.task_to_loss = dict(task_to_loss)
+    def _positional_weights(self, T, device):
+        return self.get_bathtub_weights(T, self.tau_start, self.tau_end, device)
 
-		self.enabled_tasks = [
-			task for task in self.DEFAULT_TASK_ORDER if bool(enabled.get(task, False))
-		]
-		if len(self.enabled_tasks) == 0:
-			raise ValueError("At least one task must be enabled for UncertaintyWeightedProbeLoss.")
+    @staticmethod
+    def get_bathtub_weights(T: int, tau_start: float, tau_end: float, device) -> torch.Tensor:
+        """Bathtub weight curve over T waypoints.
 
-		for task in self.enabled_tasks:
-			loss_name = self.task_to_loss.get(task)
-			if loss_name not in self.SUPPORTED_LOSSES:
-				raise ValueError(
-					f"Unsupported loss '{loss_name}' for task '{task}'. "
-					f"Supported: {sorted(self.SUPPORTED_LOSSES)}"
-				)
+        Weight(i) = 1 + exp(-i/tau_start) + exp(-(T-1-i)/tau_end)
 
-		self.log_vars = nn.ParameterDict(
-			{
-				task: nn.Parameter(
-					torch.tensor(float(initial_log_vars.get(task, 0.0)), dtype=torch.float32)
-				)
-				for task in self.enabled_tasks
-			}
-		)
+        High at both ends (start = immediate action, end = goal), low in the middle.
+        """
+        i = torch.arange(T, device=device, dtype=torch.float32)
+        w = 1.0 + torch.exp(-i / max(tau_start, 1e-6)) + torch.exp(-(T - 1 - i) / max(tau_end, 1e-6))
+        return w
 
-		logger.INFO("Enabled uncertainty-weighted tasks:", self.enabled_tasks)
-		logger.INFO("Task losses:", {task: self.task_to_loss[task] for task in self.enabled_tasks})
+    def _heading_loss(self, pred, gt):
+        """Cosine-based heading error. Returns per-sample scalar [B]."""
+        d_pred = pred[:, 1:] - pred[:, :-1]
+        d_gt = gt[:, 1:] - gt[:, :-1]
+        cos_sim = F.cosine_similarity(d_pred, d_gt, dim=-1)
+        return (1.0 - cos_sim).mean(dim=-1)
 
-	@staticmethod
-	def _log_cosh(residual: torch.Tensor) -> torch.Tensor:
-		# numerically stable log(cosh(x))
-		return residual + F.softplus(-2.0 * residual) - math.log(2.0)
+    @staticmethod
+    def _smoothness_loss(pred):
+        """Second-order finite-difference penalty (jerk)."""
+        diff = pred[:, 1:] - pred[:, :-1]
+        return (diff[:, 1:] - diff[:, :-1]).pow(2).mean(dim=(1, 2))
 
-	def _base_loss(self, task: str, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-		loss_name = self.task_to_loss[task]
-		if loss_name == "log_cosh":
-			value = self._log_cosh(pred - target)
-		elif loss_name == "mae":
-			value = torch.abs(pred - target)
-		elif loss_name == "mse":
-			value = (pred - target) ** 2
-		elif loss_name == "smooth_l1":
-			value = F.smooth_l1_loss(pred, target, reduction="none")
-		else:
-			raise RuntimeError(f"Unexpected loss type '{loss_name}'")
+    def forward(self, pred_wp, gt_wp, gate_score=None):
+        """Compute FDAT loss.
 
-		if self.reduction == "mean":
-			return value.mean()
-		return value.sum()
+        Args:
+            pred_wp: predicted waypoints  [B, T, 2]
+            gt_wp: ground-truth waypoints [B, T, 2]
+            gate_score: CommandGate output [B, 1, 1] or [B] (optional)
 
-	def _get_task_tensor(
-		self,
-		tensor_or_map: torch.Tensor | dict[str, torch.Tensor],
-		task: str,
-	) -> torch.Tensor:
-		if isinstance(tensor_or_map, dict):
-			if task not in tensor_or_map:
-				raise KeyError(f"Missing key '{task}' in mapping input.")
-			return tensor_or_map[task]
+        Returns:
+            Dict of per-sample components (each [B]):
+                frenet, heading, smooth, total
+        """
+        B, T, _ = pred_wp.shape
 
-		idx = self.task_to_index.get(task)
-		if idx is None:
-			raise KeyError(f"Missing index mapping for task '{task}'.")
-		return tensor_or_map[..., idx]
+        e_s, e_d = self._frenet_decompose(pred_wp, gt_wp)
+        w = self._positional_weights(T, pred_wp.device)
 
-	def compute_task_losses(
-		self,
-		prediction: torch.Tensor | dict[str, torch.Tensor],
-		target: torch.Tensor | dict[str, torch.Tensor],
-		weighted: bool = True,
-	) -> dict[str, torch.Tensor]:
-		"""
-		Return differentiable per-task losses.
+        sl1_d = F.smooth_l1_loss(
+            e_d, torch.zeros_like(e_d), reduction="none", beta=self.sl1_beta,
+        )
+        sl1_s = F.smooth_l1_loss(
+            e_s, torch.zeros_like(e_s), reduction="none", beta=self.sl1_beta,
+        )
 
-		If `weighted` is True, returns exp(-s_i) * L_i + s_i for each task.
-		If `weighted` is False, returns base task losses L_i.
-		"""
-		losses: dict[str, torch.Tensor] = {}
-		for task in self.enabled_tasks:
-			pred_t = self._get_task_tensor(prediction, task)
-			tgt_t = self._get_task_tensor(target, task)
-			base = self._base_loss(task, pred_t, tgt_t)
+        l_lane = ((self.alpha_lane * sl1_d + self.beta_lane * sl1_s) * w).mean(dim=-1)
 
-			if weighted:
-				log_var = torch.clamp(self.log_vars[task], min=-2.0, max=2.0)
-				losses[task] = torch.exp(-log_var) * base + log_var
-			else:
-				losses[task] = base
+        l_inter = ((self.alpha_inter * sl1_d + self.beta_inter * sl1_s) * w).mean(dim=-1)
+        l_endpoint = (pred_wp[:, -1] - gt_wp[:, -1]).pow(2).sum(dim=-1)
+        l_inter = l_inter + self.lambda_endpoint * l_endpoint
 
-		return losses
+        if gate_score is not None:
+            g = gate_score.detach().view(B)
+        else:
+            g = torch.zeros(B, device=pred_wp.device)
 
-	def forward(
-		self,
-		prediction: torch.Tensor | dict[str, torch.Tensor],
-		target: torch.Tensor | dict[str, torch.Tensor],
-	) -> tuple[torch.Tensor, dict[str, Any]]:
-		total = torch.zeros((), device=next(self.parameters()).device)
-		details: dict[str, Any] = {
-			"enabled_tasks": list(self.enabled_tasks),
-			"per_task": {},
-		}
+        l_frenet = (1.0 - g) * l_lane + g * l_inter
+        l_heading = self._heading_loss(pred_wp, gt_wp)
+        l_smooth = self._smoothness_loss(pred_wp)
 
-		for task in self.enabled_tasks:
-			pred_t = self._get_task_tensor(prediction, task)
-			tgt_t = self._get_task_tensor(target, task)
-
-			base = self._base_loss(task, pred_t, tgt_t)
-			log_var = self.log_vars[task]
-			log_var = torch.clamp(log_var, min=-5.0, max=5.0) 
-			weighted = torch.exp(-log_var) * base + log_var
-
-			total = total + weighted
-			details["per_task"][task] = {
-				"loss_type": self.task_to_loss[task],
-				"base_loss": base.detach(),
-				"weighted_loss": weighted.detach(),
-				"log_var": log_var.detach(),
-				"weight": torch.exp(-log_var.detach()),
-			}
-
-		details["total_loss"] = total.detach()
-		return total, details
+        total = l_frenet + self.lambda_heading * l_heading + self.lambda_smooth * l_smooth
+        return {
+            "frenet":  l_frenet,
+            "heading": l_heading,
+            "smooth":  l_smooth,
+            "total":   total,
+        }
 
 
-def compile_loss(loss_cfg: dict | None = None, device: torch.device | None = None) -> UncertaintyWeightedProbeLoss:
-	loss_cfg = loss_cfg or {}
 
-	enabled = {
-		"velocity": bool(loss_cfg.get("enable_velocity", True)),
-		"steer": bool(loss_cfg.get("enable_steer", True)),
-		"lat_err": bool(loss_cfg.get("enable_lateral_error", True)),
-	}
+def compile_fdat_loss(loss_cfg: dict | None = None, device: torch.device | None = None) -> FDATLoss:
+    loss_cfg = loss_cfg or {}
 
-	task_to_loss = {
-		"velocity": loss_cfg.get("velocity_loss", "log_cosh"),
-		"steer": loss_cfg.get("steer_loss", "mae"),
-		"lat_err": loss_cfg.get("lateral_error_loss", "mae"),
-	}
-
-	task_to_index = {
-		"velocity": int(loss_cfg.get("velocity_idx", 0)),
-		"steer": int(loss_cfg.get("steer_idx", 1)),
-		"lat_err": int(loss_cfg.get("lateral_error_idx", 2)),
-	}
-
-	initial_log_vars = {
-		"velocity": float(loss_cfg.get("velocity_log_var", 0.0)),
-		"steer": float(loss_cfg.get("steer_log_var", 0.0)),
-		"lat_err": float(loss_cfg.get("lateral_error_log_var", 0.0)),
-	}
-
-	criterion = UncertaintyWeightedProbeLoss(
-		enabled=enabled,
-		task_to_loss=task_to_loss,
-		task_to_index=task_to_index,
-		initial_log_vars=initial_log_vars,
-		reduction=loss_cfg.get("reduction", "mean"),
-	)
-
-	if device is not None:
-		criterion = criterion.to(device)
-
-	return criterion
-
-
-def _resolve_action_key(action_map: dict, task_name: str) -> str:
-    aliases = {
-        "velocity": ["velocity", "vel", "speed"],
-        "steer": ["steer", "steering", "steering_angle"],
-        "lat_err": ["lateral_error", "lat_err", "cte", "cross_track_error", "lateral"],
-    }
-    for key in aliases.get(task_name, [task_name]):
-        if key in action_map:
-            return key
-    raise KeyError(
-        f"Could not map task '{task_name}' to action keys. "
-        f"Available keys: {sorted(action_map.keys())}"
+    criterion = FDATLoss(
+        alpha_lane=float(loss_cfg.get("alpha_lane", 20.0)),
+        beta_lane=float(loss_cfg.get("beta_lane", 1.0)),
+        alpha_inter=float(loss_cfg.get("alpha_inter", 10.0)),
+        beta_inter=float(loss_cfg.get("beta_inter", 3.0)),
+        lambda_heading=float(loss_cfg.get("lambda_heading", 2.0)),
+        lambda_endpoint=float(loss_cfg.get("lambda_endpoint", 5.0)),
+        lambda_smooth=float(loss_cfg.get("lambda_smooth", 0.05)),
+        tau_start=float(loss_cfg.get("tau_start", 2.0)),
+        tau_end=float(loss_cfg.get("tau_end", 4.0)),
+        sl1_beta=float(loss_cfg.get("sl1_beta", 0.02)),
     )
 
-def _norm_target_shape(target: torch.Tensor, batch_size: int) -> torch.Tensor:
-    if target.ndim == 0:
-        target = target.view(1, 1).expand(batch_size, 1)
-    elif target.ndim == 1:
-        target = target.unsqueeze(0)
-    elif target.ndim >= 3:
-        if target.shape[0] == 1 and target.shape[1] == batch_size:
-            target = target[0]
-        else:
-            target = target.reshape(batch_size, -1)
+    if device is not None:
+        criterion = criterion.to(device)
 
-    if target.ndim == 2 and target.shape[0] != batch_size and target.shape[1] == batch_size:
-        target = target.transpose(0, 1)
-
-    if target.ndim != 2:
-        target = target.reshape(batch_size, -1)
-
-    return target
-
-def format_targets(pred: torch.Tensor, action_input, enabled_tasks):
-    action_map = action_input
-    if isinstance(action_input, list):
-        if len(action_input) == 0:
-            raise ValueError("Received empty action list")
-        if isinstance(action_input[0], dict):
-            action_map = action_input[0]
-        else:
-            raise TypeError(f"Unsupported action list element type: {type(action_input[0])}")
-
-    if not isinstance(action_map, dict):
-        raise TypeError(f"Unsupported action container type: {type(action_map)}")
-
-    B, T_pred, _ = pred.shape
-    target_map = {}
-
-    for task_name in enabled_tasks:
-        action_key = _resolve_action_key(action_map, task_name)
-        raw_target = action_map[action_key].to(device=pred.device, dtype=pred.dtype)
-        target = _norm_target_shape(raw_target, B)
-
-        if target.shape[1] != T_pred:
-            target = F.interpolate(
-                target.unsqueeze(1),
-                size=T_pred,
-                mode="linear",
-                align_corners=False,
-            ).squeeze(1)
-
-        target_map[task_name] = target
+    logger.INFO("Compiled FDATLoss with config:")
+    logger.INFO({k: v for k, v in loss_cfg.items()})
+    return criterion
 
     return target_map

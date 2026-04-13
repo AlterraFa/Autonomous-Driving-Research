@@ -1,7 +1,6 @@
 import torch
-from utils.schedulers import WSDSchedule, CosineWDSchedule
+from utils.schedulers import CosineWSDSchedule, CosineWDSchedule
 from utils.logger import Logger
-from utils.grad_optim import create_gradient_optimizer
 
 logger = Logger(__name__)
 
@@ -36,7 +35,7 @@ def compile_opt(
     ]
     
     optimizer = torch.optim.AdamW(param_groups, betas=betas, eps=eps)
-    scheduler = WSDSchedule(
+    scheduler = CosineWSDSchedule(
         optimizer,
         warmup_steps=int(warmup * iterations_per_epoch),
         anneal_steps=int(anneal * iterations_per_epoch),
@@ -61,7 +60,7 @@ def compile_opt(
             "eps": eps,
         },
         "lr_scheduler": {
-            "type": "WSDSchedule",
+            "type": "CosineWSDSchedule",
             "warmup_steps": int(warmup * iterations_per_epoch),
             "anneal_steps": int(anneal * iterations_per_epoch),
             "start_lr": start_lr,
@@ -77,37 +76,3 @@ def compile_opt(
         },
     })
     return optimizer, scaler, scheduler, wd_scheduler
-
-
-def compile_grad_optimizer(
-    base_optimizer,
-    optimizer_name="normal",
-    n_tasks=None,
-    device="cuda",
-    **kwargs
-):
-    """
-    Create a gradient optimizer for multi-task learning.
-    
-    Args:
-        base_optimizer: PyTorch optimizer instance
-        optimizer_name: Type of gradient optimizer ('normal', 'pcgrad', 'gradnorm', 'famo')
-        n_tasks: Number of tasks (required for GradNorm and FAMO)
-        device: Device to use ('cuda', 'cpu', etc.)
-        **kwargs: Additional optimizer-specific parameters
-                 - For GradNorm: alpha, w_lr
-                 - For FAMO: gamma, w_lr, max_norm
-    
-    Returns:
-        Initialized GradientOptim instance
-    """
-    grad_optim = create_gradient_optimizer(
-        optimizer_name=optimizer_name,
-        base_optimizer=base_optimizer,
-        n_tasks=n_tasks,
-        device=device,
-        **kwargs
-    )
-    
-    logger.INFO(f"Gradient optimizer initialized: {optimizer_name.upper()}")
-    return grad_optim
