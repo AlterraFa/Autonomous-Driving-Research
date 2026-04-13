@@ -16,3 +16,7 @@ store/**
 **/Autonomous_Dataset/**
 log/*
 uv.lock
+*.jpg
+*.png
+*.jpeg
+*.bmp
