@@ -1,8 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -156,7 +151,6 @@ class ACRoPEAttention(nn.Module):
         self.head_dim = head_dim = dim // num_heads
         self.scale = qk_scale or head_dim**-0.5
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.qkv_a = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop_prob = proj_drop
@@ -204,41 +198,38 @@ class ACRoPEAttention(nn.Module):
             mask = torch.arange(int(T * H * W), device=x.device)
             d_mask, h_mask, w_mask = self.separate_positions(mask, H, W)
 
-        H_patches = self.grid_size if H is None else H
-        W_patches = self.grid_size if W is None else W
-        tokens_pframe = H_patches * W_patches
-
         # -- snap spatial positions to grid size
-        h_mask *= self.grid_size / H_patches
-        w_mask *= self.grid_size / W_patches
+        h_mask *= self.grid_size / H
+        w_mask *= self.grid_size / W
 
         # -- Rotating action differently depth wise
         # -- split out action tokens from sequence
         if action_tokens > 0:
-            out = x.view(B, -1, tokens_pframe + action_tokens, C)  # [B, T, H*W+A, D]
-            
-            acts = out[:, :, tokens_pframe: ]
-            
-            aqkv = self.qkv_a(acts).unflatten(-1, (3, self.num_heads, -1)).permute(3, 0, 4, 1, 2, 5) # B, T, A, 3, H, D -> 3, B, H, A, T, sub_D
-            aq, ak, av = aqkv[0], aqkv[1], aqkv[2]
-            action_d_pos = torch.arange(T, device = x.device).repeat_interleave(action_tokens)
+            x = x.view(B, -1, action_tokens + H * W, C)  # [B, T, A+H*W, D]
 
-            aq = aq.flatten(2, 3)
-            ak = ak.flatten(2, 3)
-            
-            aq_d = rotate_queries_or_keys(aq[..., :self.d_dim], pos = action_d_pos)
-            ak_d = rotate_queries_or_keys(ak[..., :self.d_dim], pos = action_d_pos)
-            
-            action_q = torch.cat([aq_d, aq[..., self.d_dim: ]], dim = 3)
-            action_k = torch.cat([ak_d, ak[..., self.d_dim: ]], dim = 3)
-            action_v = av.flatten(2, 3)
-            out = out[:, :, :-action_tokens, :].flatten(1, 2)
-            
-            
-            
+            action_q, action_k, action_v = [], [], []
+            for i in range(action_tokens):
+                a = x[:, :, i : i + 1, :].flatten(1, 2)
+                # Note action tokens do not work with masking
+                # -- compute qkv for action tokens and rotate
+                qkv = self.qkv(a).unflatten(-1, (3, self.num_heads, -1)).permute(2, 0, 3, 1, 4)
+                q, k, v = qkv[0], qkv[1], qkv[2]  # [B, num_heads, N, D]
+                # --
+                qd = rotate_queries_or_keys(q[..., : self.d_dim], pos=torch.arange(T, device=x.device))
+                kd = rotate_queries_or_keys(k[..., : self.d_dim], pos=torch.arange(T, device=x.device))
+                qr = q[..., self.d_dim :]
+                kr = k[..., self.d_dim :]
+                action_q += [torch.cat([qd, qr], dim=-1).view(B, self.num_heads, T, 1, -1)]
+                action_k += [torch.cat([kd, kr], dim=-1).view(B, self.num_heads, T, 1, -1)]
+                action_v += [v.view(B, self.num_heads, T, 1, -1)]
+
+            action_q = torch.cat(action_q, dim=3).flatten(2, 3)
+            action_k = torch.cat(action_k, dim=3).flatten(2, 3)
+            action_v = torch.cat(action_v, dim=3).flatten(2, 3)
+            x = x[:, :, action_tokens:, :].flatten(1, 2)
 
         # -- compute qkv for frame tokens and rotate
-        qkv = self.qkv(out).unflatten(-1, (3, self.num_heads, -1)).permute(2, 0, 3, 1, 4)
+        qkv = self.qkv(x).unflatten(-1, (3, self.num_heads, -1)).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]  # [B, num_heads, N, D]
 
         s = 0
@@ -267,33 +258,32 @@ class ACRoPEAttention(nn.Module):
 
         if action_tokens > 0:
 
-            def merge_(f_tensor, a_tensor):
+            def merge_(tx, ta):
                 """tx, tx in [B, num_heads, N, D]"""
-                f_view = f_tensor.view(B, self.num_heads, T, tokens_pframe, -1)  # [B, T, H*W, D]
-                a_view = a_tensor.view(B, self.num_heads, T, action_tokens, -1)  # [B, T, A, D]
-                return torch.cat([f_view, a_view], dim=3).flatten(2, 3)
+                tx = tx.view(B, self.num_heads, T, H * W, -1)  # [B, T, H*W, D]
+                ta = ta.view(B, self.num_heads, T, action_tokens, -1)  # [B, T, A, D]
+                return torch.cat([ta, tx], dim=3).flatten(2, 3)
 
             q = merge_(q, action_q)
             k = merge_(k, action_k)
             v = merge_(v, action_v)
 
-        if self.use_sdpa:
-            causal = False if attn_mask is not None else self.is_causal
+        if attn_mask is not None or self.use_sdpa:
             with sdpa_kernel(_USABLE_BACKENDS, set_priority = True):
-                out = F.scaled_dot_product_attention(
-                    q, k, v, dropout_p=self.proj_drop_prob, is_causal=causal, attn_mask=attn_mask
+                x = F.scaled_dot_product_attention(
+                    q, k, v, dropout_p=self.proj_drop_prob, is_causal=self.is_causal, attn_mask=attn_mask
                 )
                 attn = None
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale  # [B, num_heads, D, D]
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
-            out = attn @ v
+            x = attn @ v
 
-        out = out.transpose(1, 2).reshape(B, N, C)
-        out = self.proj(out)
-        out = self.proj_drop(out)
-        return out
+        x = x.transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
 
 
 class RoPEAttention(nn.Module):
@@ -417,7 +407,7 @@ class RoPEAttention(nn.Module):
 
         if attn_mask is not None or self.use_sdpa:
             with sdpa_kernel(_USABLE_BACKENDS, set_priority = True):
-                out: torch.Tensor = F.scaled_dot_product_attention(
+                x = F.scaled_dot_product_attention(
                     q, k, v, dropout_p=self.proj_drop_prob, is_causal=self.is_causal, attn_mask=attn_mask
                 )
                 attn = None
@@ -425,12 +415,12 @@ class RoPEAttention(nn.Module):
             attn = (q @ k.transpose(-2, -1)) * self.scale  # [B, num_heads, D, D]
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
-            out = attn @ v
+            x = attn @ v
 
-        out = out.transpose(1, 2).reshape(B, N, C)
-        out = self.proj(out)
-        out = self.proj_drop(out)
-        return out
+        x = x.transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
 
 class GCRoPEAttention(nn.Module):
     def __init__(
@@ -450,7 +440,6 @@ class GCRoPEAttention(nn.Module):
         self.head_dim = head_dim = dim // num_heads
         self.scale = qk_scale or head_dim**-0.5
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.qkv_a = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop_prob = proj_drop
@@ -558,20 +547,23 @@ class GCRoPEAttention(nn.Module):
             k = torch.cat([kd, kh, kw], dim=-1)
 
         if apstep > 0:
-            aqkv = self.qkv_a(action).unflatten(-1, (3, self.num_heads, -1)).permute(3, 0, 4, 1, 2, 5) # B, T, A, 3, H, sub_D -> 3, B, H, A, T, sub_D
-            aq, ak, av = aqkv[0], aqkv[1], aqkv[2]
-            
-            aq = aq.flatten(2, 3)
-            ak = ak.flatten(2, 3)
-            
-            action_d_pos = torch.arange(ctx_steps, device = x.device).repeat_interleave(apstep)
-            
-            aq_d = rotate_queries_or_keys(aq[..., :self.d_dim], pos = action_d_pos)
-            ak_d = rotate_queries_or_keys(ak[..., :self.d_dim], pos = action_d_pos)
-
-            aq_final = torch.cat([aq_d, aq[..., self.d_dim: ]], dim = 3)
-            ak_final = torch.cat([ak_d, ak[..., self.d_dim: ]], dim = 3)
-            av_final = av.flatten(2, 3)
+            action_q, action_k, action_v = [], [], []
+            for idx in range(apstep):
+                a_i = action[:, :, idx]
+                
+                qkv_i = self.qkv(a_i).unflatten(-1, (3, self.num_heads, -1)).permute(2, 0, 3, 1, 4)
+                q_i , k_i, v_i= qkv_i[0], qkv_i[1], qkv_i[2]
+                
+                q_i = rotate_queries_or_keys(q_i, pos=torch.arange(ctx_steps, device=x.device))
+                k_i = rotate_queries_or_keys(k_i, pos=torch.arange(ctx_steps, device=x.device))
+                
+                action_q += [q_i.reshape(B, self.num_heads, ctx_steps, 1, -1)]
+                action_k += [k_i.reshape(B, self.num_heads, ctx_steps, 1, -1)]
+                action_v += [v_i.reshape(B, self.num_heads, ctx_steps, 1, -1)]
+                
+            action_q = torch.cat(action_q, dim = 3).flatten(2, 3)
+            action_k = torch.cat(action_k, dim = 3).flatten(2, 3)
+            action_v = torch.cat(action_v, dim = 3).flatten(2, 3)
 
             def merge_(l, a):
                 ctx, goal = l[:, :, :ctx_steps * tokens_pstep], l[:, :, ctx_steps * tokens_pstep:]
@@ -579,11 +571,10 @@ class GCRoPEAttention(nn.Module):
                 a = a.view(B, self.num_heads, ctx_steps, apstep, -1)
                 ctx_a = torch.cat([ctx, a], dim = 3).view(B, self.num_heads, ctx_steps * (tokens_pstep + apstep), -1)
                 return torch.cat([ctx_a, goal], dim = 2)
-            
-            q = merge_(q, aq_final)
-            k = merge_(k, ak_final)
-            v = merge_(v, av_final)
-
+                
+            q = merge_(q, action_q)
+            k = merge_(k, action_k)
+            v = merge_(v, action_v)
             
         
         if self.use_sdpa:
