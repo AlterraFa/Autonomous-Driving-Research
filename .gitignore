@@ -21,3 +21,6 @@ uv.lock
 *.jpeg
 *.bmp
 dist
+*.npy
+*.pt
+*.npz
