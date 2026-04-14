@@ -11,12 +11,15 @@ def compile_dataloader(
     transform,
     collate_fn, 
     num_workers,
-    persistance_workers,
-    pin_memory,
-    world_sz,
-    rank,
+    persistance_workers=None,
+    pin_memory=False,
+    world_sz=1,
+    rank=0,
     **kwargs
 ):
+    if persistance_workers is None:
+        persistance_workers = kwargs.get('persistent_workers', False)
+
     dataset = StraighteningProbeDataset(
         data_paths=train_cfg['datasets_path'],
         shared_transform=transform,

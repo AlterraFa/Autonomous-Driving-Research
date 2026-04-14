@@ -233,7 +233,7 @@ def main(args: dict, path: str):
         motion_shift=motion_shift,
         crop_size=crop_size,    
     )
-    train_loader, val_loader, train_sampler, val_sampler  = compile_dataloader(
+    train_loader, val_loader, train_sampler, val_sampler, _  = compile_dataloader(
         train_cfg=train_cfg,
         nclips=nclips,
         collate_fn=torch.utils.data.default_collate,

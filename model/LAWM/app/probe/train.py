@@ -386,6 +386,7 @@ def main(args: dict, *noargs, **nokwargs):
         return loss.item(), details
 
     loader = iter(video_loader)
+    ipe = len(video_loader)
     with log_stats:
         log_stats.start_training("Training Action Latent Waypoint Probe")
         video_sampler.set_epoch(0)
