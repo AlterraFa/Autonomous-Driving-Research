@@ -19,7 +19,8 @@ from src.math.path import (
     TurnClassify, 
     WaypointsAlign
 )
-from src.math.coordinate_transform import global_2_local, global_2_local_rot, global_2_local_full_rot, rpy2ypr
+from config.enum import CameraView
+from src.math.coordinate_transform import global_2_local_rot, global_2_local_full_rot, rpy2ypr, camera_extrinsic, camera_intrinsic, ego_to_pixel
 from config import CONFIG
 
 quality = CONFIG.picture.quality
@@ -218,7 +219,10 @@ from src.messages.all_messages import (
     LocalWPSpatial,
     GlobalWPTemporal,
     LocalWPTemporal,
-    Rotation
+    PixelWPSpatial, 
+    PixelWPTemporal,
+    Rotation,
+    CameraDimension
 )
 class ReplayHandler:
 
@@ -267,37 +271,35 @@ class ReplayHandler:
         self.sub_polylines        = MessageSubscriber(PolylinesCmd)
         self.sub_server_runtime   = MessageSubscriber(ServerRuntime)
         self.sub_steer_angle      = MessageSubscriber(SteerAngle)
+        self.sub_cam_dim          = MessageSubscriber(CameraDimension)
+        
 
         self.send_turn_signal         = MessageSender(TurnSignal)
         self.send_global_wp_spatial   = MessageSender(GlobalWPSpatial)
         self.send_local_wp_spatial    = MessageSender(LocalWPSpatial)
         self.send_global_wp_temporal  = MessageSender(GlobalWPTemporal)
         self.send_local_wp_temporal   = MessageSender(LocalWPTemporal)
-        
+        self.send_pixel_wp_temporal   = MessageSender(PixelWPTemporal)
+        self.send_pixel_wp_spatial    = MessageSender(PixelWPSpatial)
 
-    def step(self, authorized_saving = False, **frame: np.ndarray):
+    def _ego_state(self):
         vehicle_location = self.sub_location.receive()
         vehicle_rotation = self.sub_rotation.receive()
-
-        # Convert yaw from degrees to radians for math functions
         heading = np.radians(self.sub_heading.receive())
 
-        # Build front anchor in 3D using full roll/pitch/yaw.
         # Vehicle-forward is local +X in CARLA/Unreal coordinates.
         r_ego = rpy2ypr(vehicle_rotation)
         front_vec = r_ego.apply(np.array([front_offset, 0.0, 0.0]))
         position = vehicle_location + front_vec
+        return vehicle_location, vehicle_rotation, heading, position
 
-        
-        
-        
+    def _waypoint_state(self, vehicle_location, vehicle_rotation, position):
         curr_dist, *_, lat_err = self.path_handler.project(position)
         proj_data = (curr_dist, lat_err)
         global_scout, _ = self.path_handler.waypoints(
-            position, self.scout_points, precomputed_s_side = proj_data
+            position, self.scout_points, precomputed_s_side=proj_data
         )
-        
-        # -- Query and transform to local
+
         global_loc_spatial, global_rot_spatial = self.path_handler.waypoints(
             position, self.spatial_offset, use_time=False, merge=True, precomputed_s_side=proj_data
         )
@@ -310,87 +312,183 @@ class ReplayHandler:
         local_loc_temporal = global_2_local_full_rot(vehicle_location, global_loc_temporal, vehicle_rotation)
         local_rot_temporal = global_2_local_rot(global_rot_temporal, vehicle_rotation)
 
-        path_branches  = self.branching_path.brancher(global_loc_spatial, global_scout, persist_dist = 20)
-        ego_branches = np.empty_like(path_branches)[..., :2]
-        if path_branches.shape[0] > 1:
-            self.road_type = "multi"
-        else:
-            self.road_type = "uni"
-        # for idx, branch in enumerate(path_branches):
-        #     ego_branches[idx] = global_2_local_full_rot(position, branch, vehicle_rotation)[:, :2]
-                
-                
-        if self.debug:
-            server_fps = self.sub_server_fps.receive()
-            if server_fps < 1: server_fps = self.sub_client_fps.receive()    
-            wp = global_loc_temporal if self.temporal else global_loc_spatial
-            wp[:, -1] += .5
-            self.virt_world.draw_waypoints(wp, 2.0 * (1 / server_fps), size = .1, color = (255, 0, 0))
+        return (
+            lat_err,
+            global_scout,
+            global_loc_spatial,
+            global_rot_spatial,
+            global_loc_temporal,
+            global_rot_temporal,
+            local_loc_spatial,
+            local_rot_spatial,
+            local_loc_temporal,
+            local_rot_temporal,
+        )
 
-        if self.turn_classify:
-            is_at_junction , junction = self.virt_world.get_waypoint_junction(global_scout[14])
-            switch_junction, other_junction = self.virt_world.get_waypoint_junction(global_scout[19])
-            if is_at_junction and switch_junction:
-                junction = other_junction
-            not_exit_junction, _ = self.virt_world.get_waypoint_junction(global_scout[11])
-            is_exit_junction = not not_exit_junction
-            turn_signal = self.turn_classifier.turning_type(is_at_junction, junction, is_exit_junction, global_scout, debug = self.debug)
-        else:
-            turn_signal = -1
+    def _update_road_type(self, global_loc_spatial, global_scout):
+        path_branches = self.branching_path.brancher(global_loc_spatial, global_scout, persist_dist=20)
+        self.road_type = "multi" if path_branches.shape[0] > 1 else "uni"
 
+    def _project_pixels(self, local_wp, frame):
+        view_metadata = self.sub_cam_dim.receive() or {}
+        w = int(view_metadata.get("width", 0))
+        h = int(view_metadata.get("height", 0))
+        if (w <= 0 or h <= 0) and len(frame) > 0:
+            first_frame = next(iter(frame.values()))
+            h, w = first_frame.shape[:2]
+
+        if w <= 0 or h <= 0:
+            return np.full((len(local_wp), 2), np.nan, dtype=np.float64)
+
+        fov_deg = float(view_metadata.get("fov_deg", view_metadata.get("fov", 90.0)))
+        cam_tf = {
+            "x": float(view_metadata.get("x", CameraView.FIRST_PERSON.value["x"])),
+            "y": float(view_metadata.get("y", CameraView.FIRST_PERSON.value["y"])),
+            "z": float(view_metadata.get("z", CameraView.FIRST_PERSON.value["z"])),
+            "roll": float(view_metadata.get("roll", CameraView.FIRST_PERSON.value["roll"])),
+            "pitch": float(view_metadata.get("pitch", CameraView.FIRST_PERSON.value["pitch"])),
+            "yaw": float(view_metadata.get("yaw", CameraView.FIRST_PERSON.value["yaw"])),
+        }
+
+        K = camera_intrinsic(w, h, fov_deg)
+        E = camera_extrinsic(cam_tf)
+        return ego_to_pixel(local_wp, K, E, w, h, clip=False)
+
+    def _debug_draw_waypoints(self, global_loc_spatial, global_loc_temporal):
+        if not self.debug:
+            return
+
+        server_fps = self.sub_server_fps.receive()
+        if server_fps < 1:
+            server_fps = self.sub_client_fps.receive()
+        wp = global_loc_temporal if self.temporal else global_loc_spatial
+        wp[:, -1] += 0.5
+        self.virt_world.draw_waypoints(wp, 2.0 * (1 / server_fps), size=0.1, color=(255, 0, 0))
+
+    def _turn_signal(self, global_scout):
+        if not self.turn_classify:
+            return -1
+
+        is_at_junction, junction = self.virt_world.get_waypoint_junction(global_scout[14])
+        switch_junction, other_junction = self.virt_world.get_waypoint_junction(global_scout[19])
+        if is_at_junction and switch_junction:
+            junction = other_junction
+        not_exit_junction, _ = self.virt_world.get_waypoint_junction(global_scout[11])
+        is_exit_junction = not not_exit_junction
+        return self.turn_classifier.turning_type(
+            is_at_junction, junction, is_exit_junction, global_scout, debug=self.debug
+        )
+
+    def _publish_waypoints(self, local_loc_spatial, local_rot_spatial, global_loc_spatial, global_rot_spatial,
+                           local_loc_temporal, local_rot_temporal, global_loc_temporal, global_rot_temporal, uv_spatial, uv_temporal,
+                           turn_signal):
         local_wp_spatial = np.concatenate([local_loc_spatial, local_rot_spatial], axis=1)
         global_wp_spatial = np.concatenate([global_loc_spatial, global_rot_spatial], axis=1)
         local_wp_temporal = np.concatenate([local_loc_temporal, local_rot_temporal], axis=1)
         global_wp_temporal = np.concatenate([global_loc_temporal, global_rot_temporal], axis=1)
 
-        # New split topics
         self.send_local_wp_spatial.send(local_wp_spatial)
         self.send_global_wp_spatial.send(global_wp_spatial)
         self.send_local_wp_temporal.send(local_wp_temporal)
         self.send_global_wp_temporal.send(global_wp_temporal)
+        self.send_pixel_wp_spatial.send(uv_spatial)
+        self.send_pixel_wp_temporal.send(uv_temporal)
         self.send_turn_signal.send(turn_signal)
 
-        self.logger.DEBUG(f"Lat Err: {lat_err:.3f}m", frequency = 0.5)
+    def _maybe_save(self, authorized_saving, frame, local_loc_spatial, local_loc_temporal,
+                    lat_err, uv_spatial, uv_temporal, turn_signal, vehicle_location, heading):
+        if not (self.data_collector and authorized_saving):
+            return False
 
-        # Only save when it moves (Prevent saving all the time when stopping at red light or stop sign)
-        if self.data_collector and authorized_saving:
-            steer    = self.sub_steer_logging.receive()
-            throttle = self.sub_throttle_logging.receive()
-            brake    = self.sub_brake_logging.receive()
-            velocity = self.sub_velocity.receive()
-            steer_angle = self.sub_steer_angle.receive()
-            # if self.addition_cnt < self.additional_max:
-            #     if saved:
-            #         if curr_dist - self.prev_dist < 1e-2:
-            #             self.addition_cnt += 1
-            # if curr_dist - self.prev_dist > 1e-2:
-            #     self.addition_cnt = 0
+        steer = self.sub_steer_logging.receive()
+        throttle = self.sub_throttle_logging.receive()
+        brake = self.sub_brake_logging.receive()
+        velocity = self.sub_velocity.receive()
+        steer_angle = self.sub_steer_angle.receive()
 
-            saved = self.data_collector.maybe_save(
-                {
-                    "gt_data": {
-                        "midlane_wp" : local_loc_spatial[:, :2],
-                        "midlane_wp_temporal": local_loc_temporal[:, :2],
-                        "steer"      : steer,
-                        "steer_angle": steer_angle,
-                        "throttle"   : throttle,
-                        "brake"      : brake,
-                        "velocity"   : velocity,
-                        "lat_err"    : lat_err
-                    },
-                    "command": {
-                        "turn_signal": turn_signal,
-                        "polycmd"    : self.sub_polylines.receive(), 
-                    },
-                    "condition": {
-                        "GPS"        : vehicle_location,
-                        "heading"    : heading,
-                        "road_type"  : self.road_type,
-                    }, 
-                    "timestamp"  : self.sub_server_runtime.receive() - self.start_time
+        return self.data_collector.maybe_save(
+            {
+                "gt_data": {
+                    "midlane_wp": local_loc_spatial[:, :2],
+                    "midlane_wp_temporal": local_loc_temporal[:, :2],
+                    'pixel_wp': uv_spatial,
+                    'pixel_wp_temporal': uv_temporal,
+                    "steer": steer,
+                    "steer_angle": steer_angle,
+                    "throttle": throttle,
+                    "brake": brake,
+                    "velocity": velocity,
+                    "lat_err": lat_err,
                 },
-                **frame
-            )
-            # self.prev_dist = curr_dist
-            return saved
-        return False
+                "command": {
+                    "turn_signal": turn_signal,
+                    "polycmd": self.sub_polylines.receive(),
+                },
+                "condition": {
+                    "GPS": vehicle_location,
+                    "heading": heading,
+                    "road_type": self.road_type,
+                },
+                "timestamp": self.sub_server_runtime.receive() - self.start_time,
+            },
+            **frame,
+        )
+        
+
+    def step(self, authorized_saving = False, **frame: np.ndarray):
+        vehicle_location, vehicle_rotation, heading, position = self._ego_state()
+
+        (
+            lat_err,
+            global_scout,
+            global_loc_spatial,
+            global_rot_spatial,
+            global_loc_temporal,
+            global_rot_temporal,
+            local_loc_spatial,
+            local_rot_spatial,
+            local_loc_temporal,
+            local_rot_temporal,
+        ) = self._waypoint_state(vehicle_location, vehicle_rotation, position)
+
+        self._update_road_type(global_loc_spatial, global_scout)
+
+        uv_spatial  = self._project_pixels(local_loc_spatial, frame)
+        uv_temporal = self._project_pixels(local_loc_temporal, frame)
+        if self.debug:
+            valid_uv = np.isfinite(uv_spatial).all(axis=1).sum()
+            self.logger.DEBUG(f"Projected spatial pixels valid: {valid_uv}/{len(uv_spatial)}", frequency=0.5)
+            valid_uv = np.isfinite(uv_temporal).all(axis=1).sum()
+            self.logger.DEBUG(f"Projected temporal pixels valid: {valid_uv}/{len(uv_temporal)}", frequency=0.5)
+
+        self._debug_draw_waypoints(global_loc_spatial, global_loc_temporal)
+
+        turn_signal = self._turn_signal(global_scout)
+
+        self._publish_waypoints(
+            local_loc_spatial,
+            local_rot_spatial,
+            global_loc_spatial,
+            global_rot_spatial,
+            local_loc_temporal,
+            local_rot_temporal,
+            global_loc_temporal,
+            global_rot_temporal,
+            uv_spatial,
+            uv_temporal,
+            turn_signal,
+        )
+
+        self.logger.DEBUG(f"Lat Err: {lat_err:.3f}m", frequency = 0.5)
+        return self._maybe_save(
+            authorized_saving,
+            frame,
+            local_loc_spatial,
+            local_loc_temporal,
+            lat_err,
+            uv_spatial,
+            uv_temporal,
+            turn_signal,
+            vehicle_location,
+            heading,
+        )

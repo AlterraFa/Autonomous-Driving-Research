@@ -1,6 +1,5 @@
 import os
 import cv2
-import carla
 import numpy as np
 from config import CONFIG
 

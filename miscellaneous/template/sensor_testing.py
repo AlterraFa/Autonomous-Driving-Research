@@ -25,7 +25,6 @@ from rich import print
 tm_port = 8000
 
 client = carla.Client("localhost", 2000)
-client.load_world("Town10HD")
 world  = client.get_world()
 tm     = client.get_trafficmanager(tm_port) 
 
@@ -44,7 +43,7 @@ if __name__ == "__main__":
     world.apply_settings(settings)
     tm.set_synchronous_mode(sync)
     
-    spawner = Spawn(world, tm)
+    spawner = Spawn(world)
 
     # spawn vehicle 
     spawner.spawn_mass_vehicle(10, autopilot = True, exclude = [VClass.Bikes, VClass.Trucks, VClass.Large])
@@ -94,32 +93,32 @@ if __name__ == "__main__":
         while True:
             frame_id = world.tick()
             # semantic_image = semantic_sensor.extract_data()
-            # rgb_image      = rgb_sensor.extract_data()
+            rgb_image      = rgb_sensor.extract_data()
             # geo_location   = gsss_sensor.extract_data(return_ecf = True, return_enu = True)
             # imu_data       = imu_sensor.extract_data()
             # depth_data     = depth_sensor.extract_data()
             # lidar_data     = lidar_sensor.extract_data()
             # lidar_sensor.visualize
             
-            # cv2.imshow("Sensor stack", rgb_image)
+            cv2.imshow("Sensor stack", rgb_image)
             
-            # key = cv2.waitKey(1)
-            # if key == ord("w"):
-            #     throttle += 1
-            # if key == ord('s'):
-            #     throttle -= 1
-            # if abs(throttle) > max_throttle: throttle = max_throttle * (throttle / abs(throttle))
-            # if key == ord("a"):
-            #     steer += 1
-            # if key == ord('d'):
-            #     steer -= 1
-            # if abs(steer) > max_steer: steer = max_steer * (steer / abs(steer))
-            # vehicle.apply_control(carla.VehicleControl(throttle = throttle, steer = steer))
+            key = cv2.waitKey(1)
+            if key == ord("w"):
+                throttle += 1
+            if key == ord('s'):
+                throttle -= 1
+            if abs(throttle) > max_throttle: throttle = max_throttle * (throttle / abs(throttle))
+            if key == ord("a"):
+                steer += 1
+            if key == ord('d'):
+                steer -= 1
+            if abs(steer) > max_steer: steer = max_steer * (steer / abs(steer))
+            vehicle.apply_control(carla.VehicleControl(throttle = throttle, steer = steer))
             
             
-            # if key == ord('q'):
-            #     cv2.destroyAllWindows()
-            #     break
+            if key == ord('q'):
+                cv2.destroyAllWindows()
+                break
                 
             
     except KeyboardInterrupt:

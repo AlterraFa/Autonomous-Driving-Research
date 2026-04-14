@@ -7,6 +7,7 @@ import pygame
 import numpy as np
 import time
 import carla
+import cv2
 
 
 from src.control import (
@@ -37,9 +38,9 @@ from src.messages import (
     ThrottleLog, SteerLog, BrakeLog, ReverseLog, HandbrakeLog, ManualLog, GearLog, AutopilotLog,
     RegulateSpeedLog,
     SteerAngle, 
-    ClearNPCs,
     Location, Rotation, 
-    LocalWPTemporal, LocalWPSpatial
+    LocalWPTemporal, LocalWPSpatial,
+    PixelWPTemporal, PixelWPSpatial
 )
 from src.messages.logger import Logger
 from config import CONFIG
@@ -172,6 +173,8 @@ class Viewer(ABC):
         self.sub_polylines      = MessageSubscriber(PolylinesCmd)
         self.sub_local_spatial  = MessageSubscriber(LocalWPSpatial)
         self.sub_local_temporal = MessageSubscriber(LocalWPTemporal)
+        self.sub_pixel_spatial  = MessageSubscriber(PixelWPSpatial)
+        self.sub_pixel_temporal = MessageSubscriber(PixelWPTemporal)
 
     def attach_plugins(self, **plugins):
         for name, value in plugins.items():
@@ -495,6 +498,79 @@ class Viewer(ABC):
             self.hud.draw_measurement()
             self.hud.draw_controls()
             self.hud.draw_logging()
+
+    @staticmethod
+    def _clip_line_to_frame(p0, p1, w, h):
+        """Clip a segment to image bounds using Liang-Barsky."""
+        x0, y0 = float(p0[0]), float(p0[1])
+        x1, y1 = float(p1[0]), float(p1[1])
+        dx = x1 - x0
+        dy = y1 - y0
+        p = (-dx, dx, -dy, dy)
+        q = (x0, (w - 1) - x0, y0, (h - 1) - y0)
+        u1, u2 = 0.0, 1.0
+
+        for pk, qk in zip(p, q):
+            if pk == 0:
+                if qk < 0:
+                    return None
+                continue
+            r = qk / pk
+            if pk < 0:
+                if r > u2:
+                    return None
+                u1 = max(u1, r)
+            else:
+                if r < u1:
+                    return None
+                u2 = min(u2, r)
+
+        c0 = (int(round(x0 + u1 * dx)), int(round(y0 + u1 * dy)))
+        c1 = (int(round(x0 + u2 * dx)), int(round(y0 + u2 * dy)))
+        return c0, c1
+
+    def _draw_pixel_waypoints(self, frame, pixel_wp,
+                              line_color=(0, 255, 0, 255),
+                              edge_color=(0, 200, 255, 255),
+                              thickness=2):
+        """Draw projected waypoints and keep off-screen segments visible via frame-edge clipping."""
+        if frame is None or pixel_wp is None:
+            return frame
+
+        # Sensor buffers can be read-only; OpenCV drawing requires writable memory.
+        if not frame.flags.writeable:
+            frame = frame.copy()
+
+        pts = np.asarray(pixel_wp, dtype=np.float64)
+        if pts.ndim != 2 or pts.shape[1] < 2 or len(pts) < 1:
+            return frame
+
+        h, w = frame.shape[:2]
+        xy = pts[:, :2]
+        valid = np.isfinite(xy).all(axis=1)
+
+        # Draw polyline segments with robust frame clipping.
+        for i in range(len(xy) - 1):
+            if not (valid[i] and valid[i + 1]):
+                continue
+            seg = self._clip_line_to_frame(xy[i], xy[i + 1], w, h)
+            if seg is None:
+                continue
+            cv2.line(frame, seg[0], seg[1], line_color, thickness, cv2.LINE_AA)
+
+        # Draw point markers; clamp off-screen points to nearest edge.
+        for i in range(len(xy)):
+            if not valid[i]:
+                continue
+            x, y = xy[i]
+            in_frame = (0 <= x < w) and (0 <= y < h)
+            cx = int(round(x if in_frame else np.clip(x, 0, w - 1)))
+            cy = int(round(y if in_frame else np.clip(y, 0, h - 1)))
+            color = line_color if in_frame else edge_color
+            radius = 3 if in_frame else 4
+            cv2.circle(frame, (cx, cy), radius, color, -1, cv2.LINE_AA)
+
+        return frame
     
     def _render_multi_camera(self, multi_images_list):
         """Render multi-camera display if available"""
@@ -587,7 +663,7 @@ class ManualViewer(Viewer):
             r_ego = rpy2ypr(vehicle_rotation)
             front_vec = r_ego.apply(np.array([CONFIG.offsets.front_offset, 0.0, 0.0]))
             front_location = vehicle_location + front_vec
-            self.world.debug.draw_point(carla.Location(*front_location), 0.5, life_time = 2.0 * (1 / self.server_fps))
+            self.virt_world.draw_single_waypoint(front_location, duration = 2.0 * (1 / self.server_fps), size = 0.5)
             self.traj_logger.update(front_location, vehicle_rotation)
 
 
@@ -630,9 +706,10 @@ class ReplayViewer(Viewer):
                 self._handle_trajectory_logging()
                 
 
-
                 # Render (replay mode)
                 self._handle_replay_step()
+                pixel_wp = self.sub_pixel_temporal.receive()
+                frame = self._draw_pixel_waypoints(frame, pixel_wp)
                 self._render_base_hud(frame)
                 self._render_multi_camera(multi_images_list)
                 self.render_map(routed_map)

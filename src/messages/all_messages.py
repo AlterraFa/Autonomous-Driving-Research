@@ -145,6 +145,19 @@ class LocalWPSpatial(Enum):
     msgType = (list, np.ndarray, torch.Tensor)
     default = staticmethod(lambda: np.zeros((6, 6), dtype=float))
 
+class PixelWPSpatial(Enum):
+    Queue = "General"
+    Owner = "ReplayHandler"
+    msgID = 60
+    msgType = (list, np.ndarray, torch.Tensor)
+    default = staticmethod(lambda: np.zeros((6, 6), dtype=float))
+    
+class PixelWPTemporal(Enum):
+    Queue = "General"
+    Owner = "ReplayHandler"
+    msgID = 61
+    msgType = (list, np.ndarray, torch.Tensor)
+    default = staticmethod(lambda: np.zeros((6, 6), dtype=float))
 
 class GlobalWPTemporal(Enum):
     Queue = "General"
@@ -348,3 +361,12 @@ class RegulateSpeedLog(Enum):
     msgID = 58
     msgType = (bool,)
     default = False
+
+#################################### Misc ####################################
+
+class CameraDimension(Enum):
+    Queue = "General"
+    Owner = "Global"
+    msgID = 59
+    msgType = (dict,)
+    default = {"width": 0, "height": 0}

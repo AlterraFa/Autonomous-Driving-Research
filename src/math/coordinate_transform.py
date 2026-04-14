@@ -113,3 +113,149 @@ def global_2_local_rot(global_rpy_deg, vehicle_rpy_deg):
     # Normalize degrees to [-180, 180] to prevent 360-degree jumps
     diff = np.asarray(global_rpy_deg) - np.asarray(vehicle_rpy_deg)
     return (diff + 180) % 360 - 180
+
+
+# ── Camera projection ──────────────────────────────────────────────────────────
+
+def camera_intrinsic(width: int, height: int, fov_deg: float = 90.0) -> np.ndarray:
+    """
+    Build a 3×3 pinhole intrinsic matrix K from CARLA camera attributes.
+
+    Parameters
+    ----------
+    width, height : int
+        Image resolution — matches sensor.set_attribute('image_size_x/y', ...).
+    fov_deg : float
+        Horizontal field of view in degrees — matches sensor.set_attribute('fov', ...).
+        CARLA default is 90.0.
+
+    Returns
+    -------
+    K : np.ndarray, shape (3, 3)
+    """
+    f  = width / (2.0 * np.tan(np.radians(fov_deg) / 2.0))
+    cx = width  / 2.0
+    cy = height / 2.0
+    return np.array([
+        [f,   0.,  cx],
+        [0.,  f,   cy],
+        [0.,  0.,   1.],
+    ], dtype=np.float64)
+
+
+def camera_extrinsic(cam_transform: dict) -> np.ndarray:
+    """
+    Build a 4×4 extrinsic matrix that maps points from the vehicle ego local
+    frame to the CARLA camera local frame (UE axes: X=fwd, Y=right, Z=up).
+
+    Parameters
+    ----------
+    cam_transform : dict
+        Camera pose relative to the vehicle, with keys:
+        'x', 'y', 'z' (metres) and 'roll', 'pitch', 'yaw' (degrees).
+        Matches the CameraView enum format used across the codebase, e.g.:
+            CameraView.FIRST_PERSON.value  ->  {x:0, y:0, z:2, roll:0, pitch:0, yaw:0}
+
+    Returns
+    -------
+    E : np.ndarray, shape (4, 4)
+        Transforms homogeneous ego-frame points into camera UE-frame points.
+    """
+    x     = cam_transform.get("x",     0.0)
+    y     = cam_transform.get("y",     0.0)
+    z     = cam_transform.get("z",     0.0)
+    roll  = cam_transform.get("roll",  0.0)
+    pitch = cam_transform.get("pitch", 0.0)
+    yaw   = cam_transform.get("yaw",   0.0)
+
+    # Rotation of the camera expressed in ego frame (ZYX = yaw → pitch → roll)
+    r_cam_in_ego = R.from_euler('ZYX', [yaw, pitch, roll], degrees=True)
+    # Inverse rotation: ego frame → camera frame
+    R_mat = r_cam_in_ego.inv().as_matrix()           # (3, 3)
+    t_cam = np.array([x, y, z], dtype=np.float64)
+
+    E = np.eye(4, dtype=np.float64)
+    E[:3, :3] = R_mat
+    E[:3,  3] = -R_mat @ t_cam                       # translation in camera frame
+    return E
+
+
+# Remaps CARLA/UE axes (X=fwd, Y=right, Z=up) to standard CV axes (X=right, Y=down, Z=fwd).
+# Applied before intrinsic projection so the standard formula u = f*X/Z + cx works correctly.
+_UE_TO_CV = np.array([
+    [0.,  1.,  0.],
+    [0.,  0., -1.],
+    [1.,  0.,  0.],
+], dtype=np.float64)
+
+
+def ego_to_pixel(
+    points_ego: np.ndarray,
+    K: np.ndarray,
+    E: np.ndarray,
+    width: int,
+    height: int,
+    clip: bool = True,
+) -> np.ndarray:
+    """
+    Project ego-frame 3-D waypoints to image pixel coordinates.
+
+    Waypoints are expected in vehicle body frame as produced by
+    ``global_2_local_full_rot`` (X=fwd, Y=right, Z=up). If only XY is
+    available (as stored in the dataset), Z=0 is assumed.
+
+    Parameters
+    ----------
+    points_ego : np.ndarray, shape (N, 3) or (N, 2)
+        Points in vehicle ego local frame.
+    K : np.ndarray, shape (3, 3)
+        Intrinsic matrix from ``camera_intrinsic()``.
+    E : np.ndarray, shape (4, 4)
+        Extrinsic matrix from ``camera_extrinsic()``.
+    width, height : int
+        Image resolution used for optional boundary clipping.
+    clip : bool
+        When True, pixels that fall outside the image boundary are returned as
+        np.nan rows.  Points behind the camera are always np.nan regardless.
+
+    Returns
+    -------
+    pixels : np.ndarray, shape (N, 2), dtype float64
+        [u, v] pairs — (column, row) in pixel space.
+        Rows with np.nan mark invalid projections.
+
+    Example
+    -------
+    >>> K = camera_intrinsic(1280, 720, fov_deg=90)
+    >>> E = camera_extrinsic(CameraView.FIRST_PERSON.value)
+    >>> uv = ego_to_pixel(local_loc_spatial, K, E, 1280, 720)
+    """
+    pts = np.atleast_2d(np.asarray(points_ego, dtype=np.float64))
+    if pts.shape[1] == 2:
+        pts = np.hstack([pts, np.zeros((len(pts), 1))])
+
+    # Homogeneous ego coords → camera UE frame
+    ones     = np.ones((len(pts), 1), dtype=np.float64)
+    p_cam_ue = (E @ np.hstack([pts[:, :3], ones]).T).T[:, :3]   # (N, 3)
+
+    # UE axes → standard CV axes (X=right, Y=down, Z=fwd)
+    p_cv = p_cam_ue @ _UE_TO_CV.T                               # (N, 3)
+
+    # Only points with positive depth are in front of the camera
+    valid    = p_cv[:, 2] > 0.0
+    pixels   = np.full((len(pts), 2), np.nan, dtype=np.float64)
+
+    if valid.any():
+        p_v  = p_cv[valid]
+        uv   = (K @ (p_v / p_v[:, 2:3]).T).T[:, :2]            # (M, 2)
+
+        if clip:
+            in_bounds          = (
+                (uv[:, 0] >= 0) & (uv[:, 0] < width) &
+                (uv[:, 1] >= 0) & (uv[:, 1] < height)
+            )
+            uv[~in_bounds]     = np.nan
+
+        pixels[valid] = uv
+
+    return pixels

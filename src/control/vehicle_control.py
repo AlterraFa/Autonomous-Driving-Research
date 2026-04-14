@@ -6,7 +6,6 @@ parent = os.path.dirname(folder)
 import carla
 import numpy as np
 
-from traceback import print_exc
 from scipy.signal import butter, lfilter, lfilter_zi
 from src.messages.message_handler import MessageSubscriber, MessageSender
 from src.messages.all_messages import (
