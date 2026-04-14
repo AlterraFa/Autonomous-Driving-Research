@@ -389,7 +389,8 @@ def main(args: dict, *noargs, **nokwargs):
     ipe = len(video_loader)
     with log_stats:
         log_stats.start_training("Training Action Latent Waypoint Probe")
-        video_sampler.set_epoch(0)
+        if hasattr(video_sampler, 'set_epoch'):
+            video_sampler.set_epoch(0)
         last_loss = 0.0
         last_val_loss = 0.0
         curr_lr, curr_wd = 0.0, 0.0
@@ -411,7 +412,8 @@ def main(args: dict, *noargs, **nokwargs):
                         iter_success = True
                     except StopIteration:
                         loader = iter(video_loader)
-                        video_sampler.set_epoch(epoch)
+                        if hasattr(video_sampler, 'set_epoch'):
+                            video_sampler.set_epoch(epoch)
                     except Exception as e:
                         NUM_RETRIES = 5
                         if iter_retries < NUM_RETRIES:

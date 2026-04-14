@@ -248,10 +248,12 @@ def main(args: dict, path: str):
 
     eval_loader = val_loader if val_loader is not None and len(val_loader) > 0 else train_loader
     if eval_loader is val_loader:
-        val_sampler.set_epoch(0)
+        if hasattr(val_sampler, 'set_epoch'):
+            val_sampler.set_epoch(0)
         logger.INFO("Using validation loader for loss evaluation")
     else:
-        train_sampler.set_epoch(0)
+        if hasattr(train_sampler, 'set_epoch'):
+            train_sampler.set_epoch(0)
         logger.WARNING("Validation loader unavailable, using training loader for loss evaluation")
 
     loader = iter(eval_loader)
