@@ -614,6 +614,8 @@ class StraighteningProbeDataset(Dataset):
         individual_transform=None,
         waypoint_key="midlane_wp",
         n_waypoints=12,
+        wp_clip=None,
+        wp_normalize=False,
     ):
         super().__init__()
         self.data_paths = data_paths
@@ -621,6 +623,10 @@ class StraighteningProbeDataset(Dataset):
         self.shared_transform = shared_transform
         self.waypoint_key = waypoint_key
         self.n_waypoints = n_waypoints
+        # wp_clip: [x_max, y_abs_max] in meters — hard-clips outliers before loss.
+        # wp_normalize: if True, divides by wp_clip after clipping → [-1, 1] range.
+        self.wp_clip = np.array(wp_clip, dtype=np.float32) if wp_clip is not None else None
+        self.wp_normalize = wp_normalize
 
         self._load_samples()
 
@@ -652,13 +658,20 @@ class StraighteningProbeDataset(Dataset):
         return None
 
     def _load_sample(self, index):
+        import warnings
         sample_path = self.samples[index]
         abs_path = self.data_paths[self.mapping[index]]
 
         data = np.load(sample_path, allow_pickle=True).item()
 
         # Decode images
+        if 'img_file' not in data:
+            warnings.warn(f"Missing 'img_file' key in sample {sample_path}. Skipping.")
+            return None
         img_dict = data['img_file']
+        if not img_dict:
+            warnings.warn(f"Empty 'img_file' dict in sample {sample_path}. Skipping.")
+            return None
         image_paths = [os.path.join(abs_path, value) for value in img_dict.values()]
         buffer = decode_batch(image_paths)
 
@@ -668,23 +681,70 @@ class StraighteningProbeDataset(Dataset):
             buffer = self.shared_transform(buffer)
 
         # Extract GT waypoints
+        if 'metadata' not in data:
+            warnings.warn(f"Missing 'metadata' key in sample {sample_path}. Using empty defaults.")
         metadata = data.get('metadata', {})
+
+        if 'gt_data' not in metadata:
+            warnings.warn(f"Missing 'gt_data' in metadata for sample {sample_path}. Waypoints will be zero.")
         gt_data = metadata.get('gt_data', {})
+
+        if 'condition' not in metadata:
+            warnings.warn(f"Missing 'condition' in metadata for sample {sample_path}. Defaulting road_type='uni'.")
         condition = metadata.get('condition', {})
 
+        if self.waypoint_key not in gt_data:
+            warnings.warn(
+                f"Waypoint key '{self.waypoint_key}' not found in gt_data for sample {sample_path}. "
+                f"Available keys: {list(gt_data.keys())}. Using zero waypoints."
+            )
         wp = gt_data.get(self.waypoint_key, np.zeros((self.n_waypoints, 2), dtype=np.float32))
         if not isinstance(wp, np.ndarray):
             wp = np.array(wp, dtype=np.float32)
         wp = wp.astype(np.float32)
 
+        if wp.ndim != 2 or wp.shape[1] != 2:
+            warnings.warn(
+                f"Unexpected waypoint shape {wp.shape} in sample {sample_path} "
+                f"(expected (N, 2)). Using zero waypoints."
+            )
+            wp = np.zeros((self.n_waypoints, 2), dtype=np.float32)
+
         # Interpolate to n_waypoints if needed
         if wp.shape[0] != self.n_waypoints:
+            warnings.warn(
+                f"Waypoint count mismatch in sample {sample_path}: "
+                f"got {wp.shape[0]}, expected {self.n_waypoints}. Interpolating."
+            )
             from scipy.interpolate import interp1d
             t_src = np.linspace(0, 1, wp.shape[0])
             t_dst = np.linspace(0, 1, self.n_waypoints)
             wp = interp1d(t_src, wp, axis=0, kind='linear')(t_dst).astype(np.float32)
 
+        # Clip outliers (data shows ~0.5% of samples have extreme values up to 5927m)
+        if self.wp_clip is not None:
+            lo = np.array([-self.wp_clip[0], -self.wp_clip[1]], dtype=np.float32)
+            hi = np.array([ self.wp_clip[0],  self.wp_clip[1]], dtype=np.float32)
+            wp = np.clip(wp, lo, hi)
+
+        # Normalize to [-1, 1] by dividing by clip range (requires wp_clip to be set)
+        if self.wp_normalize:
+            if self.wp_clip is None:
+                warnings.warn(
+                    f"wp_normalize=True but wp_clip is None in sample {sample_path}. "
+                    "Normalization skipped — set wp_clip to enable it."
+                )
+            else:
+                wp = wp / self.wp_clip  # element-wise: x/x_max, y/y_max
+
         road_type = condition.get('road_type', 'uni')
+        if 'road_type' not in condition:
+            warnings.warn(f"Missing 'road_type' in condition for sample {sample_path}. Defaulting to 'uni'.")
+        elif road_type not in ('uni', 'multi'):
+            warnings.warn(
+                f"Unknown road_type '{road_type}' in sample {sample_path}. "
+                f"Expected 'uni' or 'multi'. Treating as 'uni'."
+            )
         gate_score = 1.0 if road_type == 'multi' else 0.0
 
         gt = {
