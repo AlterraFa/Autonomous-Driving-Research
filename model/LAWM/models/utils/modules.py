@@ -151,6 +151,7 @@ class ACRoPEAttention(nn.Module):
         self.head_dim = head_dim = dim // num_heads
         self.scale = qk_scale or head_dim**-0.5
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.qkva = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop_prob = proj_drop
@@ -212,7 +213,7 @@ class ACRoPEAttention(nn.Module):
                 a = x[:, :, i : i + 1, :].flatten(1, 2)
                 # Note action tokens do not work with masking
                 # -- compute qkv for action tokens and rotate
-                qkv = self.qkv(a).unflatten(-1, (3, self.num_heads, -1)).permute(2, 0, 3, 1, 4)
+                qkv = self.qkva(a).unflatten(-1, (3, self.num_heads, -1)).permute(2, 0, 3, 1, 4)
                 q, k, v = qkv[0], qkv[1], qkv[2]  # [B, num_heads, N, D]
                 # --
                 qd = rotate_queries_or_keys(q[..., : self.d_dim], pos=torch.arange(T, device=x.device))
@@ -440,6 +441,7 @@ class GCRoPEAttention(nn.Module):
         self.head_dim = head_dim = dim // num_heads
         self.scale = qk_scale or head_dim**-0.5
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.qkva = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop_prob = proj_drop
@@ -551,7 +553,7 @@ class GCRoPEAttention(nn.Module):
             for idx in range(apstep):
                 a_i = action[:, :, idx]
                 
-                qkv_i = self.qkv(a_i).unflatten(-1, (3, self.num_heads, -1)).permute(2, 0, 3, 1, 4)
+                qkv_i = self.qkva(a_i).unflatten(-1, (3, self.num_heads, -1)).permute(2, 0, 3, 1, 4)
                 q_i , k_i, v_i= qkv_i[0], qkv_i[1], qkv_i[2]
                 
                 q_i = rotate_queries_or_keys(q_i, pos=torch.arange(ctx_steps, device=x.device))

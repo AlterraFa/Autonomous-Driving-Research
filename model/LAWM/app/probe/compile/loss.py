@@ -171,5 +171,3 @@ def compile_fdat_loss(loss_cfg: dict | None = None, device: torch.device | None 
     logger.INFO("Compiled FDATLoss with config:")
     logger.INFO({k: v for k, v in loss_cfg.items()})
     return criterion
-
-    return target_map

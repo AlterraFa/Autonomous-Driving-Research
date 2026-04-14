@@ -15,14 +15,15 @@ def compile_dataloader(
     pin_memory,
     world_sz,
     rank,
-    normalize_targets=False,
-    dataset_type="straightening_probe",
+    **kwargs
 ):
     dataset = StraighteningProbeDataset(
         data_paths=train_cfg['datasets_path'],
         shared_transform=transform,
         waypoint_key=train_cfg.get('waypoint_key', 'midlane_wp'),
         n_waypoints=train_cfg.get('n_waypoints', 12),
+        wp_clip=train_cfg.get('wp_clip', None),
+        wp_normalize=train_cfg.get('wp_normalize', False),
     )
 
     train_fraction = float(train_cfg.get('train_fraction', 0.9))

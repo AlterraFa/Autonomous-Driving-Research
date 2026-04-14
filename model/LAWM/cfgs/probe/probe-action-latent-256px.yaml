@@ -15,6 +15,11 @@ train:
   batch_size: 16
   waypoint_key: midlane_wp
   n_waypoints: 12
+  # Clip outliers (dataset has ~0.5% corrupt samples with values up to 5927m).
+  # wp_normalize divides by wp_clip after clipping → model outputs in [-1, 1].
+  # When normalizing, scale sl1_beta accordingly: e.g. 0.5m / 20m = 0.025.
+  wp_clip: [20.0, 8.0]
+  wp_normalize: true
   datasets_path:
     - ./../Autonomous_Dataset/carla/LAWM/recording_20251025_142727_best_spatial/
     - ./../Autonomous_Dataset/carla/LAWM/recording_20260204_010805_spatial/
@@ -92,7 +97,7 @@ loss:
   lambda_smooth: 0.3
   tau_start: 0.3
   tau_end: 1.0
-  sl1_beta: 0.5
+  sl1_beta: 0.025  # 0.5m equivalent in normalized space (0.5 / wp_clip[0]=20)
 
 checkpoint:
   patience: 80
