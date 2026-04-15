@@ -105,6 +105,37 @@ def global_2_local_full_rot(location: np.ndarray, points: np.ndarray, rotation_d
     
     return local_xyz if len(local_xyz) > 1 else local_xyz[0]
 
+def local_2_global_full_rot(location: np.ndarray, points_local: np.ndarray, rotation_deg: np.ndarray):
+    """
+    Inverse of global_2_local_full_rot.
+
+    location: [x, y, z] of vehicle
+    points_local: (N, 3) or (3,) local points in ego frame
+    rotation_deg: [roll, pitch, yaw] in degrees
+    """
+    loc = np.asarray(location)
+    pts = np.atleast_2d(points_local)
+
+    r, p, y = np.radians(rotation_deg)
+
+    cy, sy = np.cos(y), np.sin(y)
+    cp, sp = np.cos(p), np.sin(p)
+    cr, sr = np.cos(r), np.sin(r)
+
+    # Transpose of world_to_local_mat → converts Local -> Global.
+    local_to_world_mat = np.array([
+        [cp * cy, cy * sp * sr - sy * cr, -cy * sp * cr - sy * sr],
+        [cp * sy, sy * sp * sr + cy * cr, -sy * sp * cr + cy * sr],
+        [sp,      -cp * sr,                cp * cr               ]
+    ])
+
+    global_xyz = pts[:, :3] @ local_to_world_mat.T + loc
+
+    if pts.shape[1] > 3:
+        return np.hstack([global_xyz, pts[:, 3:]])
+
+    return global_xyz if len(global_xyz) > 1 else global_xyz[0]
+
 def global_2_local_rot(global_rpy_deg, vehicle_rpy_deg):
     """
     Simple angular delta for Roll, Pitch, Yaw. 

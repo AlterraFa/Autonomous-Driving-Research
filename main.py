@@ -8,12 +8,8 @@ import carla
 import argparse
 import pygame
 from src.messages.logger import Logger
-logger = Logger()
-
 from src.control.world import World
-
 from mode import MODE_RUNNERS
-
 
 class MainArgumentParser(argparse.ArgumentParser):
     def __init__(self, *args, **kwargs):

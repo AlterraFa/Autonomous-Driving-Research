@@ -10,7 +10,7 @@ from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 from config.enum import CameraView
 from src.messages.logger import Logger
 from src.messages.message_handler import MessageSender
-from src.messages.all_messages import ClearNPCs
+from src.messages.all_messages import ClearNPCs, CameraDimension
 from src.others.data_processor import TrajectoryBuffer
 from src.spawn.sensor_spawner import SensorSpawn
 from src.control.vehicle_control import Vehicle
@@ -98,6 +98,8 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
             "duration" : actual_duration,
             "headless" : args.headless,
         }
+        camera_dim_send = MessageSender(CameraDimension)
+        camera_dim_send.send({"width": args.width, "height": args.height, "fov_deg": 90})
         game_viewer = VIEWER_REGISTRY["replay"](**per_viewer_args)
 
         # -- Init sensors
@@ -114,8 +116,6 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
             gnss_sensor: [None, True], 
             imu_sensor: [None, True]
         }
-        if args.clear_npcs:
-            sensors_metadata = sensors_metadata | {RGB(virt_world.world): [None, False]}
         if not SensorSpawn.test_sensor(game_viewer, sensors_metadata):
             logger.ERROR(f"Skipping replay due to sensor initialization failure: {replay_dir}")
             continue
@@ -131,15 +131,16 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
             traj_logger = None
             recorded_traj = np.load(path_2_waypoints)
             map_processor.register_wp(recorded_traj)
-            replayer = ReplayHandler(
-                virt_world, recorded_traj,
-                dataset_dir, args.temporal,
-                debug = args.draw_waypoints if hasattr(args, "draw_waypoints") else False,
-            )
             contracting_wp = ContractingWP(
                 world=virt_world.world,
                 ego_vehicle=ego_actor,
                 containment_mode="circle",
+            )
+            replayer = ReplayHandler(
+                virt_world, recorded_traj,
+                dataset_dir, args.temporal,
+                contracting_wp = contracting_wp,
+                debug = args.draw_waypoints if hasattr(args, "draw_waypoints") else False,
             )
 
         progress = Progress(
@@ -177,8 +178,6 @@ def run_replay(args, client: carla.Client, virt_world, folder, viewer_args):
         lp_wrapper = lp(game_viewer.run)
 
         with progress:
-            send_clear_npcs = MessageSender(ClearNPCs)
-            send_clear_npcs.send(args.clear_npcs)
             lp_wrapper()
         progress.stop()
         logger.CUSTOM("SUCCESS", "Stopped playing for log: {}", replay_dir)

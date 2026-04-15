@@ -687,6 +687,9 @@ class ReplayViewer(Viewer):
             
             self.frame_id = 0; self.i = 0
             while True if self.headless else self.controller.process_events(server_time = 1 / self.server_fps if self.server_fps != 0 else 0):
+                # Flush buffered debug draw BEFORE tick so points render in this frame
+                if self.replayer:
+                    self.replayer.flush_debug_draw()
                 self.step_world()
                 self.data_bus(True)  # Filter control for replay mode
                 
@@ -708,7 +711,7 @@ class ReplayViewer(Viewer):
 
                 # Render (replay mode)
                 self._handle_replay_step()
-                pixel_wp = self.sub_pixel_temporal.receive()
+                pixel_wp = self.sub_pixel_spatial.receive()
                 frame = self._draw_pixel_waypoints(frame, pixel_wp)
                 self._render_base_hud(frame)
                 self._render_multi_camera(multi_images_list)
@@ -783,9 +786,7 @@ class ReplayViewer(Viewer):
             self.contracting_wp.build_vehicle_tree(self.ego_id)
             spatial_wp  = self.sub_local_spatial.receive()
             local_wp = np.r_[spatial_wp[:]]
-            local_wp[:, 2] += 1.0 # -- Ensure waypoints are inside vehicle bbox
-            local_wp, match = self.contracting_wp.contract_local_wp(local_wp)
-            local_wp[:, 2] += 0.7 #-- Ensure camera's position is on the same level
+            local_wp[:, 2] += 1.7 # -- Ensure waypoints are inside vehicle bbox
             self.register_view_matrix("LOCAL_WP", local_wp[...], activate_first=False)
             self.choosen_view = [view for view in self.sensor_manager.camera_views if view.startswith("FIRST") or view.startswith("LOCAL")]
 

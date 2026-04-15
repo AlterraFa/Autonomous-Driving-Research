@@ -20,7 +20,7 @@ from src.math.path import (
     WaypointsAlign
 )
 from config.enum import CameraView
-from src.math.coordinate_transform import global_2_local_rot, global_2_local_full_rot, rpy2ypr, camera_extrinsic, camera_intrinsic, ego_to_pixel
+from src.math.coordinate_transform import global_2_local_rot, global_2_local_full_rot, local_2_global_full_rot, rpy2ypr, camera_extrinsic, camera_intrinsic, ego_to_pixel
 from config import CONFIG
 
 quality = CONFIG.picture.quality
@@ -229,7 +229,7 @@ class ReplayHandler:
     turn_classify = False
     __slot__ = ["road_type"]
     
-    def __init__(self, world: World, true_trajectories: np.ndarray, data_collect_dir: str = None, use_temporal: bool = False, debug: bool = False):
+    def __init__(self, world: World, true_trajectories: np.ndarray, data_collect_dir: str = None, use_temporal: bool = False, contracting_wp = None, debug: bool = False):
         self.logger = Logger()
         
         _, midlane_waypoints = WaypointsAlign(world, 2.0).align(true_trajectories)
@@ -244,6 +244,7 @@ class ReplayHandler:
             world=world,
             threshold_deg=CONFIG.turn_detection.threshold_deg,
         )
+        self.contracting_wp = contracting_wp
         self.branching_path  = BranchingPath(self.virt_world)
         self.data_collector = None
         if data_collect_dir:
@@ -257,6 +258,7 @@ class ReplayHandler:
         self.additional_max = CONFIG.data_collection.additional_trajectory_max; self.addition_cnt = 0
         self.start_time = self.sub_server_runtime.receive()
         self.temporal = use_temporal
+        self._debug_draw_buffer = None
 
     def _init_transmittor(self):
         self.sub_location         = MessageSubscriber(Location)
@@ -342,7 +344,7 @@ class ReplayHandler:
 
         fov_deg = float(view_metadata.get("fov_deg", view_metadata.get("fov", 90.0)))
         cam_tf = {
-            "x": float(view_metadata.get("x", CameraView.FIRST_PERSON.value["x"])),
+            "x": float(view_metadata.get("x", CameraView.FIRST_PERSON.value["x"])) - 0.5,
             "y": float(view_metadata.get("y", CameraView.FIRST_PERSON.value["y"])),
             "z": float(view_metadata.get("z", CameraView.FIRST_PERSON.value["z"])),
             "roll": float(view_metadata.get("roll", CameraView.FIRST_PERSON.value["roll"])),
@@ -357,13 +359,23 @@ class ReplayHandler:
     def _debug_draw_waypoints(self, global_loc_spatial, global_loc_temporal):
         if not self.debug:
             return
+        wp = (global_loc_temporal if self.temporal else global_loc_spatial).copy()
+        self._debug_draw_buffer = wp
 
+    def flush_debug_draw(self):
+        """Draw buffered debug waypoints. Call BEFORE world.tick() so they
+        appear in the same rendered frame as the pixel overlay."""
+        if self._debug_draw_buffer is None:
+            return
         server_fps = self.sub_server_fps.receive()
         if server_fps < 1:
             server_fps = self.sub_client_fps.receive()
-        wp = global_loc_temporal if self.temporal else global_loc_spatial
-        wp[:, -1] += 0.5
-        self.virt_world.draw_waypoints(wp, 2.0 * (1 / server_fps), size=0.1, color=(255, 0, 0))
+        self._debug_draw_buffer[:, -1] += 0.2
+        self.virt_world.draw_waypoints(
+            self._debug_draw_buffer, 2.0 * (1 / server_fps),
+            size=0.1, color=(255, 0, 0),
+        )
+        self._debug_draw_buffer = None
 
     def _turn_signal(self, global_scout):
         if not self.turn_classify:
@@ -451,6 +463,11 @@ class ReplayHandler:
             local_rot_temporal,
         ) = self._waypoint_state(vehicle_location, vehicle_rotation, position)
 
+        if self.contracting_wp:
+            local_loc_spatial[:, 2] += 1.0
+            local_loc_spatial, _ = self.contracting_wp.contract_local_wp(local_loc_spatial)
+            local_loc_spatial[:, 2] -= 1.0
+
         self._update_road_type(global_loc_spatial, global_scout)
 
         uv_spatial  = self._project_pixels(local_loc_spatial, frame)
@@ -461,7 +478,11 @@ class ReplayHandler:
             valid_uv = np.isfinite(uv_temporal).all(axis=1).sum()
             self.logger.DEBUG(f"Projected temporal pixels valid: {valid_uv}/{len(uv_temporal)}", frequency=0.5)
 
-        self._debug_draw_waypoints(global_loc_spatial, global_loc_temporal)
+        # Convert (potentially contracted) local waypoints back to global for debug draw
+        # so that 3D debug markers match the pixel overlay exactly.
+        debug_global_spatial = local_2_global_full_rot(vehicle_location, local_loc_spatial, vehicle_rotation)
+        debug_global_temporal = local_2_global_full_rot(vehicle_location, local_loc_temporal, vehicle_rotation)
+        self._debug_draw_waypoints(debug_global_spatial, debug_global_temporal)
 
         turn_signal = self._turn_signal(global_scout)
 
