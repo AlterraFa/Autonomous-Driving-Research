@@ -12,19 +12,19 @@ train:
   tubelet_size: 2
   crop_size: 256
   fpcs: 12
-  batch_size: 64
+  batch_size: 128
   waypoint_key: midlane_wp
-  n_waypoints: 12
-  # Clip outliers (dataset has ~0.5% corrupt samples with values up to 5927m).
-  # wp_normalize divides by wp_clip after clipping → model outputs in [-1, 1].
-  # When normalizing, scale sl1_beta accordingly: e.g. 0.5m / 20m = 0.025.
-  wp_clip: [20.0, 8.0]
+  n_waypoints: &n_waypoints 12
+  waypoint_coordinate_mode: cartesian
   wp_normalize: true
+  wp_clip: [20.0, 8.0]
   sampling:
     enabled: true
     multi_fraction: 40
     uni_fraction: 50
     seed: 0
+  # Set to a directory of pre-cached latents to skip the frozen world model.
+  # Generate with: python -m app.probe.cache_latents --fname <this_yaml> --cache_dir <dir>
   cached_latents_dir: ./cached_latents/probe
   datasets_path:
     - ../../../Autonomous_Dataset/LAWM1/recording_20260204_010805_spatial/
@@ -73,48 +73,53 @@ data_aug:
 
 model:
   compile: false
+  # enc + world_model architecture is auto-loaded from the run config below.
+  # Only override keys you want to change (e.g. crop_size for a different res).
   enc: {}
   world_model:
     checkpoint_dir: ./Experiment/straightening/run1
     prefer_best: true
   probe:
     decoder:
-      type: EfficientProbe
-      n_waypoints: 12
+      type: ActionDecoder
+      n_waypoints: *n_waypoints
+      d_model: 512
       n_heads: 8
-      num_queries: 16
-      depth: 2
-      mlp_ratio: 4.0
+      n_layers: 4
+      dim_feedforward: 1024
+      mlp_hidden: 128
+      dropout: 0.1
 
 optimization:
-  anneal: 30
-  epochs: 80
-  warmup: 5
-  final_lr: 0.0
-  final_weight_decay: 0.01
+  anneal: 40
+  epochs: 40
+  warmup: 0
   ipe: 100
   lr: 5.0e-4
-  start_lr: 1.0e-5
-  weight_decay: 0.01
+  start_lr: 1.0e-6
+  weight_decay: 0.03
+  final_lr: 0.0
+  final_weight_decay: 0.03
+  grad_clip_norm: 1.0
   betas:
     - 0.9
     - 0.999
   eps: 1.0e-8
 
 loss:
-  alpha_lane: 20.0
-  beta_lane: 1.0
-  alpha_inter: 10.0
-  beta_inter: 3.0
-  lambda_heading: 0.5
+  alpha_lane: 8.0
+  beta_lane: 4.0
+  alpha_inter: 6.0
+  beta_inter: 4.0
+  lambda_heading: 1.5
   lambda_endpoint: 0.0
   lambda_smooth: 0.3
   tau_start: 0.3
   tau_end: 1.0
-  sl1_beta: 0.025  # 0.5m equivalent in normalized space (0.5 / wp_clip[0]=20)
+  sl1_beta: 0.3  # wider quadratic zone → error-proportional gradients
 
 checkpoint:
-  patience: 80
+  patience: 10
   min_delta: 0.0
 
 logging:

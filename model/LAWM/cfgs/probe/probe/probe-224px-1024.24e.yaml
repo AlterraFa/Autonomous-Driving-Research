@@ -1,0 +1,134 @@
+common: &common_settings
+  patch_size: &patch_size 16
+  tubelet_size: &tubelet_size 2
+  crop_size: &crop_size 224
+  nclips: 1
+  fpcs: &fpcs 16
+
+app: probe
+
+logging:
+  progress_type: table
+  save_csv: true
+  save_batch_csv: false
+  save_epoch_csv: true
+
+loader_setup: &loader_settings
+  num_workers: 4
+  persistent_workers: true
+  pin_mem: true
+
+train:
+  <<: *common_settings
+  <<: *loader_settings
+  batch_size: 2
+  allow_clip_overlap: true
+  random_jiggle: true
+  datasets:
+    - name: "carla"
+      path: "./csv_metadata/probe/Carla_recording_20251025_142727_best_spatial.csv"
+      fps: 2
+    - name: "carla"
+      path: "./csv_metadata/probe/Carla_recording_20260116_213318_extra_spatial.csv"
+      fps: 2
+    - name: "carla"
+      path: "./csv_metadata/probe/Carla_recording_20260204_090029_spatial.csv"
+      fps: 2
+    - name: "carla"
+      path: "./csv_metadata/probe/Carla_recording_20260317_205100_best_spatial.csv"
+      fps: 2
+    - name: "carla"
+      path: "./csv_metadata/probe/Carla_recording_20260317_214033_spatial.csv"
+      fps: 2
+    - name: "carla"
+      path: "./csv_metadata/probe/Carla_recording_20260317_233603_spatial.csv"
+      fps: 2
+    - name: "carla"
+      path: "./csv_metadata/probe/Carla_recording_20260318_083409_best_spatial.csv"
+      fps: 2
+
+data_aug:
+  auto_augment: false
+  horizontal_flip: false
+  motion_shift: false
+  normalize_targets: false
+  random_resize_aspect_ratio:
+  - 0.75
+  - 1.35
+  random_resize_scale:
+  - 1.777
+  - 1.777
+  reprob: 0.0
+
+meta:
+  dtype: bfloat16
+  save_every_freq: 5
+  save_root_dir: ./Experiment
+  seed: 239
+  sync_gc: true
+  continue_train: false
+  continue_from_run: null
+  resume_prefer_best: true
+
+model: 
+  compile: false
+  common: &common_model
+    action_pframe: 1
+    action_embed_dim: 512
+    use_sdpa: true
+
+  enc: 
+    <<: *common_settings
+    name: vjepa2_vit_large
+    load_from: facebookresearch/vjepa2
+    source: local
+    use_activation_checkpointing: true
+
+  probe:
+    name: "NonLinearProbe"
+    output_dim: 2
+    hidden_dim: null
+    max_frames: *fpcs
+    tubelet_size: *tubelet_size
+    num_heads: 8
+    num_queries: 16
+    depth: 2
+    mlp_ratio: 4.0
+    init_std: 0.02
+    qkv_bias: true
+    use_activation_checkpointing: true
+    init_scales: null
+    init_shifts: null
+
+optimization:
+  anneal: 15
+  epochs: 20
+  final_lr: 0.0
+  final_weight_decay: 0.04
+  ipe: 1600
+  lr: 0.000425
+  start_lr: 0.000075
+  warmup: 15
+  weight_decay: 0.04
+  gradient_optimizer:
+    type: normal
+    params: {}
+
+checkpoint:
+  patience: 20
+  min_delta: 0.0
+
+loss:
+  enable_velocity: true
+  enable_steer: true
+  enable_lateral_error: false
+  velocity_loss: log_cosh
+  steer_loss: mae
+  lateral_error_loss: mae
+  velocity_idx: 0
+  steer_idx: 1
+  lateral_error_idx: 2
+  velocity_log_var: 0.0
+  steer_log_var: 0.0
+  lateral_error_log_var: 0.0
+  reduction: mean

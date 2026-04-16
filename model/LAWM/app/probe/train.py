@@ -22,6 +22,7 @@ from .compile import (
     compile_model,
     compile_transform,
     compile_dataloader,
+    compile_cached_dataloader,
     compile_opt,
     compile_fdat_loss,
 )
@@ -120,6 +121,7 @@ def main(args: dict, *noargs, **nokwargs):
     start_lr = optim_cfg.get('start_lr', 1e-4)
     warmup = optim_cfg.get('warmup', 5)
     weight_decay = optim_cfg.get('weight_decay', 0.01)
+    grad_clip_norm = optim_cfg.get('grad_clip_norm', None)
     betas = optim_cfg.get('betas', (0.9, 0.999))
     eps = optim_cfg.get('eps', 1.0e-8)
 
@@ -170,35 +172,63 @@ def main(args: dict, *noargs, **nokwargs):
     # ======================== Compile components ========================
     criterion = compile_fdat_loss(loss_cfg=loss_cfg, device=device)
 
-    transform = compile_transform(
-        random_horizontal_flip=horizontal_flip,
-        random_resize_aspect_ratio=random_aspect_ratio,
-        random_resize_scale=random_resize_scale,
-        reprob=reprob,
-        auto_augment=auto_augment,
-        motion_shift=motion_shift,
-        crop_size=crop_size,
-    )
+    cached_latents_dir = train_cfg.get('cached_latents_dir', None)
+    use_cached = cached_latents_dir is not None
 
-    video_loader, val_loader, video_sampler, val_sampler, _ = compile_dataloader(
-        train_cfg,
-        nclips=1,
-        transform=transform,
-        collate_fn=torch.utils.data.default_collate,
-        num_workers=num_workers,
-        persistance_workers=persistent_workers,
-        pin_memory=pin_mem,
-        world_sz=world_size,
-        rank=rank,
-        dataset_type="straightening_probe",
-    )
+    if use_cached:
+        logger.INFO(f"Using cached latents from: {cached_latents_dir}")
+        video_loader, val_loader, video_sampler, val_sampler, _ = compile_cached_dataloader(
+            train_cfg,
+            collate_fn=torch.utils.data.default_collate,
+            num_workers=num_workers,
+            persistance_workers=persistent_workers,
+            pin_memory=pin_mem,
+            world_sz=world_size,
+            rank=rank,
+        )
+        ipe = len(video_loader)
+        logger.WARNING(f"Setting ipe as video loader iteration: {ipe}")
 
-    world_model, decoder = compile_model(
-        enc_cfg=enc_cfg,
-        probe_cfg=probe_cfg,
-        world_model_cfg=world_model_cfg,
-        device=device,
-    )
+        # Build decoder only — no world model needed
+        from app.probe.compile.models import compile_decoder_only
+        world_model = None
+        decoder = compile_decoder_only(
+            probe_cfg=probe_cfg,
+            world_model_cfg=world_model_cfg,
+            device=device,
+        )
+    else:
+        transform = compile_transform(
+            random_horizontal_flip=horizontal_flip,
+            random_resize_aspect_ratio=random_aspect_ratio,
+            random_resize_scale=random_resize_scale,
+            reprob=reprob,
+            auto_augment=auto_augment,
+            motion_shift=motion_shift,
+            crop_size=crop_size,
+        )
+
+        video_loader, val_loader, video_sampler, val_sampler, _ = compile_dataloader(
+            train_cfg,
+            nclips=1,
+            transform=transform,
+            collate_fn=torch.utils.data.default_collate,
+            num_workers=num_workers,
+            persistance_workers=persistent_workers,
+            pin_memory=pin_mem,
+            world_sz=world_size,
+            rank=rank,
+            dataset_type="straightening_probe",
+        )
+        ipe = len(video_loader)
+        logger.WARNING(f"Setting ipe as video loader iteration: {ipe}")
+
+        world_model, decoder = compile_model(
+            enc_cfg=enc_cfg,
+            probe_cfg=probe_cfg,
+            world_model_cfg=world_model_cfg,
+            device=device,
+        )
 
     if model_cfg.get('compile', False):
         logger.INFO("Compiling decoder")
@@ -318,14 +348,17 @@ def main(args: dict, *noargs, **nokwargs):
     n_waypoints = train_cfg.get('n_waypoints', 12)
     decoder_type = probe_cfg.get('decoder', {}).get('type', 'ActionDecoder')
 
-    def train_step(clips, gt):
+    def train_step(input_data, gt):
         _new_lr = lr_scheduler.step()
         _new_wd = wd_scheduler.step()
 
         with torch.amp.autocast(device_type, dtype=dtype, enabled=mixed_precision):
-            # Forward frozen world model to get action latents
-            with torch.no_grad():
-                a_latent = world_model(clips)  # [B, T_act, action_embed_dim]
+            # Get action latents: either from world model or pre-cached
+            if use_cached:
+                a_latent = input_data  # already [B, T_act, action_embed_dim]
+            else:
+                with torch.no_grad():
+                    a_latent = world_model(input_data)  # [B, T_act, action_embed_dim]
 
             # Decode action latents to waypoints
             if decoder_type == 'EfficientProbe':
@@ -335,8 +368,8 @@ def main(args: dict, *noargs, **nokwargs):
             else:
                 pred_wp = decoder(a_latent)  # [B, n_waypoints, 2]
 
-            gt_wp = gt['midlane_wp'].to(device=clips.device, dtype=pred_wp.dtype)
-            gate_score = gt['gate_score'].to(device=clips.device, dtype=pred_wp.dtype)
+            gt_wp = gt['midlane_wp'].to(device=device, dtype=pred_wp.dtype)
+            gate_score = gt['gate_score'].to(device=device, dtype=pred_wp.dtype)
 
             loss_dict = criterion(pred_wp, gt_wp, gate_score=gate_score)
             loss = loss_dict['total'].mean()
@@ -344,10 +377,14 @@ def main(args: dict, *noargs, **nokwargs):
         if mixed_precision:
             scaler.scale(loss).backward()
             scaler.unscale_(optim)
+            if grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(decoder.parameters(), grad_clip_norm)
             scaler.step(optim)
             scaler.update()
         else:
             loss.backward()
+            if grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(decoder.parameters(), grad_clip_norm)
             optim.step()
         optim.zero_grad()
 
@@ -361,9 +398,12 @@ def main(args: dict, *noargs, **nokwargs):
         return loss.item(), _new_lr, _new_wd, details
 
     @torch.no_grad()
-    def val_step(clips, gt):
+    def val_step(input_data, gt):
         with torch.amp.autocast(device_type, dtype=dtype, enabled=mixed_precision):
-            a_latent = world_model(clips)
+            if use_cached:
+                a_latent = input_data
+            else:
+                a_latent = world_model(input_data)
 
             if decoder_type == 'EfficientProbe':
                 pred_flat = decoder(a_latent)
@@ -371,8 +411,8 @@ def main(args: dict, *noargs, **nokwargs):
             else:
                 pred_wp = decoder(a_latent)
 
-            gt_wp = gt['midlane_wp'].to(device=clips.device, dtype=pred_wp.dtype)
-            gate_score = gt['gate_score'].to(device=clips.device, dtype=pred_wp.dtype)
+            gt_wp = gt['midlane_wp'].to(device=device, dtype=pred_wp.dtype)
+            gate_score = gt['gate_score'].to(device=device, dtype=pred_wp.dtype)
 
             loss_dict = criterion(pred_wp, gt_wp, gate_score=gate_score)
             loss = loss_dict['total'].mean()
@@ -386,11 +426,9 @@ def main(args: dict, *noargs, **nokwargs):
         return loss.item(), details
 
     loader = iter(video_loader)
-    ipe = len(video_loader)
     with log_stats:
         log_stats.start_training("Training Action Latent Waypoint Probe")
-        if hasattr(video_sampler, 'set_epoch'):
-            video_sampler.set_epoch(0)
+        video_sampler.set_epoch(0)
         last_loss = 0.0
         last_val_loss = 0.0
         curr_lr, curr_wd = 0.0, 0.0
@@ -402,32 +440,14 @@ def main(args: dict, *noargs, **nokwargs):
             # ==================================== #
             decoder.train()
             log_stats.start_epoch(epoch, ipe, desc="Training")
-            for _ in log_stats.batch_iterator(range(ipe)):
+            video_sampler.set_epoch(epoch)
+            for sample in log_stats.batch_iterator(video_loader):
 
-                iter_retries = 0
-                iter_success = False
-                while not iter_success:
-                    try:
-                        sample = next(loader)
-                        iter_success = True
-                    except StopIteration:
-                        loader = iter(video_loader)
-                        if hasattr(video_sampler, 'set_epoch'):
-                            video_sampler.set_epoch(epoch)
-                    except Exception as e:
-                        NUM_RETRIES = 5
-                        if iter_retries < NUM_RETRIES:
-                            logger.WARNING(f"Dataloader error: {e}")
-                            iter_retries += 1
-                            time.sleep(2)
-                        else:
-                            logger.ERROR("Exceeded max retries on dataloader", exit_code=5, full_traceback=e)
-
-                clips, gt = sample
-                clips = clips.to(device)
+                input_data, gt = sample
+                input_data = input_data.to(device)
 
                 (last_loss, curr_lr, curr_wd, details), elapsed = gpu_timer(
-                    partial(train_step, clips, gt)
+                    partial(train_step, input_data, gt)
                 )
 
                 if np.isnan(last_loss) or np.isinf(last_loss):
@@ -437,30 +457,25 @@ def main(args: dict, *noargs, **nokwargs):
                     "LR": curr_lr,
                     "WD": curr_wd,
                     **details,
-                })
+                }, phase_agnostic = ['LR', "WD"])
+            if sync_gc:
+                gc.collect()
 
             # ==================================== #
             #              VALIDATION
             # ==================================== #
             decoder.eval()
             val_losses = []
-            val_details_accum = {}
-            for val_batch in val_loader:
-                val_clips, val_gt = val_batch
-                val_clips = val_clips.to(device)
-                v_loss, v_details = val_step(val_clips, val_gt)
+            for val_batch in log_stats.batch_iterator(val_loader):
+                val_input, val_gt = val_batch
+                val_input = val_input.to(device)
+                v_loss, v_details = val_step(val_input, val_gt)
                 val_losses.append(v_loss)
-                for k, v in v_details.items():
-                    val_details_accum.setdefault(k, []).append(v)
+                log_stats.log_batch(v_details, phase="val")
 
             last_val_loss = np.mean(val_losses) if val_losses else 0.0
-            val_metrics = {f"Val {k}": np.mean(v) for k, v in val_details_accum.items()}
 
-            log_stats.end_epoch({
-                "Train Loss": last_loss,
-                "Val Loss": last_val_loss,
-                **val_metrics,
-            })
+            log_stats.log_epoch()
 
             # ==================================== #
             #            CHECKPOINTING
@@ -477,4 +492,3 @@ def main(args: dict, *noargs, **nokwargs):
 
             if sync_gc:
                 gc.collect()
-    #             break

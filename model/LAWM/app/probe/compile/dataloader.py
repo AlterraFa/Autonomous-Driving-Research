@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import warnings
-from datasets.dataset import StraighteningProbeDataset
+from datasets.dataset import StraighteningProbeDataset, CachedLatentDataset
 from datasets.sampler import DistributedWeightedSampler, WeightedSampler
 from torch.utils.data import DataLoader
 from torch.utils.data import Subset
@@ -125,6 +125,7 @@ def compile_dataloader(
         n_waypoints=train_cfg.get('n_waypoints', 12),
         wp_clip=train_cfg.get('wp_clip', None),
         wp_normalize=train_cfg.get('wp_normalize', False),
+        wp_center=train_cfg.get('wp_center', None),
     )
 
     train_fraction = float(train_cfg.get('train_fraction', 0.9))
@@ -156,8 +157,9 @@ def compile_dataloader(
         batch_size=train_cfg['batch_size'],
         collate_fn=collate_fn,
         pin_memory=pin_memory,
-        num_workers=num_workers,
-        persistent_workers=persistance_workers,
+        num_workers=min(num_workers, 4),
+        persistent_workers=False,
+        prefetch_factor=1 if num_workers > 0 else None,
         sampler=val_sampler,
         drop_last=False,
     )
@@ -174,3 +176,140 @@ def compile_dataloader(
     })
 
     return train_loader, val_loader, train_sampler, val_sampler, {}
+
+
+def compile_cached_dataloader(
+    train_cfg,
+    collate_fn,
+    num_workers,
+    persistance_workers=None,
+    pin_memory=False,
+    world_sz=1,
+    rank=0,
+    **kwargs,
+):
+    """Build dataloaders from pre-cached action latents (.npz files)."""
+    if persistance_workers is None:
+        persistance_workers = kwargs.get('persistent_workers', False)
+
+    cache_dir = train_cfg['cached_latents_dir']
+    dataset = CachedLatentDataset(cache_dir=cache_dir)
+
+    train_fraction = float(train_cfg.get('train_fraction', 0.9))
+    val_fraction = float(train_cfg.get('val_fraction', 0.1))
+    train_set, val_set, test_set = dataset.split(train=train_fraction, val=val_fraction)
+
+    # For cached datasets, weighted sampling by road_type is derived from
+    # gate_score stored in each .npz (gate_score=1.0 → multi, 0.0 → uni).
+    train_sampler, sampler_info = _build_cached_train_sampler(
+        train_set=train_set,
+        train_cfg=train_cfg,
+        world_sz=world_sz,
+        rank=rank,
+    )
+    val_sampler = torch.utils.data.DistributedSampler(
+        val_set, num_replicas=world_sz, rank=rank, shuffle=False,
+    )
+
+    train_loader = DataLoader(
+        dataset=train_set,
+        batch_size=train_cfg['batch_size'],
+        collate_fn=collate_fn,
+        pin_memory=pin_memory,
+        num_workers=num_workers,
+        persistent_workers=persistance_workers,
+        sampler=train_sampler,
+        drop_last=True,
+    )
+    val_loader = DataLoader(
+        dataset=val_set,
+        batch_size=train_cfg['batch_size'],
+        collate_fn=collate_fn,
+        pin_memory=pin_memory,
+        num_workers=min(num_workers, 4),
+        persistent_workers=False,
+        prefetch_factor=1 if num_workers > 0 else None,
+        sampler=val_sampler,
+        drop_last=False,
+    )
+
+    logger.INFO("Cached latent dataloader initialized:")
+    logger.INFO({
+        "cache_dir": cache_dir,
+        "train_samples": len(train_set),
+        "val_samples": len(val_set),
+        "batch_size": train_cfg['batch_size'],
+        "sampling": sampler_info,
+    })
+
+    return train_loader, val_loader, train_sampler, val_sampler, {}
+
+
+def _safe_read_gate_score(dataset, sample_index):
+    """Read road_type from a cached .npz file via gate_score."""
+    try:
+        path = dataset.samples[sample_index]
+        data = np.load(path)
+        return 'multi' if float(data['gate_score']) > 0.5 else 'uni'
+    except Exception:
+        return 'uni'
+
+
+def _build_cached_train_sampler(train_set, train_cfg, world_sz, rank):
+    """Weighted sampler for cached dataset, mirrors _build_probe_train_sampler."""
+    sampling_cfg = train_cfg.get('sampling', {})
+    if not sampling_cfg.get('enabled', False):
+        return torch.utils.data.DistributedSampler(
+            train_set, num_replicas=world_sz, rank=rank, shuffle=True
+        ), {"sampling_mode": "distributed_shuffle"}
+
+    if not isinstance(train_set, Subset):
+        warnings.warn("Expected train_set to be a Subset; falling back to DistributedSampler")
+        return torch.utils.data.DistributedSampler(
+            train_set, num_replicas=world_sz, rank=rank, shuffle=True
+        ), {"sampling_mode": "distributed_shuffle_fallback"}
+
+    multi_frac = float(sampling_cfg.get('multi_fraction', 0.5))
+    uni_frac = float(sampling_cfg.get('uni_fraction', 0.5))
+    denom = multi_frac + uni_frac
+    if denom <= 0:
+        raise ValueError("sampling.multi_fraction + sampling.uni_fraction must be > 0")
+    p_multi = multi_frac / denom
+    p_uni = uni_frac / denom
+
+    base_dataset = train_set.dataset
+    subset_indices = list(train_set.indices)
+
+    class_labels = [_safe_read_gate_score(base_dataset, i) for i in subset_indices]
+    n_multi = sum(1 for c in class_labels if c == 'multi')
+    n_uni = sum(1 for c in class_labels if c == 'uni')
+
+    if n_multi == 0 or n_uni == 0:
+        warnings.warn(
+            f"sampling.enabled=True but class counts are uni={n_uni}, multi={n_multi}; "
+            "falling back to DistributedSampler"
+        )
+        return torch.utils.data.DistributedSampler(
+            train_set, num_replicas=world_sz, rank=rank, shuffle=True
+        ), {"sampling_mode": "distributed_shuffle_fallback", "uni_count": n_uni, "multi_count": n_multi}
+
+    per_sample_target = {'uni': p_uni / n_uni, 'multi': p_multi / n_multi}
+    weights = [per_sample_target[c] for c in class_labels]
+
+    num_samples = int(sampling_cfg.get('num_samples', len(train_set)))
+    seed = int(sampling_cfg.get('seed', 0))
+    if world_sz > 1:
+        sampler = DistributedWeightedSampler(
+            weights=weights, num_samples=num_samples,
+            num_replicas=world_sz, rank=rank, seed=seed,
+        )
+        sampling_mode = "distributed_weighted"
+    else:
+        sampler = WeightedSampler(weights=weights, num_samples=num_samples, seed=seed)
+        sampling_mode = "weighted"
+
+    return sampler, {
+        "sampling_mode": sampling_mode,
+        "uni_count": n_uni, "multi_count": n_multi,
+        "effective_multi_probability": p_multi, "effective_uni_probability": p_uni,
+    }

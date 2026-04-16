@@ -305,4 +305,25 @@ def efficient(probe, encoder, criterion, loader, transforms, device, dtype, norm
 
     if n_batches > 0:
         print(f"mean_loss={running_loss / n_batches:.6f} over {n_batches} batches")
+
+
+def _decode_probe_waypoints(decoder, a_latent, decoder_type, n_waypoints):
+    pred = decoder(a_latent)
+    if decoder_type != 'EfficientProbe':
+        return pred
+
+    if pred.ndim == 4:
+        pred = pred[:, -1, :, :].mean(dim=1)
+    elif pred.ndim == 3:
+        pred = pred[:, -1, :]
+    elif pred.ndim != 2:
+        raise ValueError(f"Unexpected EfficientProbe output shape: {tuple(pred.shape)}")
+
+    expected_dim = n_waypoints * 2
+    if pred.shape[-1] != expected_dim:
+        raise ValueError(
+            f"EfficientProbe output dim mismatch: got {pred.shape[-1]}, expected {expected_dim}"
+        )
+
+    return pred.view(pred.shape[0], n_waypoints, 2)
                 

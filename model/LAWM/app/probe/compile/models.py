@@ -448,3 +448,81 @@ def compile_model(
     logger.INFO(f"Decoder parameters (trainable): {count_params(decoder)}")
 
     return world_model, decoder
+
+
+def compile_decoder_only(
+    probe_cfg: dict = None,
+    world_model_cfg: dict = None,
+    device=torch.device('cpu'),
+):
+    """Build only the waypoint decoder (no world model). For cached-latent training.
+
+    Reads `action_embed_dim` from the saved run config to match the cached
+    latent dimension, then builds the decoder.
+
+    Returns:
+        decoder: ActionDecoder instance (trainable)
+    """
+    probe_cfg = dict(probe_cfg or {})
+    world_model_cfg = dict(world_model_cfg or {})
+
+    # Auto-load action_embed_dim from the source run config
+    ckpt_dir = world_model_cfg.get('checkpoint_dir')
+    action_embed_dim = 128  # default
+    if ckpt_dir:
+        run_dir = ckpt_dir
+        if os.path.basename(run_dir) == "weights":
+            run_dir = os.path.dirname(run_dir)
+        run_cfg = _load_run_config(run_dir)
+        if run_cfg:
+            run_model = run_cfg.get('model', {})
+            apred_cfg = run_model.get('action', {})
+            action_embed_dim = apred_cfg.get('action_embed_dim', 128)
+
+    decoder_cfg = probe_cfg.get('decoder', {})
+    decoder_type = decoder_cfg.get('type', 'ActionDecoder')
+
+    if decoder_type == 'ActionDecoder':
+        decoder = ActionDecoder(
+            la_dim=action_embed_dim,
+            n_waypoints=decoder_cfg.get('n_waypoints', 12),
+            d_model=decoder_cfg.get('d_model', 256),
+            n_heads=decoder_cfg.get('n_heads', 8),
+            n_layers=decoder_cfg.get('n_layers', 4),
+            dim_feedforward=decoder_cfg.get('dim_feedforward', 512),
+            mlp_hidden=decoder_cfg.get('mlp_hidden', 128),
+            dropout=decoder_cfg.get('dropout', 0.1),
+        ).to(device)
+    elif decoder_type == 'EfficientProbe':
+        enc_cfg = {}
+        if ckpt_dir:
+            run_dir = ckpt_dir
+            if os.path.basename(run_dir) == "weights":
+                run_dir = os.path.dirname(run_dir)
+            run_cfg = _load_run_config(run_dir)
+            if run_cfg:
+                enc_cfg = run_cfg.get('model', {}).get('enc', {})
+        fpcs = enc_cfg.get('fpcs', 12)
+        decoder = build_probe(
+            name='EfficientProbe',
+            output_dim=decoder_cfg.get('n_waypoints', 12) * 2,
+            embed_dim=action_embed_dim,
+            num_patches=1,
+            max_frames=fpcs,
+            tubelet_size=1,
+            num_heads=decoder_cfg.get('n_heads', 8),
+            num_queries=decoder_cfg.get('num_queries', 16),
+            depth=decoder_cfg.get('depth', 2),
+            mlp_ratio=decoder_cfg.get('mlp_ratio', 4.0),
+        ).to(device)
+    else:
+        raise ValueError(f"Unknown decoder type: {decoder_type}")
+
+    def count_params(model):
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    logger.INFO(f"Decoder-only mode (cached latents)")
+    logger.INFO(f"Decoder parameters (trainable): {count_params(decoder)}")
+    logger.INFO(f"Action embed dim (from world model config): {action_embed_dim}")
+
+    return decoder
