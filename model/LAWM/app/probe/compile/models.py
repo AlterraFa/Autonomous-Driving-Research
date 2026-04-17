@@ -116,7 +116,6 @@ class ActionDecoder(nn.Module):
         q = self.norm(q)
         return self.mlp_head(q)
 
-
 class FrozenWorldModel(nn.Module):
     """Wraps the frozen straightening world model components for inference only.
     
@@ -136,6 +135,7 @@ class FrozenWorldModel(nn.Module):
         auto_steps: int = 5,
         normalize_reps: bool = True,
         normalize_actions: bool = False,
+        detailed_out: bool = False
     ):
         super().__init__()
         self.encoder = encoder
@@ -148,6 +148,7 @@ class FrozenWorldModel(nn.Module):
         self.auto_steps = auto_steps
         self.normalize_reps = normalize_reps
         self.normalize_actions = normalize_actions
+        self.detailed_out = detailed_out
 
         # Freeze everything
         for p in self.parameters():
@@ -155,56 +156,50 @@ class FrozenWorldModel(nn.Module):
         self.eval()
 
     @torch.no_grad()
-    def forward(self, clips: torch.Tensor):
-        """
+    def forward(self, context: torch.Tensor, goal: torch.Tensor):
+        """Fully autoregressive forward from first frame (context) + last frame (goal).
+
+        Only encodes frame 0 and frame -1. Rolls out action + prediction
+        autoregressively for auto_steps-1 iterations.
+
         Args:
-            clips: [B, C, T, H, W] video clips
+            clips: [B, C, T, H, W] full video clip
         Returns:
-            a_tf: [B, T_act, action_embed_dim] teacher-forced action latents
-            a_ar: [B, T_act, action_embed_dim] autoregressive action latents (last step)
+            detailed_out=False → a_tf  [B, T_act, action_embed_dim]
+            detailed_out=True  → (a_tf, z_ar)
         """
-        B, C, T_total, H, W = clips.shape
-        H_patches = H // self.patch_size
-        W_patches = W // self.patch_size
+        B, C, T_frames, H, W = context.shape
 
-        latent_ctx = self.encoder(clips[:, :, :-1])
-        latent_goal = self.encoder(clips[:, :, -1:])
-
+        # --- Encode only first and last frame ---
+        latent_ctx  = self.encoder(context)
+        latent_goal = self.encoder(goal)
         if self.normalize_reps:
-            latent_ctx = F.layer_norm(latent_ctx, (latent_ctx.size(-1),))
+            latent_ctx  = F.layer_norm(latent_ctx,  (latent_ctx.size(-1),))
             latent_goal = F.layer_norm(latent_goal, (latent_goal.size(-1),))
 
-        h_ctx = self.filterer(latent_ctx, H_patches, W_patches)
-        h_goal = self.target_filterer(latent_goal, H_patches, W_patches)
-
+        # --- Filter: online for context, EMA target for goal ---
+        h_ctx  = self.filterer(latent_ctx)
+        h_goal = self.target_filterer(latent_goal)
         if self.normalize_reps:
-            h_ctx = F.layer_norm(h_ctx, (h_ctx.size(-1),))
+            h_ctx  = F.layer_norm(h_ctx,  (h_ctx.size(-1),))
             h_goal = F.layer_norm(h_goal, (h_goal.size(-1),))
 
-        T_steps = (latent_ctx.shape[1] + latent_goal.shape[1]) // self.tokens_pframe
-
-        # Teacher-forced actions
-        a_tf = self.apred(h_ctx, h_goal, T=T_steps)
-        if self.normalize_actions:
-            a_tf = F.layer_norm(a_tf, (a_tf.size(-1),))
-
-        # Autoregressive rollout
-        z_tf = self.lpred(h_ctx, a_tf)
-        if self.normalize_reps:
-            z_tf = F.layer_norm(z_tf, (z_tf.size(-1),))
-
-        z_ctx = torch.cat([h_ctx[:, :self.tokens_pframe], z_tf[:, :self.tokens_pframe]], dim=1)
-        for _ in range(2, self.auto_steps):
-            a_ctx = self.apred(z_ctx, h_goal, T=T_steps)
+        # --- Fully autoregressive rollout from frame 0 ---
+        z_ctx = h_ctx                                   # single frame tokens
+        for _ in range(self.auto_steps - 1):
+            a = self.apred(z_ctx, h_goal)
             if self.normalize_actions:
-                a_ctx = F.layer_norm(a_ctx, (a_ctx.size(-1),))
-            z_nxt = self.lpred(z_ctx, a_ctx)
+                a = F.layer_norm(a, (a.size(-1),))
+            z_nxt = self.lpred(z_ctx, a)
             if self.normalize_reps:
                 z_nxt = F.layer_norm(z_nxt, (z_nxt.size(-1),))
             z_nxt = z_nxt[:, -self.tokens_pframe:]
             z_ctx = torch.cat([z_ctx, z_nxt], dim=1)
-            a_tf = a_ctx  # Use the latest full action sequence
+            a_tf = a
+        z_ar = z_ctx[:, self.tokens_pframe:]
 
+        if self.detailed_out:
+            return a_tf, z_ar
         return a_tf
 
 
@@ -224,6 +219,7 @@ def compile_model(
     probe_cfg: dict = None,
     world_model_cfg: dict = None,
     device=torch.device('cpu'),
+    detailed_out = False
 ):
     """Compile world model (frozen) + waypoint decoder (trainable).
 
@@ -311,6 +307,7 @@ def compile_model(
     tokens_pframe = (crop_size // patch_size) ** 2
 
     filter_cfg['embed_dim'] = encoder.embed_dim
+    filter_cfg['img_size'] = filter_cfg['crop_size']
     filterer = FILTER_REGISTRY[filter_cfg.get('name')](**filter_cfg).to(device)
     target_filterer = copy.deepcopy(filterer).to(device)
 
@@ -406,6 +403,7 @@ def compile_model(
         auto_steps=auto_steps,
         normalize_reps=normalize_reps,
         normalize_actions=normalize_actions,
+        detailed_out=detailed_out
     ).to(device)
 
     # -- Build waypoint decoder

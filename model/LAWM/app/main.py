@@ -32,11 +32,11 @@ parser.add_argument(
     help="path to a previous run directory (e.g. ./Experiment/probe/run1 or ./Experiment/run1)",
 )
 parser.add_argument(
-    "--probe-notebook",
-    dest="probe_notebook",
+    "--mode",
+    dest="mode",
     type=str,
-    default=None,
-    help="path to latent-probe.ipynb; when set, extract PARAMS",
+    default="train",
+    help="Mode to use (i.e train or eval)",
 )
 
 
@@ -80,7 +80,7 @@ def _find_run_yaml(run_dir: str) -> str:
     return yaml_candidates[0]
 
 
-def process(rank, fname, world_size, devices, continue_path=None, probe_notebook=None): 
+def process(rank, fname, world_size, devices, continue_path=None, mode="train"): 
     import os, sys
 
     os.environ['CUDA_VISIBLE_DEVICES'] = str(devices[rank].split(":")[-1])
@@ -91,29 +91,15 @@ def process(rank, fname, world_size, devices, continue_path=None, probe_notebook
 
     config_path = fname
     resolved_continue_dir = None
-    nb_probed = bool(probe_notebook)
-
-    if nb_probed:
-        extracted = extract_nb_params(probe_notebook)
-        params = extracted["PARAMS"]
-        config_path = str(Path(probe_notebook).resolve())
-        logger.INFO(f"Loaded PARAMS from probe notebook: {config_path}")
-
-        notebook_continue_path = extracted.get("CONTINUE_PATH")
-        effective_continue_path = continue_path or notebook_continue_path
-        if effective_continue_path:
-            resolved_continue_dir = _resolve_continue_run_dir(str(effective_continue_path))
-            logger.INFO(f"Continuing from run directory: {resolved_continue_dir}")
-    elif continue_path:
+    if continue_path:
         resolved_continue_dir = _resolve_continue_run_dir(continue_path)
         config_path = _find_run_yaml(resolved_continue_dir)
         logger.INFO(f"Continuing from run directory: {resolved_continue_dir}")
         logger.INFO(f"Loading run config from: {config_path}")
 
-    if not nb_probed:
-        with open(config_path, "r") as f:
-            params = yaml.load(f, Loader = yaml.FullLoader)
-            logger.INFO(f"Rank {rank} Loaded parameters")
+    with open(config_path, "r") as f:
+        params = yaml.load(f, Loader = yaml.FullLoader)
+        logger.INFO(f"Rank {rank} Loaded parameters")
 
     if resolved_continue_dir is not None:
         meta_cfg = params.setdefault("meta", {})
@@ -129,7 +115,7 @@ def process(rank, fname, world_size, devices, continue_path=None, probe_notebook
         Logger.set_levels("ERROR", "DEBUG", "CUSTOM")
 
     try:
-        task_module = "train"
+        task_module = mode
         importlib.import_module(f"app.{params['app']}.{task_module}").main(params, config_path)
     except KeyboardInterrupt:
         logger.ERROR(f"Keyboard Interrupt detected on {rank=}")
@@ -158,6 +144,6 @@ if __name__ == "__main__":
                 num_gps,
                 devices,
                 args_parser.continue_path,
-                args_parser.probe_notebook,
+                args_parser.mode,
             ),
         ).start()

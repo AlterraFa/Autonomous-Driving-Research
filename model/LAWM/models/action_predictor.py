@@ -4,7 +4,8 @@ import math
 import torch.nn.functional as F
 from torch.nn.modules.utils import _pair
 
-from .utils.modules import ACBlock, GCBlock, build_gc_causal_attn_mask
+from .utils.block import ACBlock, GCBlock
+from .utils.modules import build_gc_causal_attn_mask
 from .utils.tensors import trunc_normal_
 from .utils.get_layers import get_norm_layer
 
@@ -322,11 +323,10 @@ class ActionTransformerPredictorGC(nn.Module):
 
         context = context.view(B, ctx_timestep, self.token_pframes, self.action_embed_dim) # -- B, T, H*W, D
 
-        current_T = T if T is not None else (ctx_timestep + goal.size(1) // self.token_pframes)
-
+        current_T = T if T is not None else self.max_tubelets
 
         action_tokens = self.action_embed
-        action_tokens = F.interpolate(action_tokens.permute(0, 2, 1), current_T - 1, mode = "linear", align_corners = True).permute(0, 2, 1)
+        action_tokens = F.interpolate(action_tokens.permute(0, 2, 1), (current_T - 1) * self.action_pstep, mode = "linear", align_corners = True).permute(0, 2, 1)
         action_tokens = action_tokens.expand(B, -1, -1)[:, :ctx_timestep * self.action_pstep, :]
         action_tokens = action_tokens.view(
             B, ctx_timestep, self.action_pstep, self.action_embed_dim
@@ -391,10 +391,10 @@ class ActionTransformerPredictorGC(nn.Module):
     
 if __name__ == "__main__":
     device = torch.device('cuda')
-    model = ActionTransformerPredictorGC(max_frames = 12, out_norm = "LayerNorm").to(device)
+    model = ActionTransformerPredictorGC(max_frames = 12, out_norm = "LayerNorm", action_per_step = 10).to(device)
     context_T = 6
     goal_T = 1
-    context = torch.randn(5, (context_T - 3) * 196, 768).to(device)
+    context = torch.randn(5, (context_T - 2) * 196, 768).to(device)
     goal    = torch.randn(5, goal_T * 196, 768).to(device)
 
     with torch.no_grad():

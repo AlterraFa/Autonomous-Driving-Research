@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from masks.utils import apply_masks
-from models.utils.modules import Block
+from models.utils.block import Block
 from models.utils.patch_embed import PatchEmbed, PatchEmbed3D
 from models.utils.pos_embs import get_2d_sincos_pos_embed, get_3d_sincos_pos_embed
 from utils.tensors import trunc_normal_

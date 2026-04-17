@@ -8,7 +8,7 @@ try:
 except:
     print("No Mamba found")
 from torch.nn.modules.utils import _pair
-from .utils.modules import Block
+from .utils.block import Block
 from .utils.pos_embs import get_3d_sincos_pos_embed
 from .utils.get_layers import get_norm_layer
 

@@ -309,7 +309,6 @@ def main(args: dict, yaml_path: str):
         world_sz = world_size,
         rank = rank
     )
-    
     optim, scaler, lr_scheduler, wd_scheduler = compile_opt(
         filterer             = filterer,
         apred                = apred,
@@ -331,209 +330,33 @@ def main(args: dict, yaml_path: str):
     log_dir = os.path.join(save_root_dir, "straightening")
     logger.INFO(f"Straightening save root directory: {log_dir}")
 
-    continue_run_dir = None
-    continue_run_name = None
-    if continue_train:
-        continue_run_dir = os.path.abspath(os.path.expanduser(continue_from_path))
-        if os.path.basename(continue_run_dir) == "weights":
-            continue_run_dir = os.path.dirname(continue_run_dir)
-        if not os.path.isdir(continue_run_dir):
-            raise FileNotFoundError(f"continue_from_path does not exist: {continue_from_path}")
-        continue_run_name = os.path.basename(continue_run_dir)
-        if not continue_run_name.startswith("run"):
-            raise ValueError(
-                f"Expected continue_from_path to point to a run directory like '.../run1', got: {continue_run_dir}"
-            )
-
-    if rank == 0:
-        if continue_train:
-            resolved_run_idx = int(continue_run_name.removeprefix("run"))
-            logger.INFO(f"Resuming requested. Selected run directory: {continue_run_dir}")
-        else:
-            resolved_run_idx = get_next_run(log_dir)
-        run_idx_tensor = torch.tensor([resolved_run_idx], dtype=torch.long, device=device)
-    else:
-        run_idx_tensor = torch.tensor([0], dtype=torch.long, device=device)
-
-    if dist.is_initialized() and world_size > 1:
-        dist.broadcast(run_idx_tensor, src=0)
-    run_idx = int(run_idx_tensor.item())
-
-    start_epoch = 0
-    resume_score = None
-    resume_best_loss = None
-    run_name = f"run{run_idx}"
-    run_dir = os.path.join(log_dir, run_name)
-
-    if continue_train and continue_run_dir is not None:
-        run_dir = continue_run_dir
-        run_name = os.path.basename(run_dir)
-        models_to_resume = {
-            "filter": filterer,
-            "target_filter": target_filterer,
-            "agg": agg,
-            "lpred": lpred,
-            "apred": apred,
-        }
-        (
-            resumed_models,
-            optim,
-            scaler,
-            start_epoch,
-            resume_score,
-            resume_best_loss,
-        ) = load_ckpt(
-            models_dict=models_to_resume,
-            optimizer=optim,
-            scaler=scaler,
-            checkpoint_dir=os.path.join(run_dir, "weights"),
-            prefer_best=resume_prefer_best,
-            map_location=device,
-        )
-        filterer = resumed_models["filter"]
-        target_filterer = resumed_models["target_filter"]
-        agg = resumed_models["agg"]
-        lpred = resumed_models["lpred"]
-        apred = resumed_models["apred"]
-        logger.INFO(
-            f"Resumed straightening from {run_dir} at epoch {start_epoch} "
-            f"using {'best' if resume_prefer_best else 'latest last'} checkpoints"
-        )
-
-    # Only create logger and run directories for rank 0 to avoid race conditions.
-    if rank == 0:
-        log_stats = create_self_supervised_logger(
-            log_dir = log_dir,
-            epochs = num_epochs,
-            run_name = run_name,
-            progress_type = progress_type,
-            save_csv = save_csv,
-            save_batch_csv = save_batch_csv,
-            save_epoch_csv = save_epoch_csv,
-            log_batch_tensorboard = log_batch_tensorboard,
-        )
-        saver = MultiModuleEarlyStopping(
-            patience = patience,
-            freq = save_freq,
-            path_root = os.path.join(run_dir, "weights"),
-            weights_only = True,
-            min_delta = min_delta
-        )
-        if resume_best_loss is not None:
-            saver.best_loss = resume_best_loss
-        elif resume_score is not None:
-            saver.best_loss = resume_score
-        if not continue_train:
-            yaml_name = f"{args['app']}-{model_cfg.get('filter', {}).get('name', 'model')}-{reg_type}-{crop_size}px.yaml"
-            save_config_pretty(args, os.path.join(run_dir, yaml_name))
-
-        if log_model_graph:
-            class _StraighteningInferenceGraph(torch.nn.Module):
-                def __init__(
-                    self,
-                    encoder_model: torch.nn.Module,
-                    filter_model: torch.nn.Module,
-                    target_filter_model: torch.nn.Module,
-                    lpred_model: torch.nn.Module,
-                    apred_model: torch.nn.Module,
-                    patch_size: int,
-                    tokens_pframe: int,
-                    init_step: int,
-                    auto_steps: int,
-                    normalize_reps: bool,
-                    normalize_actions: bool,
-                ):
-                    super().__init__()
-                    self.encoder_model = encoder_model
-                    self.filter_model = filter_model
-                    self.target_filter_model = target_filter_model
-                    self.lpred_model = lpred_model
-                    self.apred_model = apred_model
-                    self.patch_size = patch_size
-                    self.tokens_pframe = tokens_pframe
-                    self.init_step = init_step
-                    self.auto_steps = auto_steps
-                    self.normalize_reps = normalize_reps
-                    self.normalize_actions = normalize_actions
-                    
-                def _step_action(self, h: torch.Tensor, g: torch.Tensor, t_steps: int):
-                    a = self.apred_model(h, g, T=t_steps)
-                    if self.normalize_actions:
-                        a = F.layer_norm(a, (a.size(-1), ))
-                    return a
-
-                def _step_prediction(self, h: torch.Tensor, a: torch.Tensor):
-                    z = self.lpred_model(h, a)
-                    if self.normalize_reps:
-                        z = F.layer_norm(z, (z.size(-1), ))
-                    return z
-
-                def forward(self, clips: torch.Tensor):
-                    latent_ctx = self.encoder_model(clips[:, :, :-1])
-                    latent_goal = self.encoder_model(clips[:, :, -1:])
-
-                    if self.normalize_reps:
-                        latent_ctx = F.layer_norm(latent_ctx, (latent_ctx.size(-1), ))
-                        latent_goal = F.layer_norm(latent_goal, (latent_goal.size(-1), ))
-
-                    # Get patches from clips
-                    _, _, _, H, W = clips.shape
-                    h_patches = H // self.patch_size
-                    w_patches = W // self.patch_size
-
-                    h_ctx = self.filter_model(latent_ctx, h_patches, w_patches)
-                    h_goal = self.target_filter_model(latent_goal, h_patches, w_patches)
-
-                    if self.normalize_reps:
-                        h_ctx = F.layer_norm(h_ctx, (h_ctx.size(-1), ))
-                        h_goal = F.layer_norm(h_goal, (h_goal.size(-1), ))
-
-                    t_steps = (latent_ctx.shape[1] + latent_goal.shape[1]) // self.tokens_pframe
-
-                    z_ctx = h_ctx[:, :self.tokens_pframe]
-                    
-                    # The loop will be unrolled into the graph
-                    for _ in range(self.init_step, self.auto_steps):
-                        a_ctx = self._step_action(z_ctx, h_goal, t_steps)
-                        z_pred = self._step_prediction(z_ctx, a_ctx)
-                        z_nxt = z_pred[:, -self.tokens_pframe:]
-                        z_ctx = torch.cat([z_ctx, z_nxt], dim=1)
-
-                    z_ar = z_ctx[:, self.tokens_pframe:]
-                    return z_ar, a_ctx
-
-            graph_encoder = encoder.module if isinstance(encoder, DDP) else encoder
-            graph_filter = filterer.module if isinstance(filterer, DDP) else filterer
-            graph_target_filter = target_filterer.module if isinstance(target_filterer, DDP) else target_filterer
-            graph_lpred = lpred.module if isinstance(lpred, DDP) else lpred
-            graph_apred = apred.module if isinstance(apred, DDP) else apred
-
-            full_graph_model = _StraighteningInferenceGraph(
-                encoder_model=graph_encoder,
-                filter_model=graph_filter,
-                target_filter_model=graph_target_filter,
-                lpred_model=graph_lpred,
-                apred_model=graph_apred,
-                patch_size=patch_size,
-                tokens_pframe=tokens_pframe,
-                init_step=1,
-                auto_steps=fpcs // tubelet_size,
-                normalize_reps=normalize_reps,
-                normalize_actions=normalize_actions,
-            )
-            full_graph_model.eval()
-            for m in full_graph_model.modules():
-                if hasattr(m, "use_fast_path"):
-                    m.use_fast_path = False
-
-            graph_clips = torch.randn(1, 3, fpcs, crop_size, crop_size, device=device)
-            log_stats.log_model_graph(full_graph_model, (graph_clips,))
-            logger.INFO("Logged one end-to-end TensorBoard model graph for straightening inference")
-            for m in full_graph_model.modules():
-                if hasattr(m, "use_fast_path"):
-                    m.use_fast_path = True
-    else:
-        log_stats = NoOpLogger()
+    models_to_resume = {
+        "filter": filterer,
+        "target_filter": target_filterer,
+        "agg": agg,
+        "lpred": lpred,
+        "apred": apred,
+    }
+    (
+        resumed_models,
+        optim,
+        scaler,
+        start_epoch,
+        resume_score,
+        resume_best_loss,
+    ) = load_ckpt(
+        models_dict=models_to_resume,
+        optimizer=optim,
+        scaler=scaler,
+        checkpoint_dir=os.path.join(continue_from_path, "weights"),
+        prefer_best=resume_prefer_best,
+        map_location=device,
+    )
+    filterer = resumed_models["filter"]
+    target_filterer = resumed_models["target_filter"]
+    agg = resumed_models["agg"]
+    lpred = resumed_models["lpred"]
+    apred = resumed_models["apred"]
    
     if sync_gc:
         gc.disable()
@@ -547,8 +370,6 @@ def main(args: dict, yaml_path: str):
     )
 
     def train_step(clips):
-        _new_lr = lr_scheduler.step()
-        _new_wd = wd_scheduler.step()
 
         def forward_context(latent: torch.Tensor, H: int, W: int):
             h: torch.Tensor = filterer(latent, H, W)
@@ -747,34 +568,12 @@ def main(args: dict, yaml_path: str):
             loss = loss_tf + loss_ar + loss_act + loss_straight + loss_collapse
             
             
-        if mixed_precision:
-            scaler.scale(loss).backward()
-            scaler.unscale_(optim)
-        else:
-            loss.backward()
-            
-        if mixed_precision:
-            scaler.step(optim)
-            scaler.update()
-        else:
-            optim.step()
-        optim.zero_grad()
-
-        m = next(momentum_scheduler)
-        with torch.no_grad():
-            params_k = []
-            params_q = []
-            for param_q, param_k in zip(filterer.parameters(), target_filterer.parameters()):
-                params_k.append(param_k)
-                params_q.append(param_q)
-            torch._foreach_mul_(params_k, m)
-            torch._foreach_add_(params_k, params_q, alpha=1 - m)
         
         loss = loss.item()
         loss_tf = loss_tf.item()
         loss_ar = loss_ar.item()
         loss_act = loss_act.item()
-        
+
         return (
             loss, 
             loss_tf,
@@ -784,106 +583,35 @@ def main(args: dict, yaml_path: str):
             loss_collapse,
             energy,
             vcm,
-            _new_lr,
-            _new_wd
         )
         
     
-    with log_stats:
-        log_stats.start_training("Training Filtering Latent Action WM")
-        video_sampler.set_epoch(0)
-        for epoch in range(num_epochs):
+    for epoch in range(num_epochs):
+        for itr in range(ipe):
             
-            log_stats.start_epoch(epoch, ipe, desc = "Training")
-            
-            for itr in log_stats.batch_iterator([i for i in range(ipe)]):
-                
-                iter_retries = 0
-                iter_success = False
-                while not iter_success:
-                    try:
-                        sample = next(loader)
-                        iter_success = True
-                    except StopIteration:
-                        loader = iter(video_loader)
-                        video_sampler.set_epoch(epoch)
-                    except Exception as e:
-                        NUM_RETRIES = 5
-                        if iter_retries < NUM_RETRIES:
-                            logger.WARNING(f"Encountered an error while iterating loader: {e}")
-                            iter_retries += 1
-                            time.sleep(5)
-                        else:
-                            logger.ERROR("Exceeded maximum retries when iterating dataloade. Please check for error", exit_code = 5, full_traceback = e)
-                        
-                clips = sample.to(device)
-                
-                (loss, loss_tf, loss_ar, loss_act, loss_collapse, loss_straight, energy, vcm, curr_lr, curr_wd), elapsed_time = gpu_timer(partial(train_step, clips))
-
-                if np.isnan(loss) or np.isinf(loss):
-                    logger.ERROR(f"Model failed to converge. {'nan' if np.isnan(loss) else 'inf' if np.isinf(loss) else ''} detected", exit_code = -213)
-                
-                if energy and vcm:
-                    log_stats.log_batch({
-                        "LR": curr_lr,
-                        "WD": curr_wd, 
-                        "Loss": loss,
-                        "Teach Force|Z": loss_tf,
-                        "Autoregressive|Z": loss_ar,
-                        "Action": loss_act,
-                        "Collapse": loss_collapse,
-                        "Straight": loss_straight,
-                        "Hinge|Erg": energy[0],
-                        "Sparsity|Erg": energy[1],
-                        "Variance|VCM": vcm[0],
-                        "Covariance|VCM": vcm[1],
-                        "Mean|VCM": vcm[2],
-                        "Std": vcm[3],
-                    })
-                else:
-                    log_stats.log_batch({
-                        "LR": curr_lr,
-                        "WD": curr_wd, 
-                        "Loss": loss,
-                        "Teach Force|Z": loss_tf,
-                        "Autoregressive|Z": loss_ar,
-                        "Action | SIGReg": loss_act,
-                        "Collapse": loss_collapse,
-                        "Straight": loss_straight,
-                    })
+            iter_retries = 0
+            iter_success = False
+            while not iter_success:
+                try:
+                    sample = next(loader)
+                    iter_success = True
+                except StopIteration:
+                    loader = iter(video_loader)
+                    video_sampler.set_epoch(epoch)
+                except Exception as e:
+                    NUM_RETRIES = 5
+                    if iter_retries < NUM_RETRIES:
+                        logger.WARNING(f"Encountered an error while iterating loader: {e}")
+                        iter_retries += 1
+                        time.sleep(5)
+                    else:
+                        logger.ERROR("Exceeded maximum retries when iterating dataloade. Please check for error", exit_code = 5, full_traceback = e)
                     
+            clips = sample.to(device)
             
-            log_stats.log_epoch()
+            (loss, loss_tf, loss_ar, loss_act, loss_collapse, loss_straight, energy, vcm), elapsed_time = gpu_timer(partial(train_step, clips))
+
+            if np.isnan(loss) or np.isinf(loss):
+                logger.ERROR(f"Model failed to converge. {'nan' if np.isnan(loss) else 'inf' if np.isinf(loss) else ''} detected", exit_code = -213)
             
-            gc.collect()
-            
-            if rank == 0:
-                models_to_save = {
-                    "filter": filterer,
-                    "target_filter": target_filterer,
-                    "agg": agg,
-                    "lpred": lpred,
-                    "apred": apred
-                }
-                saver(
-                    score=log_stats.get_metric("Loss", "train"), 
-                    models_dict=models_to_save, 
-                    optimizer=optim, 
-                    scaler=scaler, 
-                    epoch=epoch
-                )
-                
-                if saver.early_stop:
-                    logger.INFO("Early stopping triggered")
-
-            should_stop = False
-            if rank == 0:
-                should_stop = bool(saver.early_stop)
-
-            if dist.is_initialized() and world_size > 1:
-                stop_tensor = torch.tensor([int(should_stop)], device=device)
-                dist.broadcast(stop_tensor, src=0)
-                should_stop = bool(stop_tensor.item())
-
-            if should_stop:
-                break
+        gc.collect()

@@ -4,7 +4,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from .utils.modules import ACBlock as Block
+from .utils.block import ACBlock as Block
 from .utils.modules import build_action_block_causal_attention_mask
 from .utils.tensors import trunc_normal_
 from .utils.get_layers import get_norm_layer
@@ -201,7 +201,7 @@ def vit_ac_predictor(**kwargs):
 if __name__ == "__main__":
     device = torch.device('cuda')
 
-    action_pframe = 1
+    action_pframe = 10
     frame_size = 224; patch_sz = 16
     grid_sz = int(frame_size // patch_sz) 
     num_frames = 16; tubelet_sz = 2
@@ -221,7 +221,7 @@ if __name__ == "__main__":
         tubelet_size=tubelet_sz,
         mlp_ratio=4,
         qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6),
+        norm_layer="LayerNorm",
         action_embed_dim=action_embed_dim,
         embed_dim=embed_dim,
         predictor_embed_dim=pred_embed_dim,
