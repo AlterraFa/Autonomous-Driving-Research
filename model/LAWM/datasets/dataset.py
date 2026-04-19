@@ -110,13 +110,14 @@ class FormattedVideoDataset(Dataset):
         if len(image_paths) <= self.fpcs:
             return decode_batch(image_paths)
 
+        if self.fpcs > len(image_paths):
+            print("[ERROR]:  NOT ENOUGH FRAME FOR SELECTION")
         if self.frame_selection == "interpolate":
             # Uniformly sample indices across the sequence timeline.
             sampled_idx = np.linspace(0, len(image_paths) - 1, num=self.fpcs)
             sampled_idx = np.round(sampled_idx).astype(np.int64)
             sampled_paths = np.array(image_paths, dtype=object)[sampled_idx].tolist()
             return decode_batch(sampled_paths)
-
         return decode_batch(image_paths[: self.fpcs])
 
 class VideoDataset(Dataset):
