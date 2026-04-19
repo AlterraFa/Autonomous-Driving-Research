@@ -110,7 +110,7 @@ def compile_dataloader(
         data_paths = train_cfg['datasets_path'],
         shared_transform = transform,
         fpcs = train_cfg['fpcs'],
-        frame_selection = train_cfg['interpolation_mode']
+        frame_selection = train_cfg['frame_selection']
     )
 
     sampler, sampler_info = _build_action_train_sampler(
@@ -136,7 +136,7 @@ def compile_dataloader(
         "dataset": {
             "data_paths": train_cfg['datasets_path'],
             'fpcs': train_cfg['fpcs'],
-            'frame_selection': train_cfg['interpolation_mode']
+            'frame_selection': train_cfg['frame_selection']
         },
         "dataloader": {
             "batch_size": train_cfg['batch_size'],
