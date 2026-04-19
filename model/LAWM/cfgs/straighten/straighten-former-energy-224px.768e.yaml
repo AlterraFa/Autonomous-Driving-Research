@@ -14,20 +14,32 @@ train:
   persistent_workers: true
   pin_mem: true
   datasets_path:
-    - ./../Autonomous_Dataset/carla/LAWM/recording_20251025_142727_best_spatial/
-    - ./../Autonomous_Dataset/carla/LAWM/recording_20260204_010805_spatial/
-    - ./../Autonomous_Dataset/carla/LAWM/recording_20260308_212005_spatial/
-    - ./../Autonomous_Dataset/carla/LAWM/recording_20260317_214033_best_spatial/
-    - ./../Autonomous_Dataset/carla/LAWM/recording_20260317_233603_spatial/
-    - ./../Autonomous_Dataset/carla/LAWM/recording_20260318_083409_best_spatial/
-    - ./../Autonomous_Dataset/carla/LAWM/recording_20260323_200940_best_spatial/
-    - ./../Autonomous_Dataset/carla/LAWM/recording_20260329_233141_best_spatial/
-    - ./../Autonomous_Dataset/carla/LAWM/recording_20260323_204100_best_spatial/
-    - ./../Autonomous_Dataset/carla/LAWM/recording_20260323_210357_best_spatial/
-    - ./../Autonomous_Dataset/carla/LAWM/recording_20260329_164940_best_spatial/
-    - ./../Autonomous_Dataset/carla/LAWM/recording_20260410_152712_best_spatial/
-    - ./../Autonomous_Dataset/carla/LAWM/recording_20260410_154404_best_spatial/
-    - ./../Autonomous_Dataset/carla/LAWM/recording_20260410_160255_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM1/recording_20260204_010805_spatial/
+    - ../../../Autonomous_Dataset/LAWM1/recording_20260308_212005_spatial/
+    - ../../../Autonomous_Dataset/LAWM1/recording_20260317_214033_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM1/recording_20260317_233603_spatial/
+    - ../../../Autonomous_Dataset/LAWM1/recording_20260318_083409_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM1/recording_20260323_200940_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM1/recording_20260329_233141_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM1/recording_20260323_204100_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM1/recording_20260323_210357_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM1/recording_20260329_164940_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM1/recording_20260410_152712_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM1/recording_20260410_154404_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM1/recording_20260410_160255_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM2/recording_20260204_010805_spatial/
+    - ../../../Autonomous_Dataset/LAWM2/recording_20260308_212005_spatial/
+    - ../../../Autonomous_Dataset/LAWM2/recording_20260317_214033_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM2/recording_20260317_233603_spatial/
+    - ../../../Autonomous_Dataset/LAWM2/recording_20260318_083409_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM2/recording_20260323_200940_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM2/recording_20260329_233141_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM2/recording_20260323_204100_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM2/recording_20260323_210357_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM2/recording_20260329_164940_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM2/recording_20260410_152712_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM2/recording_20260410_154404_best_spatial/
+    - ../../../Autonomous_Dataset/LAWM2/recording_20260410_160255_best_spatial/
 
 data_aug:
   auto_augment: false
@@ -131,7 +143,7 @@ loss:
   loss_exp: 1.0
   normalize_reps: true
   normalize_actions: true
-  autogresssive_idx: [-1, -2, -3]
+  autoregressive_idx: [-1, -2, -3]
   action_reg: 
     name: energy
     l2: 1.0
