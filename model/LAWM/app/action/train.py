@@ -1,8 +1,8 @@
 import os, sys
 import resource
-import yaml
 import time
 import gc
+from ruamel.yaml import YAML
 from functools import partial
 from pathlib import Path
 
@@ -15,9 +15,10 @@ import random
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch import distributed as dist
+import torch.distributed as dist
 from torch.nn import functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
+from utils.distributed import all_gather, all_reduce
 
 from .compile import (
     compile_model,
@@ -32,7 +33,7 @@ from utils.training_logger import (
 )
 from utils.distributed import init_distributed
 from utils.logger import Logger
-from utils.early_stop import EarlyStopping
+from utils.early_stop import EarlyStopping, MultiModuleEarlyStopping
 
 logger = Logger(__name__)
 
@@ -53,63 +54,76 @@ def gpu_timer(funct, log_timming = True):
     
     return result, elapsed_time
 
-
-def load_checkpoint(model, optimizer, checkpoint_dir, prefer_best=True, map_location=None):
-    basename = "checkpoint.pt"
-    meta_path = os.path.join(checkpoint_dir, basename)
-    if not os.path.exists(meta_path):
-        raise FileNotFoundError(f"Missing {meta_path}")
-
-    meta = torch.load(meta_path, map_location=map_location)
-    score = meta.get("score")
-    start_epoch = meta.get("epoch", 0)
-
-    prefix = "best_" if prefer_best else "last_"
-    model_path = os.path.join(checkpoint_dir, f"{prefix}{basename}")
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Missing {model_path}")
-
-    loaded_model = torch.load(model_path, map_location=map_location)
-    model.load_state_dict(loaded_model.state_dict())
-    if optimizer is not None and meta.get("optimizer_state_dict") is not None:
-        optimizer.load_state_dict(meta["optimizer_state_dict"])
-
-    return model, optimizer, start_epoch + 1, score
-
-def load_multi_checkpoint(
-    models: dict,            # {"encoder": enc_model, "target": tgt_model, "predictor": pred_model}
-    checkpoint_dir: str,
-    prefer_best: bool = True,
-    optimizer: torch.optim.Optimizer | None = None,
+def load_ckpt(
+    models_dict,
+    optimizer,
+    scaler,
+    checkpoint_dir,
+    prefer_best=True,
     map_location=None,
 ):
     meta_path = os.path.join(checkpoint_dir, "checkpoint.pt")
     if not os.path.exists(meta_path):
         raise FileNotFoundError(f"Missing {meta_path}")
 
-    meta = torch.load(meta_path, map_location=map_location)
+    meta = torch.load(meta_path, map_location=map_location, weights_only=False)
     score = meta.get("score")
+    best_loss = meta.get("best_loss", score)
     start_epoch = meta.get("epoch", 0)
+
     prefix = "best_" if prefer_best else "last_"
-
-    def _load_model_file(model_key: str, filename_suffix: str):
-        model_path = os.path.join(checkpoint_dir, f"{prefix}checkpoint{filename_suffix}.pt")
+    missing_models = []
+    for name, model in models_dict.items():
+        model_path = os.path.join(checkpoint_dir, f"{prefix}{name}.pt")
         if not os.path.exists(model_path):
-            return  # allow missing optional models
-        loaded = torch.load(model_path, map_location=map_location)
-        models[model_key].load_state_dict(loaded.state_dict())
+            missing_models.append(model_path)
+            continue
 
-    _load_model_file("encoder", "")
+        model_state = torch.load(model_path, map_location=map_location)
+        model.load_state_dict(model_state)
 
-    if "target" in models:
-        _load_model_file("target", "_target")
-    if "predictor" in models:
-        _load_model_file("predictor", "_predictor")
+    if missing_models:
+        missing = "\n".join(missing_models)
+        raise FileNotFoundError(
+            f"Missing expected resume weights in {checkpoint_dir}:\n{missing}"
+        )
 
     if optimizer is not None and meta.get("optimizer_state_dict") is not None:
         optimizer.load_state_dict(meta["optimizer_state_dict"])
+    if scaler is not None and meta.get("scaler_state_dict") is not None:
+        scaler.load_state_dict(meta["scaler_state_dict"])
 
-    return models, optimizer, start_epoch + 1, score
+    return models_dict, optimizer, scaler, start_epoch + 1, score, best_loss
+
+def save_config_pretty(config_dict, save_path):
+    yaml = YAML()
+    # Basic formatting
+    yaml.indent(mapping=2, sequence=4, offset=2)
+    yaml.preserve_quotes = True
+    yaml.default_flow_style = False
+    
+    # This turns the dict into a 'ruamel' internal dict that supports comments/spacing
+    from ruamel.yaml.comments import CommentedMap
+    
+    def dict_to_commented(d):
+        if isinstance(d, dict):
+            cm = CommentedMap()
+            for k, v in d.items():
+                cm[k] = dict_to_commented(v)
+            return cm
+        return d
+
+    pretty_data = dict_to_commented(config_dict)
+
+    # Add a blank line before every top-level key for readability
+    first = True
+    for key in pretty_data.keys():
+        if not first:
+            pretty_data.yaml_set_comment_before_after_key(key, before='\n')
+        first = False
+
+    with open(save_path, 'w') as f:
+        yaml.dump(pretty_data, f)
 
     
 GLOBAL_SEED = 12
@@ -117,6 +131,12 @@ random.seed(GLOBAL_SEED)
 np.random.seed(GLOBAL_SEED)
 torch.manual_seed(GLOBAL_SEED)
 torch.backends.cudnn.benchmark = True
+ACTION_LOSS = {}
+def loss_registry(name):
+    def decorator(fn):
+        ACTION_LOSS[name] = fn
+        return fn
+    return decorator
 
 def main(args: dict, yaml_path: str):
     
@@ -124,21 +144,19 @@ def main(args: dict, yaml_path: str):
     patch_size   = train_cfg.get('patch_size', 16)
     tubelet_size = train_cfg.get('tubelet_size', 2)
     crop_size    = train_cfg.get('crop_size', 224)
-    nclips       = train_cfg.get('nclips', 1)
-    ctx_fpcs     = train_cfg.get('ctx_fpcs', 8)
-    pred_fpcs    = train_cfg.get('pred_fpcs', 8)
+    fpcs = train_cfg.get('fpcs', 16)
     
     loader_cfg: dict = args.get('loader_setup', {})
-    num_workers        = loader_cfg.get('num_workers', 1)
-    persistent_workers = loader_cfg.get('persistent_workers', False)
-    pin_mem            = loader_cfg.get('pin_mem', False)
+    num_workers        = loader_cfg.get('num_workers', train_cfg.get('num_workers', 1))
+    persistent_workers = loader_cfg.get('persistent_workers', train_cfg.get('persistent_workers', False))
+    pin_mem            = loader_cfg.get('pin_mem', train_cfg.get('pin_mem', False))
 
-    model_cfg: dict = args.get("model", {})
-    enc_cfg   = model_cfg.get('enc', {})
-    probe_cfg = model_cfg.get('probe', {})
-    pred_cfg  = model_cfg.get('pred', probe_cfg.get('pred', probe_cfg))
-    act_cfg   = model_cfg.get('action', probe_cfg.get('action', probe_cfg))
-    common_cfg = model_cfg.get('common', {})
+    model_cfg: dict    = args.get("model", {})
+    enc_cfg       = model_cfg.get('enc', {})
+    pred_cfg      = model_cfg.get('pred', {})
+    act_cfg       = model_cfg.get('action', {})
+    filter_cfg    = model_cfg.get('filter', {})
+    common_cfg    = model_cfg.get('common', {})
     action_pframe = common_cfg.get('action_pframe', 1)
 
     augment_cfg: dict = args.get('data_aug', {})
@@ -150,8 +168,8 @@ def main(args: dict, yaml_path: str):
     reprob              = augment_cfg.get('reprob', 0.0)
     
     optim_cfg: dict = args.get('optimization', {})
-    annel        = optim_cfg.get('annel', 1)
-    epochs       = optim_cfg.get('epochs', 100)
+    anneal       = optim_cfg.get('anneal', 15)
+    num_epochs   = optim_cfg.get('epochs', 100)
     final_lr     = optim_cfg.get('final_lr', 0.0)
     final_wd     = optim_cfg.get("final_weight_decay", 0.0)
     ipe          = optim_cfg.get('ipe', 100)
@@ -164,23 +182,53 @@ def main(args: dict, yaml_path: str):
 
     init_step = 2
     loss_cfg: dict = args.get('loss', {})
-    auto_steps    = min(init_step + loss_cfg.get('auto_steps', 0), (ctx_fpcs + pred_fpcs) // tubelet_size)
-    loss_exp      = loss_cfg.get("loss_exp", 1.0)
-    normalize_rep = loss_cfg.get('normalize_rep', False)
-    reg_coeff     = loss_cfg.get('reg_coeff', 0.0)
-    l1_energy     = loss_cfg.get('l1', 1.0)
-    l2_energy     = loss_cfg.get('l2', 0.0)
-    lv_vcm        = loss_cfg.get('lv', 0.0)
-    lc_vcm        = loss_cfg.get('lc', 0.0)
-    lm_vcm        = loss_cfg.get('lm', 0.0)
+    auto_steps         = min(init_step + loss_cfg.get('auto_steps', 0), fpcs // tubelet_size)
+    autoregressive_idx = loss_cfg.get("autoregressive_idx", [])
+    loss_exp           = loss_cfg.get("loss_exp", 1.0)
+    normalize_reps     = loss_cfg.get('normalize_reps', False)
+    normalize_actions  = loss_cfg.get('normalize_actions', False)
+
+    action_reg = loss_cfg.get('action_reg', {})
+    reg_type   = action_reg.get("name", "energy")
+    if reg_type == "energy":
+        l1_energy = action_reg.get('l1', 1.0)
+        l2_energy = action_reg.get('l2', 0.0)
+        lv_vcm    = action_reg.get('lv', 0.0)
+        lc_vcm    = action_reg.get('lc', 0.0)
+        lm_vcm    = action_reg.get('lm', 0.0)
+    elif reg_type == "sigreg":
+        sig_weight = action_reg.get("weight", 1.0)
+        num_proj   = action_reg.get('num_proj', 128)
+        samp_range = action_reg.get('samp_range', [-1, 1])
+        samp_sz    = action_reg.get('samp_sz', 16)
+    else:
+        logger.ERROR("Incorrect type of regularization", exit_code = -2)
+    logger.INFO(f"Using action regularizer: {reg_type}")
 
     meta_cfg: dict = args.get('meta', {})
-    dtype = meta_cfg.get('dtype', 'float32')
-    save_freq = meta_cfg.get('save_every_freq', 2)
-    seed      = meta_cfg.get('seed', 0)
-    sync_gc   = meta_cfg.get('sync_gc', False)
-    tokens_pframe = (crop_size // patch_size) ** 2
-    
+    dtype              = meta_cfg.get('dtype', 'float32')
+    save_freq          = meta_cfg.get('save_every_freq', 2)
+    seed               = meta_cfg.get('seed', 0)
+    sync_gc            = meta_cfg.get('sync_gc', False)
+    save_root_dir      = meta_cfg.get('save_root_dir', "./")
+    continue_from_path = meta_cfg.get('continue_from_path', None)
+    continue_train     = bool(continue_from_path)
+    resume_prefer_best = bool(meta_cfg.get('resume_prefer_best', True))
+    tokens_pframe      = (crop_size // patch_size) ** 2
+
+    checkpoint_cfg: dict = args.get('checkpoint', {})
+    patience = checkpoint_cfg.get('patience', num_epochs)
+    min_delta = checkpoint_cfg.get('min_delta', 0.0)
+
+    logging_cfg: dict = args.get('logging', {})
+    progress_type         = logging_cfg.get('progress_type', 'table')
+    save_csv              = logging_cfg.get('save_csv', True)
+    save_batch_csv        = logging_cfg.get('save_batch_csv', False)
+    save_epoch_csv        = logging_cfg.get('save_epoch_csv', True)
+    log_batch_tensorboard = logging_cfg.get('log_batch_tensorboard', False)
+    log_model_graph       = logging_cfg.get('log_model_graph', False)
+
+    logger.WARNING(f"Autostep currently selected as {auto_steps} steps")
 
     world_size, rank = init_distributed()
     if dist.is_available() and dist.is_initialized() and world_size > 1:
@@ -188,6 +236,7 @@ def main(args: dict, yaml_path: str):
     else:
         logger.INFO("DDP disabled (single-GPU/single-process mode)")
     
+    torch.manual_seed(seed)
     
     if dtype.lower() == "bfloat16":
         dtype = torch.bfloat16
@@ -207,20 +256,21 @@ def main(args: dict, yaml_path: str):
         enc_cfg = enc_cfg,
         lpred_cfg = pred_cfg,
         apred_cfg = act_cfg,
+        filter_cfg = filter_cfg,
         device = device
     )
 
     if model_cfg.get('compile', False):
         logger.INFO("Compiling model")
         torch._dynamo.config.optimize_ddp = False
-        encoder.compile()
-        lpred.compile()
-        apred.compile()
+        encoder.compile(mode = "reduce-overhead", dynamic = True)
+        lpred.compile(mode = "reduce-overhead", dynamic = True)
+        apred.compile(mode = "reduce-overhead", dynamic = True)
 
     if dist.is_initialized() and world_size > 1:
-        encoder = DDP(encoder, static_graph = True)
-        lpred   = DDP(lpred, static_graph = False, find_unused_parameters = True)
-        apred   = DDP(apred, static_graph = False, find_unused_parameters = True)
+        encoder          = DDP(encoder, static_graph = True)
+        lpred            = DDP(lpred, static_graph = False, find_unused_parameters = True)
+        apred            = DDP(apred, static_graph = False, find_unused_parameters = True)
     for p in encoder.parameters():
         p.requires_grad = False
     
@@ -236,7 +286,6 @@ def main(args: dict, yaml_path: str):
     
     video_loader, video_sampler = compile_dataloader(
         train_cfg, 
-        nclips = nclips,
         transform = transform,
         collate_fn = torch.utils.data.default_collate,
         num_workers  = num_workers,
@@ -247,14 +296,13 @@ def main(args: dict, yaml_path: str):
     )
     
     optim, scaler, lr_scheduler, wd_scheduler = compile_opt(
-        encoder              = encoder,
         apred                = apred,
         lpred                = lpred,
         iterations_per_epoch = ipe,
         start_lr             = start_lr,
         warmup               = warmup, 
-        anneal               = annel,
-        num_epochs           = epochs,
+        anneal               = anneal,
+        num_epochs           = num_epochs,
         wd                   = weight_decay,
         final_lr             = final_lr,
         mixed_precision      = mixed_precision,
@@ -264,21 +312,104 @@ def main(args: dict, yaml_path: str):
         final_wd             = final_wd
     )
     
-    loader = iter(video_loader)
+    log_dir = os.path.join(save_root_dir, "straightening")
+    logger.INFO(f"Straightening save root directory: {log_dir}")
 
-    # Only create logger and run directories for rank 0 to avoid race conditions
+    continue_run_dir = None
+    continue_run_name = None
+    if continue_train:
+        continue_run_dir = os.path.abspath(os.path.expanduser(continue_from_path))
+        if os.path.basename(continue_run_dir) == "weights":
+            continue_run_dir = os.path.dirname(continue_run_dir)
+        if not os.path.isdir(continue_run_dir):
+            raise FileNotFoundError(f"continue_from_path does not exist: {continue_from_path}")
+        continue_run_name = os.path.basename(continue_run_dir)
+        if not continue_run_name.startswith("run"):
+            raise ValueError(
+                f"Expected continue_from_path to point to a run directory like '.../run1', got: {continue_run_dir}"
+            )
+
     if rank == 0:
-        log_dir = os.path.join(FOLDER_DIR, "../Experiment/action/")
-        run_idx = get_next_run(log_dir)
+        if continue_train:
+            resolved_run_idx = int(continue_run_name.removeprefix("run"))
+            logger.INFO(f"Resuming requested. Selected run directory: {continue_run_dir}")
+        else:
+            resolved_run_idx = get_next_run(log_dir)
+        run_idx_tensor = torch.tensor([resolved_run_idx], dtype=torch.long, device=device)
+    else:
+        run_idx_tensor = torch.tensor([0], dtype=torch.long, device=device)
+
+    if dist.is_initialized() and world_size > 1:
+        dist.broadcast(run_idx_tensor, src=0)
+    run_idx = int(run_idx_tensor.item())
+
+    start_epoch = 0
+    resume_score = None
+    resume_best_loss = None
+    run_name = f"run{run_idx}"
+    run_dir = os.path.join(log_dir, run_name)
+
+    if continue_train and continue_run_dir is not None:
+        run_dir = continue_run_dir
+        run_name = os.path.basename(run_dir)
+        models_to_resume = {
+            "filter": filterer,
+            "target_filter": target_filterer,
+            "agg": agg,
+            "lpred": lpred,
+            "apred": apred,
+        }
+        (
+            resumed_models,
+            optim,
+            scaler,
+            start_epoch,
+            resume_score,
+            resume_best_loss,
+        ) = load_ckpt(
+            models_dict=models_to_resume,
+            optimizer=optim,
+            scaler=scaler,
+            checkpoint_dir=os.path.join(run_dir, "weights"),
+            prefer_best=resume_prefer_best,
+            map_location=device,
+        )
+        filterer = resumed_models["filter"]
+        target_filterer = resumed_models["target_filter"]
+        agg = resumed_models["agg"]
+        lpred = resumed_models["lpred"]
+        apred = resumed_models["apred"]
+        logger.INFO(
+            f"Resumed straightening from {run_dir} at epoch {start_epoch} "
+            f"using {'best' if resume_prefer_best else 'latest last'} checkpoints"
+        )
+
+    # Only create logger and run directories for rank 0 to avoid race conditions.
+    if rank == 0:
         log_stats = create_self_supervised_logger(
             log_dir = log_dir,
-            epochs = epochs,
-            run_name = f"run{run_idx}",
-            progress_type = "table"
+            epochs = num_epochs,
+            run_name = run_name,
+            progress_type = progress_type,
+            save_csv = save_csv,
+            save_batch_csv = save_batch_csv,
+            save_epoch_csv = save_epoch_csv,
+            log_batch_tensorboard = log_batch_tensorboard,
         )
-        lpred_save = EarlyStopping(patience = epochs, freq = save_freq, min_delta = 0, path = os.path.join(log_dir, f"run{run_idx}/weights/lpred.pt"), weights_only = True)
-        apred_save = EarlyStopping(patience = epochs, freq = save_freq, min_delta = 0, path = os.path.join(log_dir, f"run{run_idx}/weights/apred.pt"), weights_only = True)
-        os.system(f"cp {yaml_path} {os.path.join(log_dir, f'run{run_idx}')}")
+        saver = MultiModuleEarlyStopping(
+            patience = patience,
+            freq = save_freq,
+            path_root = os.path.join(run_dir, "weights"),
+            weights_only = True,
+            min_delta = min_delta
+        )
+        if resume_best_loss is not None:
+            saver.best_loss = resume_best_loss
+        elif resume_score is not None:
+            saver.best_loss = resume_score
+        if not continue_train:
+            yaml_name = f"{args['app']}-{model_cfg.get('filter', {}).get('name', 'model')}-{reg_type}-{crop_size}px.yaml"
+            save_config_pretty(args, os.path.join(run_dir, yaml_name))
     else:
         log_stats = NoOpLogger()
    
@@ -286,56 +417,92 @@ def main(args: dict, yaml_path: str):
         gc.disable()
         gc.collect()
 
+    loader = iter(video_loader)
+
     def train_step(clips):
         _new_lr = lr_scheduler.step()
         _new_wd = wd_scheduler.step()
-        
-        def forward_target(c: torch.Tensor):
-            with torch.no_grad():
-                h: torch.Tensor = encoder(c)
-                if normalize_rep:
-                    h = F.layer_norm(h, (h.size(-1), ))
-            return h
 
-        def forward_prediction(h: torch.Tensor):
+        def to_latent(c: torch.Tensor):
+            with torch.no_grad():
+                latent: torch.Tensor = encoder(c)
+                if normalize_reps:
+                    latent = F.layer_norm(latent, (latent.size(-1), ))
+                return latent
+
+        def forward_prediction(h_ctx: torch.Tensor, h_goal: torch.Tensor, T: int, H: int = None, W: int = None):
             def _step_action(h, g):
-                _a = apred(h, g)
-                if normalize_rep:
+                _a: torch.Tensor = apred(h, g, T = T)
+                if normalize_actions:
                     _a = F.layer_norm(_a, (_a.size(-1), ))
                 return _a
             
             def _step_prediction(h, a):
                 _z: torch.Tensor = lpred(h, a)
-                if normalize_rep:
+                if normalize_reps:
                     _z = F.layer_norm(_z, (_z.size(-1), ))
                 return _z
 
             # -- Teacher forcing entire timestep action + prediction
-            h_ctx = h[:, :-tokens_pframe, :]
-            h_goal = h[:, -tokens_pframe:, :]
             _a_tf = _step_action(h_ctx, h_goal)
             _z_tf = _step_prediction(h_ctx, _a_tf)
-                
+
+
             # -- Autoregressive rollout of each timestep action and prediction
-            h_ctx = torch.cat([h_ctx[:, :tokens_pframe], _z_tf[:, :tokens_pframe]], dim = 1)
-            a_ctx = _a_tf[:, : action_pframe] 
+            z_ctx = to_latent(clips[:, :, :1])
             for n in range(init_step, auto_steps):
-                # -- Consider chunking?
-                # -- Since the latent is predicted on action, the action must not drift
-                a_ctx = _a_tf[:, :n * action_pframe]
+                a_ctx = _step_action(z_ctx, h_goal)
 
                 # -- Prediction shifting all frames to 1 timestep to the future
-                h_nxt = _step_prediction(h_ctx, a_ctx)[:, -tokens_pframe: ]
-                h_ctx = torch.cat([h_ctx, h_nxt], dim = 1)
-            _z_ar = h_ctx[:, tokens_pframe: ]
-            
+                z_nxt = _step_prediction(z_ctx, a_ctx)[:, -tokens_pframe: ]
+                z_ctx = torch.cat([z_ctx, z_nxt], dim = 1)
+            _z_ar = z_ctx[:, tokens_pframe: ]
             
             return _z_tf, _z_ar, _a_tf
             
-        def latent_loss(h, z):
-            sub_h = h[:, tokens_pframe: z.size(-2) + tokens_pframe]
-            return torch.mean(torch.abs(z - sub_h) ** loss_exp) / loss_exp
-        
+        def latent_loss(h: torch.Tensor, z: torch.Tensor, time_indicies: list[int] = None):
+            sub_h = h[:, tokens_pframe: z.size(1) + tokens_pframe]
+            T = sub_h.size(1) // tokens_pframe
+            B, L, D = sub_h.shape
+
+            sub_h_view = sub_h.view(B, T, tokens_pframe, D)
+            z_view = z.view(B, T, tokens_pframe, D)
+
+            device = h.device
+            if time_indicies is None or len(time_indicies) == 0:
+                idx_tensor = torch.arange(T, device=device)
+            else:
+                valid_idx = [i for i in time_indicies if i < T]
+                if not valid_idx: # If provided list was out of bounds, default to all
+                    idx_tensor = torch.arange(T, device=device)
+                else:
+                    idx_tensor = torch.tensor(valid_idx, device=device)
+            
+            selected_h = sub_h_view[:, idx_tensor].flatten(1, 2)
+            selected_z = z_view[:, idx_tensor].flatten(1, 2)
+            
+            return torch.mean(torch.abs(selected_z - selected_h) ** loss_exp) / loss_exp
+
+        @loss_registry("sigreg")
+        def sigreg(a: torch.Tensor):
+            device = a.device
+
+            t = torch.linspace(*samp_range, samp_sz, device = device)
+            exp_f = torch.exp(-0.5 * (t**2))
+            g = torch.Generator(device=device).manual_seed(seed) 
+            u = torch.randn(a.size(2), num_proj, device = device, generator = g)
+            u /= u.norm(p = 2, dim = 0)
+            
+            proj = (a @ u) # -- B, N, M
+            ecf = (1j * proj.unsqueeze(-1) * t).exp().mean(dim = (0, 1))
+            
+            ecf = all_reduce(ecf)
+            
+            err = ((ecf - exp_f).abs() ** 2) * exp_f
+            area = torch.trapz(err, t, dim = 1)
+            return area.mean() * sig_weight, None, None
+
+        @loss_registry("energy")
         def action_loss(a):
             def energy(a):
                 
@@ -346,28 +513,25 @@ def main(args: dict, yaml_path: str):
                 hinge = torch.relu(D ** 0.5 - (a ** 2).sum(-1)) * l2_energy
                 # -- Sparse action (clearly defined action)
                 sparsity = torch.abs(a).sum(-1) * l1_energy
-                
+
                 return (hinge + sparsity).mean(), hinge.mean().item(), sparsity.mean().item()
 
             def vcm(a):
 
                 """Laziness not permitted"""
 
-                if dist.is_initialized():
-                    # -- Variance and Covariance are non-linear
-                    # -> gather all tensors to satisfies the correct calculation
-                    full_a = [torch.zeros_like(a) for _ in range(world_size)]
-                    dist.all_gather(full_a, a)
-                    a = torch.cat(full_a, dim = 0)
-                
+                a = all_gather(a)
+
                 N, D = a.size(0) * a.size(1), a.size(2)
                 a = a.reshape(N, D)
 
-                # -- Ensure each sample in batch is different (prevent collapse) 
-                variance = torch.relu(1 - torch.std(a, dim = 0)).mean() * lv_vcm
+                # -- Ensure each sample in batch is different (prevent collapse)
+                # -- A pure hinge saturates at 1.0 when std->0; the log barrier keeps pressure near collapse.
+                std = torch.std(a, dim = 0, unbiased = False)
+                variance = torch.mean((1 - std) ** 2) * lv_vcm
 
                 # -- Prevent static action to have value different than 0
-                mean = a.mean() * lm_vcm
+                mean = a.mean().abs() * lm_vcm
 
                 # -- Ensure each variable is independent (maximize information capacity)
                 # -- Cov is rank deficient => Condition N >> D must satisfied
@@ -375,18 +539,31 @@ def main(args: dict, yaml_path: str):
                 cov = (a.T @ a) / (N - 1)
                 diag_mask = ~torch.eye(D, device = a.device).bool()
                 covariance = cov[diag_mask].pow(2).mean() * lc_vcm
-                return covariance + mean + variance, covariance.item(), mean.item(), variance.item()
+                return (
+                    covariance + mean + variance,
+                    covariance.item(),
+                    mean.item(),
+                    variance.item(),
+                    std.mean().item()
+                )
                 
-            vcm_loss, covariance, mean, variance = vcm(a)
+            vcm_loss, covariance, mean, variance, std = vcm(a)
             energy_loss, hinge, sparsity = energy(a)
-            return vcm_loss + energy_loss, (hinge, sparsity), (variance, covariance, mean)
+            return vcm_loss + energy_loss, (hinge, sparsity), (variance, covariance, mean, std)
+
 
         with torch.amp.autocast(device_type, dtype = dtype, enabled = mixed_precision):
-            h = forward_target(clips)
-            z_tf, z_ar, a_tf = forward_prediction(h)
-            loss_tf  = latent_loss(h, z_tf)
-            loss_ar  = latent_loss(h, z_ar)
-            loss_act, energy, vcm = action_loss(a_tf)            
+
+            latent_ctx  = to_latent(clips[:, :, :-1])
+            latent_goal = to_latent(clips[:, :, -1:])
+            T = (latent_ctx.shape[1] + latent_goal.shape[1]) // tokens_pframe
+            
+            h = torch.concat([latent_ctx, latent_goal], dim = 1)
+            z_tf, z_ar, a_tf = forward_prediction(latent_ctx, latent_goal, T)
+            
+            loss_tf = latent_loss(h, z_tf)
+            loss_ar = latent_loss(h, z_ar, autoregressive_idx)
+            loss_act, energy, vcm = ACTION_LOSS[reg_type](a_tf)
             loss = loss_tf + loss_ar + loss_act
             
             
@@ -402,7 +579,7 @@ def main(args: dict, yaml_path: str):
         else:
             optim.step()
         optim.zero_grad()
-        
+
         loss = loss.item()
         loss_tf = loss_tf.item()
         loss_ar = loss_ar.item()
@@ -418,13 +595,21 @@ def main(args: dict, yaml_path: str):
             _new_lr,
             _new_wd
         )
+        
     
+    # Advance LR/WD schedulers to the correct position when resuming
+    if start_epoch > 0:
+        for _ in range(start_epoch * ipe):
+            lr_scheduler.step()
+            wd_scheduler.step()
+        logger.INFO(f"Advanced LR/WD schedulers by {start_epoch * ipe} steps")
+
     with log_stats:
-        log_stats.start_training("Training Latent Action WM")
-        video_sampler.set_epoch(0)
-        for epoch in range(epochs):
+        log_stats.start_training("Training Filtering Latent Action WM")
+        video_sampler.set_epoch(start_epoch)
+        for epoch in range(start_epoch, num_epochs):
             
-            log_stats.start_epoch(epoch, len(video_loader), desc = "Training")
+            log_stats.start_epoch(epoch, ipe, desc = "Training")
             
             for itr in log_stats.batch_iterator([i for i in range(ipe)]):
                 
@@ -446,51 +631,70 @@ def main(args: dict, yaml_path: str):
                         else:
                             logger.ERROR("Exceeded maximum retries when iterating dataloade. Please check for error", exit_code = 5, full_traceback = e)
                         
-                def load_clips():
-                    clips = torch.concat(
-                        [
-                            sample[0][0].to(device, non_blocking = True), 
-                            sample[1][0].to(device, non_blocking = True)
-                        ], dim = 2) 
-                    
-                    actions = [{key: value.to(device, non_blocking=True) for key, value in action_dict.items()} for action_dict in sample[2]]
-                    return clips, actions
-                
-                clips, actions = load_clips()
+                clips = sample.to(device)
                 
                 (loss, loss_tf, loss_ar, loss_act, energy, vcm, curr_lr, curr_wd), elapsed_time = gpu_timer(partial(train_step, clips))
 
                 if np.isnan(loss) or np.isinf(loss):
                     logger.ERROR(f"Model failed to converge. {'nan' if np.isnan(loss) else 'inf' if np.isinf(loss) else ''} detected", exit_code = -213)
                 
-                log_stats.log_batch({
-                    "LR": curr_lr,
-                    "WD": curr_wd, 
-                    "Loss": loss,
-                    "Teach Force|Z": loss_tf,
-                    "Autoregressive|Z": loss_ar,
-                    "Action": loss_act,
-                    "Hinge|Erg": energy[0],
-                    "Sparsity|Erg": energy[1],
-                    "Variance|VCM": vcm[0],
-                    "Covariance|VCM": vcm[1],
-                    "Mean|VCM": vcm[2],
-                    "GPU timer": elapsed_time 
-                })
+                if energy and vcm:
+                    log_stats.log_batch({
+                        "LR": curr_lr,
+                        "WD": curr_wd, 
+                        "Loss": loss,
+                        "Teach Force|Z": loss_tf,
+                        "Autoregressive|Z": loss_ar,
+                        "Action": loss_act,
+                        "Hinge|Erg": energy[0],
+                        "Sparsity|Erg": energy[1],
+                        "Variance|VCM": vcm[0],
+                        "Covariance|VCM": vcm[1],
+                        "Mean|VCM": vcm[2],
+                        "Std": vcm[3],
+                    })
+                else:
+                    log_stats.log_batch({
+                        "LR": curr_lr,
+                        "WD": curr_wd, 
+                        "Loss": loss,
+                        "Teach Force|Z": loss_tf,
+                        "Autoregressive|Z": loss_ar,
+                        "Action | SIGReg": loss_act,
+                    })
+                    
             
-            log_stats.log_epoch(extra_metrics = {
-                "GPU": torch.cuda.max_memory_allocated() / 1024.0 ** 2
-            })
+            log_stats.log_epoch()
             
             gc.collect()
             
             if rank == 0:
-                lpred_save(log_stats.get_metric("Loss", "train"), lpred, epoch = epoch, optimizer = optim, scaler = scaler, loss = loss, lr = curr_lr)
-                apred_save(log_stats.get_metric("Loss", "train"), lpred, epoch = epoch, optimizer = optim, scaler = scaler, loss = loss, lr = curr_lr)
-    
-if __name__ == "__main__":
-    yaml_path = "./JEPA_ACT/cfgs/action-224px-1024.24e.yaml"
-    with open(yaml_path, "r") as f:
-        args = yaml.safe_load(f)
-        
-    main(args, yaml_path)
+                models_to_save = {
+                    "filter": filterer,
+                    "target_filter": target_filterer,
+                    "agg": agg,
+                    "lpred": lpred,
+                    "apred": apred
+                }
+                saver(
+                    score=log_stats.get_metric("Loss", "train"), 
+                    models_dict=models_to_save, 
+                    optimizer=optim, 
+                    scaler=scaler, 
+                    epoch=epoch
+                )
+                
+                if saver.early_stop:
+                    logger.INFO("Early stopping triggered")
+
+            should_stop = False
+            if rank == 0:
+                should_stop = bool(saver.early_stop)
+
+            if dist.is_initialized() and world_size > 1:
+                stop_tensor = torch.tensor([int(should_stop)], device=device)
+                dist.broadcast(stop_tensor, src=0)
+                should_stop = bool(stop_tensor.item())
+
+            if should_stop:
+                break

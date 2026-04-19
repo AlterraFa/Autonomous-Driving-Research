@@ -28,8 +28,8 @@ def compile_transform(
         pad_frame_count=pad_frame_count,
         pad_frame_method=pad_frame_method,
     )
-    logger.INFO("Transform initialized with:")
-    logger.INFO({
+    logger.DEBUG("Transform initialized with:")
+    logger.DEBUG({
         "random_horizontal_flip": random_horizontal_flip,
         "random_resize_aspect_ratio": random_resize_aspect_ratio,
         "random_resize_scale": random_resize_scale,

@@ -411,6 +411,7 @@ def main(args: dict, yaml_path: str):
             save_batch_csv = save_batch_csv,
             save_epoch_csv = save_epoch_csv,
             log_batch_tensorboard = log_batch_tensorboard,
+            resume_epoch = start_epoch,
         )
         saver = MultiModuleEarlyStopping(
             patience = patience,
@@ -541,10 +542,14 @@ def main(args: dict, yaml_path: str):
 
     loader = iter(video_loader)
 
+    # Skip momentum scheduler steps already completed
+    _resume_steps = start_epoch * ipe
     momentum_scheduler = (
         ema[0] + i * (ema[1] - ema[0]) / (ipe * num_epochs)
         for i in range(int(ipe * num_epochs) + 1)
     )
+    for _ in range(_resume_steps):
+        next(momentum_scheduler)
 
     def train_step(clips):
         _new_lr = lr_scheduler.step()
@@ -570,7 +575,7 @@ def main(args: dict, yaml_path: str):
                     latent = F.layer_norm(latent, (latent.size(-1), ))
                 return latent
 
-        def forward_prediction(h_ctx: torch.Tensor, h_goal: torch.Tensor, T: int):
+        def forward_prediction(h_ctx: torch.Tensor, h_goal: torch.Tensor, T: int, H: int = None, W: int = None):
             def _step_action(h, g):
                 _a: torch.Tensor = apred(h, g, T = T)
                 if normalize_actions:
@@ -592,7 +597,6 @@ def main(args: dict, yaml_path: str):
             z_ctx = torch.cat([h_ctx[:, :tokens_pframe], _z_tf[:, :tokens_pframe]], dim = 1)
             for n in range(init_step, auto_steps):
                 a_ctx = _step_action(z_ctx, h_goal)
-                # a_ctx = _a_tf[:, :n * action_pframe]
 
                 # -- Prediction shifting all frames to 1 timestep to the future
                 z_nxt = _step_prediction(z_ctx, a_ctx)[:, -tokens_pframe: ]
@@ -789,10 +793,17 @@ def main(args: dict, yaml_path: str):
         )
         
     
+    # Advance LR/WD schedulers to the correct position when resuming
+    if start_epoch > 0:
+        for _ in range(start_epoch * ipe):
+            lr_scheduler.step()
+            wd_scheduler.step()
+        logger.INFO(f"Advanced LR/WD schedulers by {start_epoch * ipe} steps")
+
     with log_stats:
         log_stats.start_training("Training Filtering Latent Action WM")
-        video_sampler.set_epoch(0)
-        for epoch in range(num_epochs):
+        video_sampler.set_epoch(start_epoch)
+        for epoch in range(start_epoch, num_epochs):
             
             log_stats.start_epoch(epoch, ipe, desc = "Training")
             

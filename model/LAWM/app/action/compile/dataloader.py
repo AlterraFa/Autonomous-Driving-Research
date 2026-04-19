@@ -1,5 +1,5 @@
 import torch
-from datasets.dataset import ActVideoDataset
+from datasets.dataset import StraighteningDataset
 from torch.utils.data import DataLoader
 from utils.logger import Logger
 
@@ -7,7 +7,6 @@ logger = Logger(__name__)
 
 def compile_dataloader(
     train_cfg,
-    nclips,
     transform,
     collate_fn, 
     num_workers,
@@ -17,15 +16,9 @@ def compile_dataloader(
     rank
 ):
     
-    train = ActVideoDataset(
-        data_paths = [dataset['path'] for dataset in train_cfg['datasets']],
-        frame_step = [dataset['fps'] for dataset in train_cfg['datasets']],
-        ctx_frames_per_clips = train_cfg['ctx_fpcs'],
-        pred_frames_per_clips = train_cfg['pred_fpcs'],
-        nclips = nclips,
-        individual_transform = transform,
-        allow_clip_overlap = train_cfg['allow_clip_overlap'],
-        random_jiggle_part = train_cfg['random_jiggle']
+    train = StraighteningDataset(
+        data_paths = train_cfg['datasets_path'],
+        shared_transform = transform,
     )
 
     dist_sampler = torch.utils.data.DistributedSampler(
@@ -43,16 +36,10 @@ def compile_dataloader(
         drop_last = True
     )
 
-    logger.INFO("Data loader and distributed sampler initialized with:")
-    logger.INFO({
+    logger.DEBUG("Data loader and distributed sampler initialized with:")
+    logger.DEBUG({
         "dataset": {
-            "data_paths": [dataset['path'] for dataset in train_cfg['datasets']],
-            "frame_step": [dataset['fps'] for dataset in train_cfg['datasets']],
-            "ctx_frames_per_clips": train_cfg['ctx_fpcs'],
-            "pred_frames_per_clips": train_cfg['pred_fpcs'],
-            "nclips": nclips,
-            "allow_clip_overlap": train_cfg['allow_clip_overlap'],
-            "random_jiggle_part": train_cfg['random_jiggle'],
+            "data_paths": train_cfg['datasets_path'],
         },
         "dataloader": {
             "batch_size": train_cfg['batch_size'],

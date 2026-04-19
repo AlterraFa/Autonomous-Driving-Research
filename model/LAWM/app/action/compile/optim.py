@@ -1,11 +1,10 @@
 import torch
-from utils.schedulers import WSDSchedule, CosineWDSchedule
+from utils.schedulers import CosineWSDSchedule, CosineWDSchedule
 from utils.logger import Logger
 
 logger = Logger(__name__)
 
 def compile_opt(
-    encoder,
     apred,
     lpred,
     iterations_per_epoch,
@@ -45,7 +44,7 @@ def compile_opt(
     ]
     
     optimizer = torch.optim.AdamW(param_groups, betas=betas, eps=eps)
-    scheduler = WSDSchedule(
+    scheduler = CosineWSDSchedule(
         optimizer,
         warmup_steps=int(warmup * iterations_per_epoch),
         anneal_steps=int(anneal * iterations_per_epoch),
@@ -62,15 +61,15 @@ def compile_opt(
     )
     scaler = torch.amp.GradScaler() if mixed_precision else None
 
-    logger.INFO("Optimizer, weight decay and learning rate scheduler initialized with:")
-    logger.INFO({
+    logger.DEBUG("Optimizer, weight decay and learning rate scheduler initialized with:")
+    logger.DEBUG({
         "optimizer": {
             "type": "AdamW",
             "betas": betas,
             "eps": eps,
         },
         "lr_scheduler": {
-            "type": "WSDSchedule",
+            "type": "CosineWSDScheduler",
             "warmup_steps": int(warmup * iterations_per_epoch),
             "anneal_steps": int(anneal * iterations_per_epoch),
             "start_lr": start_lr,

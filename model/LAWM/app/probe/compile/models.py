@@ -156,7 +156,7 @@ class FrozenWorldModel(nn.Module):
         self.eval()
 
     @torch.no_grad()
-    def forward(self, context: torch.Tensor, goal: torch.Tensor):
+    def forward(self, context: torch.Tensor, goal: torch.Tensor, perturb_coeff = 0.0):
         """Fully autoregressive forward from first frame (context) + last frame (goal).
 
         Only encodes frame 0 and frame -1. Rolls out action + prediction
@@ -188,6 +188,14 @@ class FrozenWorldModel(nn.Module):
         z_ctx = h_ctx                                   # single frame tokens
         for _ in range(self.auto_steps - 1):
             a = self.apred(z_ctx, h_goal)
+            
+            # if perturb_coeff > 0.0:
+            #     if not hasattr(self, "apstep"):
+            #         self.apstep = a.shape[1]
+            #     noise = torch.randn(a[:, -self.apstep:].shape, device = a.device) * perturb_coeff
+            #     a[:, -self.apstep:] += noise
+                
+            
             if self.normalize_actions:
                 a = F.layer_norm(a, (a.size(-1),))
             z_nxt = self.lpred(z_ctx, a)
@@ -196,10 +204,9 @@ class FrozenWorldModel(nn.Module):
             z_nxt = z_nxt[:, -self.tokens_pframe:]
             z_ctx = torch.cat([z_ctx, z_nxt], dim=1)
             a_tf = a
-        z_ar = z_ctx[:, self.tokens_pframe:]
 
         if self.detailed_out:
-            return a_tf, z_ar
+            return a_tf, z_ctx
         return a_tf
 
 
