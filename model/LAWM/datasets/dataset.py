@@ -33,6 +33,92 @@ else:
     from tqdm.auto import tqdm
 
 
+class FormattedVideoDataset(Dataset):
+    """Action-conditioned video dataset with context/prediction separation and metadata"""
+    
+    def __init__(
+        self,
+        data_paths,
+        fpcs=16, 
+        shared_transform=None,
+        individual_transform=None,
+        frame_selection="head",
+    ):
+        super().__init__()
+        self.data_paths = data_paths
+        self.individual_transform = individual_transform
+        self.shared_transform = shared_transform
+        self.fpcs = fpcs
+        self.frame_selection = frame_selection
+
+        self._load_samples()
+       
+    def _load_samples(self):
+        self.samples = []
+        self.mapping = []
+        for idx, path in enumerate(self.data_paths):
+            seq_paths = _check_structure(path)
+            if not seq_paths:
+                raise ValueError("No sequence path found to match the structure", path)
+            samples = glob.glob(os.path.join(seq_paths, "*"))
+            self.samples += samples    
+            self.mapping.extend([idx] * len(samples))
+            
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, index):
+        """Load sample with retry logic"""
+        for retry in range(5):
+            try:
+                sample = self.load_image_sequences(index)
+                if sample is not None:
+                    return sample
+            except Exception as e:
+                if retry < 4:
+                    print(f"Error loading sample at {index=}, retrying ({retry+1}/5): {e}")
+                else:
+                    print(f"Failed to load sample at {index=} after 5 retries")
+        print(f"Failed to load sample at {index=} after 5 retries: {e}")
+        return None
+
+    def load_image_sequences(self, index):
+        """Load image sequences with actions and metadata"""
+        sample   = self.samples[index]
+        abs_path = self.data_paths[self.mapping[index]]
+        
+        buffer = self._load_seq(abs_path, sample)
+
+        if self.individual_transform is not None:
+            buffer = np.array([self.individual_transform(image) for image in buffer])
+        
+        # Apply shared transforms
+        if self.shared_transform is not None:
+            buffer = self.shared_transform(buffer)
+        
+        return buffer
+    
+    def _load_seq(self, abs_path, path):
+        data = np.load(path, allow_pickle = True).item()
+        
+        img_dict = data['img_file']
+        image_paths = [os.path.join(abs_path, value) for value in img_dict.values()]
+
+        if self.fpcs is None or self.fpcs <= 0:
+            return decode_batch(image_paths)
+
+        if len(image_paths) <= self.fpcs:
+            return decode_batch(image_paths)
+
+        if self.frame_selection == "interpolate":
+            # Uniformly sample indices across the sequence timeline.
+            sampled_idx = np.linspace(0, len(image_paths) - 1, num=self.fpcs)
+            sampled_idx = np.round(sampled_idx).astype(np.int64)
+            sampled_paths = np.array(image_paths, dtype=object)[sampled_idx].tolist()
+            return decode_batch(sampled_paths)
+
+        return decode_batch(image_paths[: self.fpcs])
+
 class VideoDataset(Dataset):
     """Dataset for loading video sequences without action conditioning"""
     
@@ -528,74 +614,6 @@ class ProbeDataset(Dataset):
         return stats
 
 
-class StraighteningDataset(Dataset):
-    """Action-conditioned video dataset with context/prediction separation and metadata"""
-    
-    def __init__(
-        self,
-        data_paths,
-        shared_transform=None,
-        individual_transform=None,
-    ):
-        super().__init__()
-        self.data_paths = data_paths
-        self.individual_transform = individual_transform
-        self.shared_transform = shared_transform
-
-        self._load_samples()
-       
-    def _load_samples(self):
-        self.samples = []
-        self.mapping = []
-        for idx, path in enumerate(self.data_paths):
-            seq_paths = _check_structure(path)
-            if not seq_paths:
-                raise ValueError("No sequence path found to match the structure", path)
-            samples = glob.glob(os.path.join(seq_paths, "*"))
-            self.samples += samples    
-            self.mapping.extend([idx] * len(samples))
-            
-    def __len__(self):
-        return len(self.samples)
-    
-    def __getitem__(self, index):
-        """Load sample with retry logic"""
-        for retry in range(5):
-            try:
-                sample = self.load_image_sequences(index)
-                if sample is not None:
-                    return sample
-            except Exception as e:
-                if retry < 4:
-                    print(f"Error loading sample at {index=}, retrying ({retry+1}/5): {e}")
-                else:
-                    print(f"Failed to load sample at {index=} after 5 retries")
-        print(f"Failed to load sample at {index=} after 5 retries: {e}")
-        return None
-
-    def load_image_sequences(self, index):
-        """Load image sequences with actions and metadata"""
-        sample   = self.samples[index]
-        abs_path = self.data_paths[self.mapping[index]]
-        
-        buffer = self._load_seq(abs_path, sample)
-
-        if self.individual_transform is not None:
-            buffer = np.array([self.individual_transform(image) for image in buffer])
-        
-        # Apply shared transforms
-        if self.shared_transform is not None:
-            buffer = self.shared_transform(buffer)
-        
-        return buffer
-    
-    def _load_seq(self, abs_path, path):
-        data = np.load(path, allow_pickle = True).item()
-        
-        img_dict = data['img_file']
-        image_paths = [os.path.join(abs_path, value) for value in img_dict.values()]
-
-        return decode_batch(image_paths)
 
 
 class StraighteningProbeDataset(Dataset):
@@ -831,35 +849,90 @@ class CachedLatentDataset(Dataset):
 
         
 if __name__ == "__main__":
-    import yaml
     import cv2
-    from augmenter.transforms_builder import VideoTransform
-    from torch.utils.data import DataLoader
 
-    
-    transform = VideoTransform(
-        random_horizontal_flip = False,
-        reprob = 0.1,
-        random_resize_aspect_ratio = (0.75, 4/3),
-        random_resize_scale = (0.7, 1.2),
-        auto_augment = True,
-        motion_shift = True,
-        normalize = ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-    )
-
-    dataset = StraighteningDataset(
+    dataset = FormattedVideoDataset(
         data_paths = [
-            "./../Autonomous_Dataset/carla/LAWM/recording_20251025_142727_best_spatial/",
-            "./../Autonomous_Dataset/carla/LAWM/recording_20260204_010805_spatial/",
-            "./../Autonomous_Dataset/carla/LAWM/recording_20260308_212005_spatial/",
-            "./../Autonomous_Dataset/carla/LAWM/recording_20260317_214033_best_spatial/",
-            "./../Autonomous_Dataset/carla/LAWM/recording_20260317_233603_spatial/",
-            "./../Autonomous_Dataset/carla/LAWM/recording_20260318_083409_best_spatial/",
-            "./../Autonomous_Dataset/carla/LAWM/recording_20260323_200940_best_spatial/",
-            "./../Autonomous_Dataset/carla/LAWM/recording_20260329_233141_best_spatial/",
+            "../Autonomous_Dataset/carla/LAWM1_V2/recording_20260204_010805_spatial/",
+            "../Autonomous_Dataset/carla/LAWM1_V2/recording_20260308_212005_spatial/",
+            "../Autonomous_Dataset/carla/LAWM1_V2/recording_20260317_214033_best_spatial/",
+            "../Autonomous_Dataset/carla/LAWM1_V2/recording_20260317_233603_spatial/",
+            "../Autonomous_Dataset/carla/LAWM1_V2/recording_20260318_083409_best_spatial/",
+            "../Autonomous_Dataset/carla/LAWM1_V2/recording_20260323_200940_best_spatial/",
+            "../Autonomous_Dataset/carla/LAWM1_V2/recording_20260329_233141_best_spatial/",
+            "../Autonomous_Dataset/carla/LAWM1_V2/recording_20260323_204100_best_spatial/",
+            "../Autonomous_Dataset/carla/LAWM1_V2/recording_20260323_210357_best_spatial/",
+            "../Autonomous_Dataset/carla/LAWM1_V2/recording_20260329_164940_best_spatial/",
+            "../Autonomous_Dataset/carla/LAWM1_V2/recording_20260410_152712_best_spatial/",
+            "../Autonomous_Dataset/carla/LAWM1_V2/recording_20260410_154404_best_spatial/",
+            "../Autonomous_Dataset/carla/LAWM1_V2/recording_20260410_160255_best_spatial/",
         ],
-        shared_transform = transform
+        shared_transform = None,
+        fpcs = 16,
+        frame_selection = "interpolate",
     )
-    
-    
-    DataLoader()
+
+    if len(dataset) == 0:
+        raise RuntimeError("No samples found for visualization")
+
+    mode_options = ("head", "interpolate")
+    mode_idx = mode_options.index(dataset.frame_selection) if dataset.frame_selection in mode_options else 0
+    sample_idx = 0
+    frame_idx = 0
+
+    left_keys = {81, 2424832, 65361, ord("a"), ord("A")}
+    right_keys = {83, 2555904, 65363, ord("d"), ord("D")}
+    up_keys = {82, 2490368, 65362}
+    down_keys = {84, 2621440, 65364}
+
+    def load_current_frames():
+        dataset.frame_selection = mode_options[mode_idx]
+        sample_path = dataset.samples[sample_idx]
+        abs_path = dataset.data_paths[dataset.mapping[sample_idx]]
+        return dataset._load_seq(abs_path, sample_path)
+
+    buffer = load_current_frames()
+
+    while True:
+        if len(buffer) == 0:
+            canvas = np.zeros((480, 960, 3), dtype=np.uint8)
+            cv2.putText(canvas, "No frames decoded", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+            cv2.imshow("Frame Sampler Preview", canvas)
+        else:
+            frame_idx = max(0, min(frame_idx, len(buffer) - 1))
+            frame = buffer[frame_idx]
+            if frame.ndim == 2:
+                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            else:
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+            overlay = frame.copy()
+            text = (
+                f"mode={mode_options[mode_idx]} | sample={sample_idx + 1}/{len(dataset)} | "
+                f"frame={frame_idx + 1}/{len(buffer)} | fpcs={dataset.fpcs}"
+            )
+            hint = "Left/Right or A/D: frame, Up: toggle mode, Down: next sample, Q/Esc: quit"
+            cv2.putText(overlay, text, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(overlay, hint, (12, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.imshow("Frame Sampler Preview", overlay)
+
+        key = cv2.waitKeyEx(0)
+
+        if key in (27, ord("q"), ord("Q")):
+            break
+        elif key in right_keys:
+            if len(buffer) > 0:
+                frame_idx = (frame_idx + 1) % len(buffer)
+        elif key in left_keys:
+            if len(buffer) > 0:
+                frame_idx = (frame_idx - 1) % len(buffer)
+        elif key in up_keys:
+            mode_idx = (mode_idx + 1) % len(mode_options)
+            frame_idx = 0
+            buffer = load_current_frames()
+        elif key in down_keys:
+            sample_idx = (sample_idx + 1) % len(dataset)
+            frame_idx = 0
+            buffer = load_current_frames()
+
+    cv2.destroyAllWindows()
