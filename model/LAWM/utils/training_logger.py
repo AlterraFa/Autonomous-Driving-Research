@@ -145,6 +145,7 @@ class TrainingLogger:
         save_batch_csv: bool = False,
         save_epoch_csv: bool = True,
         log_batch_tensorboard: bool = False,
+        resume_epoch: int = 0,
     ):
         self.epochs = epochs
         self.current_epoch = 0
@@ -197,6 +198,35 @@ class TrainingLogger:
         self._csv_batch_path = os.path.join(self.log_dir, "batch_metrics.csv")
         self._csv_epoch_path = os.path.join(self.log_dir, "epoch_metrics.csv")
         
+        # Resume support: reload existing CSV data and set global step offset
+        if resume_epoch > 0:
+            self._global_step = resume_epoch * (epochs // max(epochs, 1))  # rough default
+            self.current_epoch = resume_epoch
+            # Reload existing epoch CSV rows so new rows are appended
+            if self.save_csv and self.save_epoch_csv and os.path.exists(self._csv_epoch_path):
+                with open(self._csv_epoch_path, "r", newline="") as f:
+                    reader = csv.DictReader(f)
+                    self._csv_epoch_fields = list(reader.fieldnames or [])
+                    for row in reader:
+                        # Keep only rows up to resume_epoch
+                        try:
+                            if int(row.get("epoch", 0)) <= resume_epoch:
+                                self._csv_epoch_rows.append(dict(row))
+                        except (ValueError, TypeError):
+                            self._csv_epoch_rows.append(dict(row))
+            # Reload existing batch CSV rows
+            if self.save_csv and self.save_batch_csv and os.path.exists(self._csv_batch_path):
+                with open(self._csv_batch_path, "r", newline="") as f:
+                    reader = csv.DictReader(f)
+                    self._csv_batch_fields = list(reader.fieldnames or [])
+                    for row in reader:
+                        try:
+                            if int(row.get("epoch", 0)) <= resume_epoch:
+                                self._csv_batch_rows.append(dict(row))
+                        except (ValueError, TypeError):
+                            self._csv_batch_rows.append(dict(row))
+                self._global_step = len(self._csv_batch_rows)
+        
         # Track state for table display
         self._current_phase = "train"
         self._num_batches = 0
@@ -213,7 +243,8 @@ class TrainingLogger:
                 position=0,
                 leave=True,
                 file=sys.stdout,
-                mininterval=30
+                mininterval=30,
+                initial=self.current_epoch,
             )
         else:
             # Initialize progress table with proper settings
@@ -754,6 +785,7 @@ def create_supervised_logger(
     save_batch_csv: bool = False,
     save_epoch_csv: bool = True,
     log_batch_tensorboard: bool = False,
+    resume_epoch: int = 0,
 ) -> TrainingLogger:
     """
     Create a TrainingLogger configured for supervised training (with validation).
@@ -781,6 +813,7 @@ def create_supervised_logger(
         save_batch_csv=save_batch_csv,
         save_epoch_csv=save_epoch_csv,
         log_batch_tensorboard=log_batch_tensorboard,
+        resume_epoch=resume_epoch,
     )
 
 
@@ -793,6 +826,7 @@ def create_self_supervised_logger(
     save_batch_csv: bool = False,
     save_epoch_csv: bool = True,
     log_batch_tensorboard: bool = False,
+    resume_epoch: int = 0,
 ) -> TrainingLogger:
     """
     Create a TrainingLogger configured for self-supervised training (no validation).
@@ -820,6 +854,7 @@ def create_self_supervised_logger(
         save_batch_csv=save_batch_csv,
         save_epoch_csv=save_epoch_csv,
         log_batch_tensorboard=log_batch_tensorboard,
+        resume_epoch=resume_epoch,
     )
 
 

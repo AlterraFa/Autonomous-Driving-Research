@@ -395,6 +395,7 @@ def main(args: dict, yaml_path: str):
             save_batch_csv = save_batch_csv,
             save_epoch_csv = save_epoch_csv,
             log_batch_tensorboard = log_batch_tensorboard,
+            resume_epoch = start_epoch
         )
         saver = MultiModuleEarlyStopping(
             patience = patience,
