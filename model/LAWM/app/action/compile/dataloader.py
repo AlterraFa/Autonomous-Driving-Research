@@ -109,7 +109,8 @@ def compile_dataloader(
     train = FormattedVideoDataset(
         data_paths = train_cfg['datasets_path'],
         shared_transform = transform,
-        fpcs = train_cfg['fpcs']
+        fpcs = train_cfg['fpcs'],
+        frame_selection = train_cfg['interpolation_mode']
     )
 
     sampler, sampler_info = _build_action_train_sampler(
@@ -134,7 +135,8 @@ def compile_dataloader(
     logger.DEBUG({
         "dataset": {
             "data_paths": train_cfg['datasets_path'],
-            'fpcs': train_cfg['fpcs']
+            'fpcs': train_cfg['fpcs'],
+            'frame_selection': train_cfg['interpolation_mode']
         },
         "dataloader": {
             "batch_size": train_cfg['batch_size'],
