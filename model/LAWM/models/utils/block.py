@@ -40,7 +40,6 @@ class ACBlock(nn.Module):
                 qk_scale=qk_scale,
                 attn_drop=attn_drop,
                 use_sdpa=use_sdpa,
-                is_causal=is_causal,
                 grid_size=grid_size,
                 proj_drop=drop,
             )

@@ -347,8 +347,7 @@ class ActionTransformerPredictorGC(nn.Module):
         attn_mask[:ctx_a.size(1), :ctx_a.size(1)] = ctx_mask
         
         # -- Goal cannot attention to context but to itself only
-        attn_mask[:ctx_a.size(1), ctx_a.size(1):] = True
-        attn_mask[ctx_a.size(1):, ctx_a.size(1):] = True
+        attn_mask[:, ctx_a.size(1):] = True
         
         g_start = goal_pos * N_goal
         g_end   = (goal_pos + 1) * N_goal

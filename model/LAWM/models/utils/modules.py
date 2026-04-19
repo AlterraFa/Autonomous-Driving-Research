@@ -143,7 +143,6 @@ class ACRoPEAttention(nn.Module):
         attn_drop=0.0,
         proj_drop=0.0,
         use_sdpa=True,
-        is_causal=False,
         grid_size=16,
     ):
         super().__init__()
@@ -162,7 +161,6 @@ class ACRoPEAttention(nn.Module):
         self.h_dim = int(2 * ((head_dim // 3) // 2))
         self.w_dim = int(2 * ((head_dim // 3) // 2))
         self.grid_size = grid_size
-        self.is_causal = is_causal
 
     def _get_frame_pos(self, ids, H_patches, W_patches):
         tokens_per_frame = int(H_patches * W_patches)
@@ -268,11 +266,13 @@ class ACRoPEAttention(nn.Module):
         if attn_mask is not None or self.use_sdpa:
             with sdpa_kernel(_USABLE_BACKENDS, set_priority = True):
                 x = F.scaled_dot_product_attention(
-                    q, k, v, dropout_p=self.proj_drop_prob, is_causal=self.is_causal, attn_mask=attn_mask
+                    q, k, v, dropout_p=self.proj_drop_prob, attn_mask=attn_mask
                 )
                 attn = None
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale  # [B, num_heads, D, D]
+            if attn_mask is not None:
+                attn = attn.masked_fill(attn_mask == False, float('-inf'))
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
             x = attn @ v
