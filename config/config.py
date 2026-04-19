@@ -70,7 +70,7 @@ class UIConfig:
 class OffsetsConfig:
     front_offset: float = 1.5
     temporal_offset: tuple[float, ...] = (0.0, 0.15, 0.3, 0.45, 0.6, 0.75)
-    spatial_offset: tuple[int, ...] = (0, 1.5, 3, 4.5, 6, 7.5, 9, 10.5, 12, 13.5, 15, 16.5)
+    spatial_offset: tuple[float, ...] = (0.0, 1.5, 3.0, 4.5, 6.0, 7.5, 9.0, 10.5, 12.0, 13.5, 15.0, 16.5, 18.0, 19.5, 21.0, 22.5, 24.0)
     scout_offset_params: tuple[int, int, int] = (-18, 33, 2)
 
 
@@ -179,7 +179,7 @@ class ReplayRuntimeConfig:
     actor_settle_ticks: int = 30
     final_wait_s: float = 1.0
     start_at: float = 0.0
-    stop_at: float = -1.0
+    stop_at: float = -5.0
     position_idx: int = 0
 
 

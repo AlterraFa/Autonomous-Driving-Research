@@ -25,7 +25,6 @@ for LOG in "${LOGS[@]}"; do
     
     uv run main.py --sync --delay 0.025 --fps 70 --debug --timeout 30.0 \
     replay --replay-dir "$LOG" \
-    --collect-data model/Autonomous_Dataset/carla/LAWM2 --headless
-    
+    --collect-data model/Autonomous_Dataset/carla/LAWM2_V2 --headless    
     echo "FINISHED: $LOG"
 done

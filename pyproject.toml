@@ -37,6 +37,7 @@ dependencies = [
     "tensorflow>=2.20.0",
     "yapf>=0.43.0",
     "rich>=14.3.3",
+    "line-profiler>=5.0.2",
     "opencv-python>=4.13.0.92",
 ]
 
@@ -51,4 +52,5 @@ dev = [
 ]
 
 [tool.uv.sources]
+open3d = { path = "../../../../HyperStorage_ext4/Linux_Backup/Arch/Open3D/build/lib/python_package/pip_package/open3d-0.19.0+3550f4e-cp310-cp310-manylinux_2_42_x86_64.whl" }
 carla = { path = "dist/carla-0.9.16-cp310-cp310-manylinux_2_31_x86_64.whl" }

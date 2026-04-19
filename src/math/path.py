@@ -417,66 +417,6 @@ class PathHandler(NodeFinder):
         wp = np.asarray(wp)
         return wp, wp_rpy
 
-    # def _rot_merging(self, merged_wps: list, centerline_rpy: np.ndarray, offsets: list[float] = None, use_time: bool = False):
-    #     """
-    #     Updates yaw using local merged geometry with a decay profile similar
-    #     to location merging.
-
-    #     The heading target is derived from local tangents, not the final
-    #     endpoint. We then blend from centerline yaw toward tangent yaw using
-    #     the same quadratic decay used by `_loc_merging`.
-    #     """
-    #     if centerline_rpy is None:
-    #         return None
-
-    #     merged_rpy = np.copy(centerline_rpy)
-    #     wps = np.asarray(merged_wps)
-    #     n_points = len(wps)
-    #     if n_points < 2:
-    #         return merged_rpy
-
-    #     tangents = np.empty((n_points, 3), dtype=float)
-    #     tangents[:-1] = wps[1:, :3] - wps[:-1, :3]
-    #     tangents[-1] = wps[-1, :3] - wps[-2, :3]
-
-    #     if offsets is not None and len(offsets) == n_points:
-    #         offsets_np = np.asarray(offsets, dtype=float)
-    #         merge_target_dist = offsets_np[-1] + 1e-6
-    #         ratios = np.clip(offsets_np / merge_target_dist, 0.0, 1.0)
-    #         weights = (1.0 - ratios) ** 2
-    #     else:
-    #         # Fallback: full rotation blend when no offsets are provided.
-    #         weights = np.ones(n_points, dtype=float)
-
-    #     for i in range(n_points):
-    #         tangent = tangents[i]
-    #         norm = np.linalg.norm(tangent)
-    #         if norm > 1e-6:
-    #             yaw = np.degrees(np.arctan2(tangent[1], tangent[0]))
-    #             base_yaw = merged_rpy[i, 2]
-    #             delta = (yaw - base_yaw + 180.0) % 360.0 - 180.0
-    #             merged_rpy[i, 2] = base_yaw + float(weights[i]) * delta
-
-    #     # Temporal queries can clip several future timestamps to the same
-    #     # endpoint, so force the furthest point to use the last valid segment
-    #     # heading rather than a zero-decay centerline yaw.
-    #     if use_time and n_points >= 2:
-    #         tail_yaw = None
-    #         for j in range(n_points - 1, -1, -1):
-    #             tangent = tangents[j]
-    #             if np.linalg.norm(tangent) > 1e-6:
-    #                 tail_yaw = np.degrees(np.arctan2(tangent[1], tangent[0]))
-    #                 break
-    #         if tail_yaw is not None:
-    #             merged_rpy[-1, 2] = tail_yaw
-    #     elif n_points >= 2 and float(weights[-1]) < 1e-6:
-    #         # Spatial mode: keep endpoint orientation continuous with the
-    #         # previously merged yaw when decay reaches zero.
-    #         merged_rpy[-1, 2] = merged_rpy[-2, 2]
-
-    #     merged_rpy[:, 2] = (merged_rpy[:, 2] + 180.0) % 360.0 - 180.0
-    #     return merged_rpy
-
     def _rot_merging(self, merged_wps: list, centerline_rpy: np.ndarray, use_time: bool = False, **_):
         """
         Updates yaw to follow the merged trajectory tangent.

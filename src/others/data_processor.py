@@ -409,6 +409,14 @@ class ReplayHandler:
 
     def _maybe_save(self, authorized_saving, frame, local_loc_spatial, local_loc_temporal,
                     lat_err, uv_spatial, uv_temporal, turn_signal, vehicle_location, heading):
+
+        if len(frame) == 0:
+            self.local_loc_spatial = local_loc_spatial
+            self.local_loc_temporal = local_loc_spatial
+            self.uv_spatial = uv_spatial
+            self.uv_temporal = uv_temporal
+            
+        
         if not (self.data_collector and authorized_saving):
             return False
 
@@ -421,10 +429,10 @@ class ReplayHandler:
         return self.data_collector.maybe_save(
             {
                 "gt_data": {
-                    "midlane_wp": local_loc_spatial[:, :2],
-                    "midlane_wp_temporal": local_loc_temporal[:, :2],
-                    'pixel_wp': uv_spatial,
-                    'pixel_wp_temporal': uv_temporal,
+                    "midlane_wp": self.local_loc_spatial[:, :2],
+                    "midlane_wp_temporal": self.local_loc_temporal[:, :2],
+                    'pixel_wp': self.uv_spatial,
+                    'pixel_wp_temporal': self.uv_temporal,
                     "steer": steer,
                     "steer_angle": steer_angle,
                     "throttle": throttle,

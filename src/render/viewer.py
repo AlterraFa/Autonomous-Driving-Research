@@ -790,8 +790,9 @@ class ReplayViewer(Viewer):
             self.register_view_matrix("LOCAL_WP", local_wp[...], activate_first=False)
             self.choosen_view = [view for view in self.sensor_manager.camera_views if view.startswith("FIRST") or view.startswith("LOCAL")]
 
-            if self.replayer.data_collector: 
-                if self.frame_id % 4 == 0:
+            collect_freq = 4
+            if self.replayer.data_collector : 
+                if self.frame_id % collect_freq == 0:
                     self.view_index = self.i % len(self.choosen_view)
                     self.view_name = self.choosen_view[self.view_index]
                     self.change_view_all(self.view_name, show_info = False)
@@ -804,14 +805,15 @@ class ReplayViewer(Viewer):
                 view_name = getattr(self, "view_name", None)
                 if view_name and len(self.image_kwargs) < len(self.choosen_view):
                     authorize = False
-                    self.image_kwargs[view_name] = self.choosen_sensor.extract_data().copy()
+                    if view_name not in self.image_kwargs.keys():
+                        self.image_kwargs[view_name] = self.choosen_sensor.extract_data().copy()
                 elif len(self.image_kwargs) >= len(self.choosen_view):
                     authorize = True
                 
                 image_kwargs = {
                     key: value
                     for key, value in self.image_kwargs.items()
-                    if key != "FIRST_PERSON_1" and key != self.choosen_view[-1]
+                    if key != "FIRST_PERSON_1" and key != "FIRST_PERSON_2" and key != "FIRST_PERSON" and key != self.choosen_view[-1]
                 }
                 self.saved = self.replayer.step(**image_kwargs, authorized_saving = authorize)
             else: 

@@ -233,7 +233,22 @@ class Vehicle:
 
             if self.throttle < 0: self.throttle = 0
             if self.brake < 0: self.brake = 0
+            
+    def _update_lights(self):
+        """Checks the sun altitude and toggles headlights automatically."""
+        weather = self.world.get_weather()
+        current_lights = self.vehicle.get_light_state()
         
+        is_dark = weather.sun_altitude_angle <= 5.0
+        
+        lights_on = bool(current_lights & carla.VehicleLightState.HighBeam)
+
+        if is_dark:
+            new_state = carla.VehicleLightState.HighBeam
+            self.vehicle.set_light_state(carla.VehicleLightState(new_state))
+        else:
+            self.vehicle.set_light_state(carla.VehicleLightState.NONE)
+
     def apply_control(self, regulate_speed: bool = False, use_joystick: bool = False, using_model = False):
         self.regulate_speed = regulate_speed
 
@@ -242,6 +257,7 @@ class Vehicle:
         else: 
             self._joystick()
 
+        self._update_lights()
         if regulate_speed: self._regulate_speed_PID()
                 
         if using_model:
